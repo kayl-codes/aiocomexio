@@ -19,7 +19,7 @@ from .analysis import build_wiring
 from .render_geometry import _fit_to_bounding_box
 from .render_labels import resolve_element_label
 from .render_selfreset import detect_self_reset_cycles
-from .render_values import ItemsById
+from .render_values import ItemsById, _element_id_sort_key
 
 __all__ = ["render_flow_svg"]
 
@@ -180,7 +180,7 @@ def _find_back_edges(node_ids: set[str], outgoing: dict[str, dict[int, list[str]
     back_edges: set[tuple[str, str]] = set()
     # Fixed start order: which edge of a cycle counts as the back edge depends on where the DFS
     # enters it, so iterating the set directly made the layout vary with PYTHONHASHSEED.
-    for start in sorted(node_ids, key=_column_sort_key):
+    for start in sorted(node_ids, key=_element_id_sort_key):
         if start not in visited:
             _dfs_mark_back_edges(start, node_ids, outgoing, visited, back_edges)
     return back_edges
@@ -242,12 +242,8 @@ def _assign_layers(node_ids: set[str], preds: dict[str, set[str]]) -> dict[str, 
     return layer
 
 
-def _column_sort_key(eid: str) -> tuple[int, Any]:
-    return (0, int(eid)) if eid.isdigit() else (1, eid)
-
-
 def _edge_sort_key(edge: tuple[str, str]) -> tuple[tuple[int, Any], tuple[int, Any]]:
-    return _column_sort_key(edge[0]), _column_sort_key(edge[1])
+    return _element_id_sort_key(edge[0]), _element_id_sort_key(edge[1])
 
 
 def _push_sinks_to_bottom(layer_of: dict[str, int], succs_of: dict[str, set[str]]) -> None:
@@ -357,7 +353,7 @@ def _position_boxes(
     for eid, lvl in layer_of.items():
         by_row.setdefault(lvl, []).append(eid)
     for row_ids in by_row.values():
-        row_ids.sort(key=_column_sort_key)
+        row_ids.sort(key=_element_id_sort_key)
     _minimize_crossings(by_row, preds_of, succs_of)
 
     y = 0.0
@@ -560,7 +556,7 @@ def _diamond_points(box: dict[str, Any]) -> str:
 
 def _render_boxes_svg(boxes: dict[str, dict[str, Any]]) -> list[str]:
     parts: list[str] = []
-    for eid in sorted(boxes, key=_column_sort_key):
+    for eid in sorted(boxes, key=_element_id_sort_key):
         box = boxes[eid]
         box_class = "flow-box-cycle" if box["cycle"] else _SHAPE_CSS[box["shape"]]
         cx, cy = box["x"] + box["w"] / 2, box["y"] + box["h"] / 2
@@ -618,7 +614,7 @@ def _compute_source_remap(wired_ids: set[str], elements: dict[str, Any], incomin
     for dupes in groups.values():
         if len(dupes) < 2:
             continue
-        canonical = min(dupes, key=_column_sort_key)
+        canonical = min(dupes, key=_element_id_sort_key)
         remap |= {eid: canonical for eid in dupes if eid != canonical}
     return remap
 

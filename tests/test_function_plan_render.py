@@ -124,20 +124,47 @@ sys.stdout.buffer.write(svg.encode("utf-8"))
 """
 
 
-def test_render_flow_diagram_is_independent_of_hash_seed() -> None:
-    # Regression: box positions and edge order followed set iteration order, so the self-reset
-    # cycle's members swapped places between interpreter runs (seeds 1 and 2 differed).
+def _run_with_hash_seeds(script: str, *args: str) -> set[bytes]:
+    """stdout of `script` in fresh interpreters with different PYTHONHASHSEEDs (one per seed)."""
     outputs = set()
-    for seed in ("1", "2", "3"):
+    for seed in ("1", "2", "3", "4"):
         result = subprocess.run(
-            [sys.executable, "-c", _FLOW_SCRIPT, str(FIXTURES_DIR / "function_plan.json")],
+            [sys.executable, "-c", script, *args],
             env={**os.environ, "PYTHONHASHSEED": seed},
             capture_output=True,
             check=True,
         )
         outputs.add(result.stdout)
+    return outputs
 
-    assert len(outputs) == 1
+
+def test_render_flow_diagram_is_independent_of_hash_seed() -> None:
+    # Regression: box positions and edge order followed set iteration order, so the self-reset
+    # cycle's members swapped places between interpreter runs (seeds 1 and 2 differed).
+    assert len(_run_with_hash_seeds(_FLOW_SCRIPT, str(FIXTURES_DIR / "function_plan.json"))) == 1
+
+
+# One marker resetting itself through two on_pulse timers: two cycles from one marker.
+_TWO_TIMER_SCRIPT = """
+from aiocomexio.function_plan import detect_self_reset_cycles
+elements = {
+    "1": {"reference": {"type": 2, "ref_id": 1}},
+    "10": {"reference": {"type": 4, "ref_id": 1}},
+    "2": {"reference": {"type": 4, "ref_id": 1}},
+}
+wires = [("1", "10"), ("1", "2"), ("10", "1"), ("2", "1")]
+connections = {
+    str(i): {"input": {"FubElementId": int(src)}, "output": [{"FubElementId": int(dst)}]}
+    for i, (src, dst) in enumerate(wires)
+}
+catalog = {"time_modules": {"1": {"kind": "on_pulse"}}}
+print(detect_self_reset_cycles(elements, connections, catalog))
+"""
+
+
+def test_self_reset_cycles_are_in_element_id_order_for_any_hash_seed() -> None:
+    # Regression: timers were taken from a set, so the cycle order depended on PYTHONHASHSEED.
+    assert _run_with_hash_seeds(_TWO_TIMER_SCRIPT) == {b"[('1', '2'), ('1', '10')]" + os.linesep.encode()}
 
 
 def test_render_flow_empty_plan_does_not_crash() -> None:
