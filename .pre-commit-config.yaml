@@ -5,9 +5,9 @@ repos:
     hooks:
       # Snapshots are byte-exact test expectations — never "fix" them.
       - id: trailing-whitespace
-        exclude: ^tests/.*/__snapshots__/
+        exclude: ^tests/(.*/)?__snapshots__/
       - id: end-of-file-fixer
-        exclude: ^tests/.*/__snapshots__/
+        exclude: ^tests/(.*/)?__snapshots__/
       - id: check-yaml
       - id: check-json
       - id: check-toml
