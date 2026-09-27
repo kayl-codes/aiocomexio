@@ -1,8 +1,8 @@
 """Human-readable labels/tooltips for Function Plan elements.
 
 Split out of render.py (2026-08). `resolve_element_label` is the public
-entry point (imported by services.py and used by function_plan_render.render_plan_svg for
-title/hover text) — pure lookup/formatting, no SVG markup, no geometry.
+entry point (used by render.render_plan_svg for title/hover text, and by homeassistant-comexio's
+services for backup/search labels) — pure lookup/formatting, no SVG markup, no geometry.
 """
 
 from typing import Any

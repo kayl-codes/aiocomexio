@@ -6,7 +6,7 @@ those modules. No logic lives here — pure constants + the CSS block.
 """
 
 # Plan pixels per Studio SVG unit — plan coordinates are Studio units 1:1 (see
-# function_plan_render module docstring; stacked adjacent inputs are exactly one 15-unit
+# render module docstring; stacked adjacent inputs are exactly one 15-unit
 # row apart in backup data).
 _UNIT = 1.0
 _ROW_H = 15.0 * _UNIT  # port-row pitch — identical to the plan's own Y grid

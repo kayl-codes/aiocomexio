@@ -8,7 +8,7 @@ geo dicts produced here rather than the raw element/connection data.
 kind: "pill" (markers/IOs/WebIOs/time modules), "block" (fubBase with title bar + port
 rows), "const" (compact value pill), "comment" (borderless text). x/y/w/h are the
 element's FULL bounds like in the Studio DOM — the pin zones are part of the element, the
-body rect is inset _PIN_LEN left/right (see function_plan_render module docstring).
+body rect is inset _PIN_LEN left/right (see render module docstring).
 """
 
 from typing import Any

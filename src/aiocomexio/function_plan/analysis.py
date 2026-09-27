@@ -1,9 +1,8 @@
 """Manual, read-only "plan health check" for a Function Plan.
 
-Ports the ad-hoc analysis used to review the "EG"-prefixed plans by hand (2026-08) into the
-integration itself, so it's available from the Plan Preview card (function_plan_analyze
-service) instead of a one-off script. Explicit, on-demand only — never scheduled, never
-mutates the plan.
+Library form of the ad-hoc analysis used to review the "EG"-prefixed plans by hand (2026-08);
+homeassistant-comexio's Plan Preview card (function_plan_analyze service) calls it instead of a
+one-off script. Explicit, on-demand only — never scheduled, never mutates the plan.
 
 Findings fall into two kinds:
   - warnings (CONFLICT / MISSING_INPUT / DEAD_OUTPUT / UNUSED_BLOCK / SUSPICIOUS) — likely
@@ -12,7 +11,7 @@ Findings fall into two kinds:
     and only on blocks that have at least one other pin wired — a block with NO pin wired at
     all is reported once as UNUSED_BLOCK instead.
   - info (SELF_RESET) — the "virtueller Taster" self-reset idiom (see
-    function_plan_render_selfreset), surfaced positively so a reviewer sees it was
+    render_selfreset), surfaced positively so a reviewer sees it was
     recognized as deliberate instead of having to re-derive that themselves.
 """
 
@@ -231,7 +230,7 @@ def analyze_function_plan(
 ) -> list[dict[str, Any]]:
     """Findings for one plan: CONFLICT / MISSING_INPUT / DEAD_OUTPUT / UNUSED_BLOCK / SUSPICIOUS
     (warnings) plus SELF_RESET (info). Pure/read-only — takes the same elements/connections/catalog shape
-    as function_plan_render.render_plan_svg, so it works identically for a live plan or a
+    as render.render_plan_svg, so it works identically for a live plan or a
     stored backup snapshot. Each finding also carries "element_ids" (the plan FubElementIds it's
     about) alongside the human-readable "message" — the card uses these to jump to and highlight
     the offending element(s) instead of the reviewer having to search for them by hand.
