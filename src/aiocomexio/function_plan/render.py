@@ -34,7 +34,7 @@ actually wired — the expanded state ("Alles anzeigen") is not part of the plan
 usage is the only reliable signal, and Studio cannot hide a wired pin either.
 
 Implementation note (2026-08): the module used to hold all of the above in one file; it is
-now split by responsibility across several function_plan_render_*.py siblings so each stays
+now split by responsibility across several render_*.py siblings so each stays
 focused and reviewable:
   - render_constants.py — shared geometry/style constants + the CSS block
   - render_labels.py    — human-readable element labels/tooltips

@@ -583,7 +583,7 @@ def _wired_element_ids(elements: dict[str, Any], incoming: dict[str, Any], outgo
 # Types whose ref_id names a specific, persistent instance (a marker, IO or WebIO command)
 # rather than a catalog/type definition (block, time module: several elements can share their
 # ref_id while being independent instances with their own state — never safe to merge). Mirrors
-# function_plan_analysis._find_conflicts's own (1, 2, 10) set for the same reason.
+# analysis._find_conflicts's own (1, 2, 10) set for the same reason.
 _DEDUPE_REF_TYPES = (1, 2, 10)
 
 

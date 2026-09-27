@@ -198,7 +198,7 @@ def _render_one_node(parts: list[str], elem_id: str, geo: dict[str, Any], label:
     g_class = "node-g node-g-inactive" if geo.get("inactive") else "node-g"
     attrs = f' data-eid="{escape(elem_id)}"'
     # data-sid: the object id the card's search matches by default (quoted queries match
-    # data-label instead) — see function_plan_render_values.element_search_id.
+    # data-label instead) — see render_values.element_search_id.
     if search_id := geo.get("search_id"):
         attrs += f' data-sid="{escape(search_id)}"'
     if target := geo.get("target"):
