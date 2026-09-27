@@ -165,9 +165,12 @@ _ARROW_DEFS = (
 
 def _neighbors(node: str, outgoing: dict[str, dict[int, list[str]]], node_ids: set[str]) -> Iterator[str]:
     """Wired successor ids of one node — flattens outgoing's per-pin lists into one stream,
-    filtered to nodes actually in this diagram (extracted so the DFS below stays flat)."""
-    for dsts in outgoing.get(node, {}).values():
-        yield from (dst for dst in dsts if dst in node_ids)
+    filtered to nodes actually in this diagram (extracted so the DFS below stays flat). Pins and
+    destinations in element-id order, so the chosen back edges don't depend on the caller's
+    connection order."""
+    pins = outgoing.get(node, {})
+    for pin in sorted(pins):
+        yield from (dst for dst in sorted(pins[pin], key=_element_id_sort_key) if dst in node_ids)
 
 
 def _find_back_edges(node_ids: set[str], outgoing: dict[str, dict[int, list[str]]]) -> set[tuple[str, str]]:

@@ -73,11 +73,11 @@ def detect_self_reset_cycles(
     outgoing = _build_outgoing(connections)
 
     cycles: list[tuple[str, ...]] = []
-    for eid in elements:
+    # Element-id order throughout (not set or caller mapping order): keeps the cycle list, and
+    # thereby analyze_function_plan's SELF_RESET findings, identical for the same plan.
+    for eid in sorted(elements, key=_element_id_sort_key):
         if _element_type(elements, eid) != 2:  # marker
             continue
-        # Sorted, not set order: keeps the cycle list (and analyze_function_plan's findings)
-        # independent of PYTHONHASHSEED when a marker feeds several timers.
         for t_id in sorted(outgoing.get(eid, ()), key=_element_id_sort_key):
             if _is_on_pulse_timer(elements, time_modules, t_id):
                 cycles.extend(_cycles_via_timer(elements, fub_base, outgoing, eid, t_id))
