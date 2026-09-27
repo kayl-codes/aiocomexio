@@ -12,12 +12,15 @@ consume it as a PyPI dependency (prerequisite for a later Home Assistant Core su
 
 ## Status
 
-Scaffold only (v0.0.1): packaging, CI and quality gates are in place, no client code yet. Planned
-order of the move:
+Pre-alpha. Planned order of the move:
 
-1. Pure parsing/building logic (config parsing, Web-IO command builders, KNX DPT handling, function
-   plan diff/render/analysis) together with its unit tests, snapshots and synthetic fixtures from the
-   integration's `tests/unit/` and `tests/fixtures/comexio/`.
+1. Pure parsing/building logic together with its unit tests, snapshots and synthetic fixtures from
+   the integration's `tests/unit/` and `tests/fixtures/comexio/`.
+   - Done: `aiocomexio.function_plan` — SVG preview (`render_plan_svg`), signal-flow diagram
+     (`render_flow_svg`), read-only health check (`analyze_function_plan`) and label/search helpers.
+   - Open: config parsing, Web-IO command builders, KNX DPT handling (currently `ComexioAPI`
+     methods in the integration's `api.py`, need to become free functions first) and the function
+     plan backup diff.
 2. The client itself (RSA admin login, config scraping, Web-IO lifecycle, API writes), decoupled from
    Home Assistant: the caller injects an `aiohttp.ClientSession` (HA Core requirement — never create
    a session inside the library), CPU-bound work is not pushed to a HA executor, and nothing reads
