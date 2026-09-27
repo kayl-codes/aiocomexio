@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aiocomexio"
+version = "0.0.1"
+description = "Asyncio-native Python client for the Comexio IO-Server"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+authors = [{ name = "kayl-codes" }]
+keywords = ["comexio", "home-automation", "building-automation", "asyncio"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Home Automation",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+# Runtime dependencies (aiohttp, cryptography) are added together with the code that
+# needs them when api.py moves over from homeassistant-comexio.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/kayl-codes/aiocomexio"
+Issues = "https://github.com/kayl-codes/aiocomexio/issues"
+
+[project.optional-dependencies]
+dev = [
+    "bandit==1.9.4",
+    "mypy==2.3.1",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.6",  # keep in sync with the ruff-pre-commit rev in .pre-commit-config.yaml
+    "syrupy==6.1.1",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aiocomexio"]
+
+[tool.ruff]
+# Same as homeassistant-comexio, where this code originates.
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["ASYNC", "B", "C4", "E", "F", "I", "SIM", "UP", "W"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+files = ["src/aiocomexio", "tests"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+xfail_strict = true
+
+[tool.coverage.run]
+source = ["aiocomexio"]
+branch = true

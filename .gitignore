@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+/dist/
+/build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# GitHub Copilot & IDE spezifisch
+.github/copilot-instructions/
+.vscode/
+
+# Claude Code (personal/local settings — permission rules, personal paths etc.)
+.claude/
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+
+# Local virtual environments
+.venv/
+venv/
+
+# Local secrets (e.g. examples/verify_live.py credentials, .env.sonar token)
+.env
+.env.*

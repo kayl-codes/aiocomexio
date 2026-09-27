@@ -1,0 +1,44 @@
+repos:
+  # Whitespace and file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Snapshots are byte-exact test expectations — never "fix" them.
+      - id: trailing-whitespace
+        exclude: ^tests/.*/__snapshots__/
+      - id: end-of-file-fixer
+        exclude: ^tests/.*/__snapshots__/
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+
+  # Ruff linter and formatter
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.6  # keep in sync with ruff==<version> in pyproject.toml [dev]
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # Keep uv.lock in sync with pyproject.toml (OSV-Scanner reads the lock, not pyproject.toml)
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.28  # keep in sync with uv==<version> in .github/workflows/ci.yml
+    hooks:
+      - id: uv-lock
+
+  - repo: local
+    hooks:
+      # Needs `pip install -e ".[dev]"` once.
+      - id: mypy
+        name: mypy (strict)
+        entry: python -m mypy
+        language: system
+        files: ^(src/.*\.py|tests/.*\.py|pyproject\.toml)$
+        pass_filenames: false
+
+      - id: pytest
+        name: Tests (pytest)
+        entry: python -m pytest -q
+        language: system
+        files: ^(src/.*|tests/.*|pyproject\.toml)$
+        pass_filenames: false
