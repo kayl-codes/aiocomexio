@@ -1,5 +1,8 @@
 """Function plan SVG preview rendering and the read-only plan health check."""
 
+import os
+import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -13,7 +16,7 @@ from aiocomexio.function_plan import (
     render_flow_svg,
     render_plan_svg,
 )
-from tests.common import load_json_fixture
+from tests.common import FIXTURES_DIR, load_json_fixture
 
 
 class SvgSnapshotExtension(SingleFileSnapshotExtension):
@@ -86,8 +89,7 @@ def test_analyze_function_plan(plan: dict[str, Any], snapshot: SnapshotAssertion
     assert findings == snapshot
 
 
-def test_render_flow_diagram(plan: dict[str, Any]) -> None:
-    # No snapshot yet: the box/edge order still depends on set iteration (PYTHONHASHSEED).
+def test_render_flow_diagram(plan: dict[str, Any], svg_snapshot: SnapshotAssertion) -> None:
     svg, skipped = render_flow_svg(
         plan["elements"],
         plan["connections"],
@@ -106,6 +108,36 @@ def test_render_flow_diagram(plan: dict[str, Any]) -> None:
     # Both members of the marker/timer self-reset cycle are flagged as such.
     assert "⟲ M4 Klingel [TRIG]</text>" in svg
     assert "⟲ T1 Taster Reset</text>" in svg
+    assert svg == svg_snapshot
+
+
+# Renders the fixture's flow diagram in a fresh interpreter, so PYTHONHASHSEED takes effect.
+_FLOW_SCRIPT = """
+import json, sys
+from aiocomexio.function_plan import render_flow_svg
+plan = json.loads(open(sys.argv[1], encoding="utf-8").read())
+svg, _ = render_flow_svg(
+    plan["elements"], plan["connections"], plan["catalog"],
+    plan["markers_by_id"], plan["webio_by_id"], plan["ios_by_id"], title="T",
+)
+sys.stdout.buffer.write(svg.encode("utf-8"))
+"""
+
+
+def test_render_flow_diagram_is_independent_of_hash_seed() -> None:
+    # Regression: box positions and edge order followed set iteration order, so the self-reset
+    # cycle's members swapped places between interpreter runs (seeds 1 and 2 differed).
+    outputs = set()
+    for seed in ("1", "2", "3"):
+        result = subprocess.run(
+            [sys.executable, "-c", _FLOW_SCRIPT, str(FIXTURES_DIR / "function_plan.json")],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            check=True,
+        )
+        outputs.add(result.stdout)
+
+    assert len(outputs) == 1
 
 
 def test_render_flow_empty_plan_does_not_crash() -> None:

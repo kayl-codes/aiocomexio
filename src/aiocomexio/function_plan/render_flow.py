@@ -178,7 +178,9 @@ def _find_back_edges(node_ids: set[str], outgoing: dict[str, dict[int, list[str]
     the row instead of a left-to-right one (see _back_edge_path)."""
     visited: set[str] = set()
     back_edges: set[tuple[str, str]] = set()
-    for start in node_ids:
+    # Fixed start order: which edge of a cycle counts as the back edge depends on where the DFS
+    # enters it, so iterating the set directly made the layout vary with PYTHONHASHSEED.
+    for start in sorted(node_ids, key=_column_sort_key):
         if start not in visited:
             _dfs_mark_back_edges(start, node_ids, outgoing, visited, back_edges)
     return back_edges
@@ -242,6 +244,10 @@ def _assign_layers(node_ids: set[str], preds: dict[str, set[str]]) -> dict[str, 
 
 def _column_sort_key(eid: str) -> tuple[int, Any]:
     return (0, int(eid)) if eid.isdigit() else (1, eid)
+
+
+def _edge_sort_key(edge: tuple[str, str]) -> tuple[tuple[int, Any], tuple[int, Any]]:
+    return _column_sort_key(edge[0]), _column_sort_key(edge[1])
 
 
 def _push_sinks_to_bottom(layer_of: dict[str, int], succs_of: dict[str, set[str]]) -> None:
@@ -489,7 +495,8 @@ def _render_edges_svg(edges: set[tuple[str, str]], boxes: dict[str, dict[str, An
     data-net id so a frontend card can hover-highlight the whole thing (mirrors the main plan
     preview's own net-hover, see comexio-plan-card.js)."""
     by_src: dict[str, list[str]] = {}
-    for src_id, dst_id in edges:
+    # Sorted, not set order: keeps path order and data-net ids stable across runs.
+    for src_id, dst_id in sorted(edges, key=_edge_sort_key):
         by_src.setdefault(src_id, []).append(dst_id)
 
     parts: list[str] = []
