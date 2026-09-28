@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aiocomexio"
-version = "0.0.1"
+version = "0.1.0"
 description = "Asyncio-native Python client for the Comexio IO-Server"
 readme = "README.md"
 license = "MIT"
@@ -13,7 +13,7 @@ requires-python = ">=3.13"
 authors = [{ name = "kayl-codes" }]
 keywords = ["comexio", "home-automation", "building-automation", "asyncio"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Framework :: AsyncIO",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3.13",
