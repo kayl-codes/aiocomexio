@@ -943,6 +943,9 @@ class ComexioClient:
         Comexio refuses the element.
         """
         _require_ints(ref_id=ref_id, element_type=element_type)
+        _require(
+            "a mapping or None", lambda value: value is None or isinstance(value, Mapping), {"connection": connection}
+        )
         form = {"name": "", "ref_id": str(ref_id), "type": str(element_type), "id": "undefined"}
         if connection is not None:
             form["connection"] = json.dumps(connection, separators=(",", ":"))
