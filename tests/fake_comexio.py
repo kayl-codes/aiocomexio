@@ -3,6 +3,7 @@
 import base64
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import web
@@ -27,7 +28,10 @@ LOAD_ALL_ELEMENTS_PATH = "/admin/function_function_module/loadallelements"
 BUS_WORKLOAD_PATH = "/admin/in_output/inoutputinfo"
 EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
 
-_LOGIN_PAGE = "<html><body><form>Anmeldung</form></body></html>"
+LOGIN_PAGE = (
+    '<html><body><form action="/admin/home/login">Anmeldung'
+    '<input name="loginsubmit" id="loginsubmit" type="submit" value="Anmelden"></form></body></html>'
+)
 _ADMIN_PAGE = """<html><body><script>
 var $ioTypes = {"1": {"binary": true, "min": 0, "max": 1, "unit": ""}};
 var $IOInputTypes = {"1": {"input": true}};
@@ -37,6 +41,22 @@ Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 # One key for the whole test run: generating a 2048-bit key per test would slow the suite down.
 _RSA_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@dataclass(frozen=True)
+class Received:
+    """One request as the fake server saw it: query and form fields, Authorization / Referer / XHR headers."""
+
+    method: str
+    path: str
+    query: dict[str, str]
+    form: dict[str, Any]
+    authorization: str | None
+    referer: str | None
+    xhr: bool
+
+    def to(self, method: str, path: str) -> bool:
+        return (self.method, self.path) == (method, path)
 
 
 def json_response(payload: Any, status: int = 200) -> web.Response:
@@ -51,6 +71,7 @@ class FakeComexio:
         self._key = _RSA_KEY
         self.logins: list[dict[str, str]] = []
         self.requests: list[tuple[str, str]] = []
+        self.received: list[Received] = []
         self.decrypted_blocks: list[str] = []
         self.routes: dict[tuple[str, str], Handler] = {
             ("POST", LOGIN_PATH): self._login,
@@ -75,6 +96,10 @@ class FakeComexio:
     def serve_text(self, method: str, path: str, text: str, status: int = 200) -> None:
         self.serve(method, path, self._page(text, status))
 
+    def received_at(self, method: str, path: str) -> list[Received]:
+        """Every request the server saw for method + path, oldest first."""
+        return [request for request in self.received if request.to(method, path)]
+
     def _app(self) -> web.Application:
         app = web.Application()
         app.router.add_route("*", "/{tail:.*}", self._dispatch)
@@ -82,6 +107,18 @@ class FakeComexio:
 
     async def _dispatch(self, request: web.Request) -> web.StreamResponse:
         self.requests.append((request.method, request.path))
+        form = dict(await request.post()) if request.method == "POST" else {}
+        self.received.append(
+            Received(
+                request.method,
+                request.path,
+                dict(request.query),
+                form,
+                request.headers.get("Authorization"),
+                request.headers.get("Referer"),
+                request.headers.get("X-Requested-With") == "XMLHttpRequest",
+            )
+        )
         handler = self.routes.get((request.method, request.path))
         if handler is None:
             raise web.HTTPNotFound
@@ -118,4 +155,4 @@ class FakeComexio:
 
     async def _admin(self, request: web.Request) -> web.Response:
         logged_in = request.cookies.get(SESSION_COOKIE) == SESSION_VALUE
-        return web.Response(text=_ADMIN_PAGE if logged_in else _LOGIN_PAGE, content_type="text/html")
+        return web.Response(text=_ADMIN_PAGE if logged_in else LOGIN_PAGE, content_type="text/html")
