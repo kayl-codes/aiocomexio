@@ -355,12 +355,13 @@ class ComexioClient:
     async def load_function_plan(self, fub_id: int, *, strict: bool = False) -> dict[str, Any]:
         """Elements and connections of one plan, both normalized to id-keyed dicts.
 
-        strict=True raises ComexioDataError for a payload without a real elements collection
-        instead of returning it as an empty plan — for callers whose next step is irreversible.
+        strict=True raises ComexioDataError for a payload without a real elements or connections
+        collection instead of returning it as an empty one — for callers whose next step is
+        irreversible, such as run_function_plan, which would wipe what the plan was missing.
         """
         data = await self._load_plan_payload(fub_id)
-        if strict and not plan_payload_has_elements(data):
-            raise ComexioDataError(f"Function plan {fub_id} payload has no elements collection")
+        if strict:
+            _require_plan_collections(data, fub_id)
         plan = normalize_plan_payload(data)
         _LOGGER.debug(
             "Loaded function plan %s: %d elements, %d connections",
@@ -377,8 +378,9 @@ class ComexioClient:
 
         Comexio serializes requests server-side, so one bulk call beats N per-plan calls. A
         malformed entry is skipped with a warning; strict=True also skips entries without a real
-        elements collection (see load_function_plan). A requested plan the server leaves out is
-        absent from the result.
+        elements collection. Unlike load_function_plan(strict=True) it does not check connections,
+        so a result here is no source for run_function_plan. A requested plan the server leaves
+        out is absent from the result.
         """
         wanted = None if fub_ids is None else set(fub_ids)
         if wanted is not None and not wanted:
@@ -1115,10 +1117,7 @@ class ComexioClient:
     async def _current_run_payload(self, fub_id: int) -> dict[str, Any]:
         """run_fup data for a plan's current state; ComexioDataError for anything short of a whole plan."""
         data = await self._load_plan_payload(fub_id)
-        # normalize_plan_payload turns a missing collection into {} — fine to display, fatal to run.
-        missing = [key for key in ("elements", "connections") if not isinstance(data.get(key), (dict, list))]
-        if missing:
-            raise ComexioDataError(f"Function plan {fub_id} payload has no {' / '.join(missing)} collection")
+        _require_plan_collections(data, fub_id)
         try:
             return build_run_payload(normalize_plan_payload(data))
         except ValueError as err:
@@ -1293,6 +1292,14 @@ def _plan_form(name: str, comment: str, paper_format: str, orientation: str, dpi
 def _is_int(value: Any) -> TypeIs[int]:
     """True for an int that is not a bool (range membership lets True and 2.0 through)."""
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _require_plan_collections(data: dict[str, Any], fub_id: int) -> None:
+    """ComexioDataError unless a loadelements answer carries real elements and connections collections."""
+    # normalize_plan_payload turns a missing collection into {} — fine to display, fatal to run.
+    missing = [key for key in ("elements", "connections") if not isinstance(data.get(key), (dict, list))]
+    if missing:
+        raise ComexioDataError(f"Function plan {fub_id} payload has no {' / '.join(missing)} collection")
 
 
 def _plan_id_by_name(fubs: Any, name: str, *, what: str) -> int:
