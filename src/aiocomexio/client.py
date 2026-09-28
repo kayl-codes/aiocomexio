@@ -8,10 +8,11 @@ either returns real data or raises a ComexioError subclass.
 import base64
 import json
 import logging
+import math
 import re
 import secrets
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -861,6 +862,8 @@ class ComexioClient:
         (default off, Comexio's own default for new plans). Values as for create_function_plan.
         Raises ComexioRequestRejectedError if Comexio does not confirm the save.
         """
+        _require_ints(fub_id=fub_id, position=position)
+        _require_bools(active=active, reset_outputs_on_stop=reset_outputs_on_stop)
         what = f"Saving settings of function plan {fub_id}"
         form = _plan_form(name, comment, paper_format, orientation, dpi)
         form.update(
@@ -879,6 +882,7 @@ class ComexioClient:
 
         Raises ComexioRequestRejectedError if Comexio does not confirm the deletion.
         """
+        _require_ints(fub_id=fub_id)
         what = f"Deleting function plan {fub_id}"
         location = await self._request_redirect(
             "GET",
@@ -899,6 +903,7 @@ class ComexioClient:
         broken answer never runs as an empty plan (ComexioDataError). Raises
         ComexioRequestRejectedError if Comexio refuses to run it (e.g. an output used twice).
         """
+        _require_ints(fub_id=fub_id)
         if plan is None:
             payload = await self._current_run_payload(fub_id)
         else:
@@ -912,6 +917,7 @@ class ComexioClient:
 
         Raises ComexioRequestRejectedError if Comexio does not confirm the stop.
         """
+        _require_ints(fub_id=fub_id)
         await self._plan_state_request(_PLAN_STOP_PATH, {"id": str(fub_id)}, what=f"Stopping function plan {fub_id}")
 
     async def add_function_plan_element(
@@ -935,6 +941,7 @@ class ComexioClient:
         Comments and constants have their own methods. Raises ComexioRequestRejectedError if
         Comexio refuses the element.
         """
+        _require_ints(ref_id=ref_id, element_type=element_type)
         form = {"name": "", "ref_id": str(ref_id), "type": str(element_type), "id": "undefined"}
         if connection is not None:
             form["connection"] = json.dumps(connection, separators=(",", ":"))
@@ -944,6 +951,7 @@ class ComexioClient:
 
     async def add_function_plan_constant(self, fub_id: int, value: str, *, x: float, y: float) -> int:
         """Place a constant block with the given value on a plan; returns its element id."""
+        _require_strs(value=value)
         form = {"name": value, "ref_id": _CONSTANT_REF_ID, "type": str(_ELEMENT_TYPE_CONSTANT), "id": "undefined"}
         return await self._add_plan_element(fub_id, form, x, y, what=f"Placing a constant on function plan {fub_id}")
 
@@ -952,6 +960,7 @@ class ComexioClient:
 
         Comexio places it at its default width; save_function_plan_comment sets another one.
         """
+        _require_strs(text=text)
         form = {"name": text, "ref_id": _COMMENT_REF_ID, "type": str(_ELEMENT_TYPE_COMMENT), "id": "0"}
         return await self._add_plan_element(fub_id, form, x, y, what=f"Placing a comment on function plan {fub_id}")
 
@@ -960,6 +969,8 @@ class ComexioClient:
 
         Raises ComexioRequestRejectedError if Comexio does not confirm the save.
         """
+        _require_ints(element_id=element_id)
+        _require_strs(text=text)
         if not _is_int(width) or width not in _COMMENT_WIDTHS:
             raise ValueError(f"Comment width must be 1-5, not {width}")
         what = f"Saving comment element {element_id}"
@@ -996,8 +1007,15 @@ class ComexioClient:
         """
         if value_type not in _CONNECTION_VALUE_TYPES:
             raise ValueError(f"value_type must be 'binary' or 'analog', not {value_type!r}")
+        sinks = tuple(sinks)  # a generator would be used up by the checks below
         if not sinks:
             raise ValueError("A connection needs at least one sink")
+        _require_ints(fub_id=fub_id, source=source, source_pos=source_pos)
+        if connection_id is not None:
+            _require_ints(connection_id=connection_id)
+        _require_bools(source_inverted=source_inverted)
+        for sink in sinks:
+            _check_sink(sink)
         connection = {
             _ID_KEY: "new" if connection_id is None else str(connection_id),
             "fub_id": fub_id,
@@ -1017,8 +1035,11 @@ class ComexioClient:
 
         Raises ComexioRequestRejectedError if Comexio does not confirm the move.
         """
+        positions = tuple(positions)
         if not positions:
             raise ValueError("No element positions given")
+        for position in positions:
+            _check_position(position)
         what = f"Moving {len(positions)} function plan element(s)"
         moves = {str(i): {"x": x, "y": y, _ID_KEY: element_id} for i, (element_id, x, y) in enumerate(positions)}
         form = {"Json": json.dumps(moves, separators=(",", ":")), "timestamp": _js_timestamp()}
@@ -1032,10 +1053,12 @@ class ComexioClient:
         The objects behind them (markers, IOs, ...) stay. Raises ComexioRequestRejectedError if
         Comexio does not confirm the deletion.
         """
-        if isinstance(element_ids, (str, bytes)):
-            raise TypeError("element_ids must be a sequence of ids, not a string")
+        if isinstance(element_ids, (str, bytes, bytearray, memoryview, Mapping)):
+            raise TypeError(f"element_ids must be a sequence of ids, not {type(element_ids).__name__}")
+        element_ids = tuple(element_ids)
         if not element_ids:
             raise ValueError("No element ids given")
+        _require_ints(**{f"element_ids[{i}]": element_id for i, element_id in enumerate(element_ids)})
         what = f"Deleting function plan elements {list(element_ids)}"
         form = {"Json": json.dumps([str(element_id) for element_id in element_ids]), "timestamp": _js_timestamp()}
         result = await self._plan_json(_PLAN_DELETE_ELEMENTS_PATH, form, what=what)
@@ -1140,6 +1163,8 @@ class ComexioClient:
 
     async def _add_plan_element(self, fub_id: int, form: dict[str, str], x: float, y: float, *, what: str) -> int:
         """add_element with the fields every element shares; returns the new element id."""
+        _require_ints(fub_id=fub_id)
+        _require_numbers(x=x, y=y)
         form.update({"fubid": str(fub_id), "x": str(x), "y": str(y), "timestamp": _js_timestamp()})
         return _answer_id(await self._plan_json(_PLAN_ADD_ELEMENT_PATH, form, what=what), what)
 
@@ -1265,8 +1290,7 @@ def _expect_object(data: Any, what: str) -> dict[str, Any]:
 
 def _plan_form(name: str, comment: str, paper_format: str, orientation: str, dpi: int) -> dict[str, str]:
     """The save_fub fields create and update share; ValueError for a value Comexio does not offer."""
-    if not isinstance(paper_format, str) or not isinstance(orientation, str):
-        raise TypeError(f"paper_format and orientation must be strings, not {paper_format!r} / {orientation!r}")
+    _require_strs(name=name, comment=comment, paper_format=paper_format, orientation=orientation)
     try:
         paper_id = _PLAN_PAPER_IDS[paper_format.upper()]
     except KeyError:
@@ -1300,6 +1324,57 @@ def _require_plan_collections(data: dict[str, Any], fub_id: int) -> None:
     missing = [key for key in ("elements", "connections") if not isinstance(data.get(key), (dict, list))]
     if missing:
         raise ComexioDataError(f"Function plan {fub_id} payload has no {' / '.join(missing)} collection")
+
+
+def _require(kind: str, accept: Callable[[Any], bool], values: dict[str, Any]) -> None:
+    """TypeError naming every value accept refuses."""
+    wrong = [f"{name}={value!r}" for name, value in values.items() if not accept(value)]
+    if wrong:
+        raise TypeError(f"Expected {kind}: {', '.join(wrong)}")
+
+
+def _require_ints(**values: Any) -> None:
+    """TypeError unless every value is an int (not a bool).
+
+    Ids and pins go out as strings: 4.7 or True would reach Comexio as "4.7" / "True" instead of
+    failing here, and a string id is no id either.
+    """
+    _require("integers", _is_int, values)
+
+
+def _require_numbers(**values: Any) -> None:
+    """TypeError unless every value is a finite int or float (not a bool) — canvas coordinates."""
+    _require(
+        "finite numbers", lambda value: _is_int(value) or (isinstance(value, float) and math.isfinite(value)), values
+    )
+
+
+def _require_strs(**values: Any) -> None:
+    """TypeError unless every value is a str — names, comments and texts go out as they are."""
+    _require("strings", lambda value: isinstance(value, str), values)
+
+
+def _require_bools(**values: Any) -> None:
+    """TypeError unless every value is a bool — Comexio's inverted flags."""
+    _require("booleans", lambda value: isinstance(value, bool), values)
+
+
+def _check_sink(sink: Any) -> None:
+    """TypeError unless sink is an (element id, input pin, inverted) tuple."""
+    if not isinstance(sink, tuple) or len(sink) != 3:
+        raise TypeError(f"A sink must be an (element id, pin, inverted) tuple, not {sink!r}")
+    element, pin, inverted = sink
+    _require_ints(sink_element=element, sink_pin=pin)
+    _require_bools(sink_inverted=inverted)
+
+
+def _check_position(position: Any) -> None:
+    """TypeError unless position is an (element id, x, y) tuple."""
+    if not isinstance(position, tuple) or len(position) != 3:
+        raise TypeError(f"A position must be an (element id, x, y) tuple, not {position!r}")
+    element_id, x, y = position
+    _require_ints(element_id=element_id)
+    _require_numbers(x=x, y=y)
 
 
 def _plan_id_by_name(fubs: Any, name: str, *, what: str) -> int:

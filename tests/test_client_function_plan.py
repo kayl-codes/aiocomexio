@@ -139,11 +139,11 @@ async def test_create_function_plan_invalid_settings_raise_before_any_request(
     assert comexio.received_at("POST", UNIQUE_CHECK_PATH) == []
 
 
-@pytest.mark.parametrize("kwargs", [{"paper_format": None}, {"orientation": 0}])
+@pytest.mark.parametrize("kwargs", [{"paper_format": None}, {"orientation": 0}, {"comment": None}])
 async def test_create_function_plan_non_string_settings_raise_type_error_before_any_request(
     logged_in: ComexioClient, comexio: FakeComexio, kwargs: dict[str, Any]
 ) -> None:
-    with pytest.raises(TypeError, match="must be strings"):
+    with pytest.raises(TypeError, match="Expected strings"):
         await logged_in.create_function_plan("Neu", **kwargs)
     assert comexio.received_at("POST", UNIQUE_CHECK_PATH) == []
 
@@ -581,7 +581,76 @@ async def test_move_function_plan_elements_unconfirmed_is_rejected(
         await logged_in.move_function_plan_elements([(55, 0, 0)])
 
 
-@pytest.mark.parametrize("ids", ["42", b"42"])
+_SETTINGS = {"name": "P", "comment": "", "active": False, "paper_format": "A4", "orientation": "landscape", "dpi": 90}
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.update_function_plan(4.0, position=0, **_SETTINGS),
+        lambda c: c.update_function_plan(4, position=True, **_SETTINGS),
+        lambda c: c.update_function_plan(4, position=0, **{**_SETTINGS, "active": "false"}),
+        lambda c: c.update_function_plan(4, position=0, reset_outputs_on_stop=1, **_SETTINGS),
+        lambda c: c.update_function_plan(4, position=0, **{**_SETTINGS, "name": None}),
+        lambda c: c.delete_function_plan("4"),
+        lambda c: c.run_function_plan(True),
+        lambda c: c.stop_function_plan(None),
+        lambda c: c.add_function_plan_element(4, 271.5, 2, x=0, y=0),
+        lambda c: c.add_function_plan_element(4, 271, "2", x=0, y=0),
+        lambda c: c.add_function_plan_constant(4.7, "1", x=0, y=0),
+        lambda c: c.add_function_plan_comment(4, "t", x="10", y=0),
+        lambda c: c.add_function_plan_comment(4, "t", x=0, y=True),
+        lambda c: c.add_function_plan_comment(4, "t", x=float("nan"), y=0),
+        lambda c: c.add_function_plan_comment(4, None, x=0, y=0),
+        lambda c: c.add_function_plan_constant(4, True, x=0, y=0),
+        lambda c: c.save_function_plan_comment(12, None, width=2),
+        lambda c: c.save_function_plan_comment("12", "t", width=2),
+        lambda c: c.save_function_plan_connection(4, 4.7, [(56, 0, False)], value_type="binary"),
+        lambda c: c.save_function_plan_connection(4, 55, [(56, 0, False)], value_type="binary", source_pos=None),
+        lambda c: c.save_function_plan_connection(4, 55, [(56, 0, False)], value_type="binary", connection_id="31"),
+        lambda c: c.save_function_plan_connection(4, 55, [(56, 0, False)], value_type="binary", source_inverted=1),
+        lambda c: c.save_function_plan_connection(4, 55, ["560"], value_type="binary"),
+        lambda c: c.save_function_plan_connection(4, 55, [(56, 0)], value_type="binary"),
+        lambda c: c.save_function_plan_connection(4, 55, [(True, 0, False)], value_type="binary"),
+        lambda c: c.save_function_plan_connection(4, 55, [(56, 0, 0)], value_type="binary"),
+        lambda c: c.move_function_plan_elements([(55, 10, 20), (56.0, 10, 20)]),
+        lambda c: c.move_function_plan_elements([(55, "10", 20)]),
+        lambda c: c.move_function_plan_elements([[55, 10, 20]]),
+        lambda c: c.move_function_plan_elements([(55, 10, float("inf"))]),
+        lambda c: c.move_function_plan_elements([(55, 10, float("nan"))]),
+        lambda c: c.delete_function_plan_elements([55, 4.7]),
+        lambda c: c.delete_function_plan_elements([True]),
+    ],
+)
+async def test_write_primitives_refuse_mistyped_ids_before_any_request(
+    logged_in: ComexioClient, comexio: FakeComexio, call: PlanCall
+) -> None:
+    # A float or bool id would go out as "4.7" / "True" instead of failing on the caller's side.
+    sent = len(comexio.received)
+
+    with pytest.raises(TypeError):
+        await call(logged_in)
+    assert len(comexio.received) == sent
+
+
+async def test_generator_arguments_are_not_used_up_by_the_checks(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # Validating a generator consumes it; an empty output would strip every wire of the pin.
+    comexio.serve_json("POST", SAVE_CONNECTION_PATH, {"id": "31"})
+    comexio.serve_json("POST", DELETE_ELEMENTS_PATH, {"delete": True})
+
+    sinks = ((sink, 0, False) for sink in (56, 57))
+    await logged_in.save_function_plan_connection(4, 55, sinks, value_type="binary")  # type: ignore[arg-type]
+    await logged_in.delete_function_plan_elements(element_id for element_id in (55, 56))  # type: ignore[arg-type]
+
+    (connection,) = comexio.received_at("POST", SAVE_CONNECTION_PATH)
+    assert list(json.loads(connection.form["JSON"])["output"]) == ["0", "1"]
+    (deletion,) = comexio.received_at("POST", DELETE_ELEMENTS_PATH)
+    assert json.loads(deletion.form["Json"]) == ["55", "56"]
+
+
+@pytest.mark.parametrize("ids", ["42", b"42", bytearray(b"42"), memoryview(b"42"), {55: None}])
 async def test_delete_function_plan_elements_refuses_a_string(
     logged_in: ComexioClient, comexio: FakeComexio, ids: Any
 ) -> None:
