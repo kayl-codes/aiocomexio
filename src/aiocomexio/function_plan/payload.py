@@ -58,8 +58,11 @@ def build_run_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
 
     plan is a plan as load_function_plan returns it (connection outputs as a list). Both
     collections must be present: a plan without them would run as an empty plan and wipe the
-    live one, so a missing or malformed collection raises ValueError instead.
+    live one, so a missing or malformed collection raises ValueError instead. A plan that is no
+    mapping at all raises TypeError.
     """
+    if not isinstance(plan, Mapping):
+        raise TypeError(f"A plan to run must be a mapping, not {type(plan).__name__}")
     elements, connections = plan.get("elements"), plan.get("connections")
     if not isinstance(elements, Mapping) or not isinstance(connections, Mapping):
         raise ValueError("A plan to run needs its elements and connections as objects")

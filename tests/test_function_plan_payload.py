@@ -102,3 +102,9 @@ def test_build_run_payload_turns_output_lists_into_indexed_objects() -> None:
 def test_build_run_payload_never_turns_a_broken_plan_into_an_empty_one(plan: dict[str, Any], match: str) -> None:
     with pytest.raises(ValueError, match=match):
         build_run_payload(plan)
+
+
+@pytest.mark.parametrize("plan", [None, [], "plan"])
+def test_build_run_payload_refuses_a_non_mapping(plan: Any) -> None:
+    with pytest.raises(TypeError, match="must be a mapping"):
+        build_run_payload(plan)
