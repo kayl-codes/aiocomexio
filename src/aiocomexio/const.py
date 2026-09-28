@@ -71,3 +71,28 @@ MARKER_TRIGGER_SUFFIXES = ("[TRIG]", "[TP]")
 
 # Auto-created KNX write-path bridge markers are titled "<KNX title> [K<k_id>]".
 MARKER_KNX_BRIDGE_SUFFIX_RE = re.compile(r"\[K\d+\]$")
+
+# Analog markers have no configurable value range on the Comexio side, so their Web-IO
+# datapoints must not clamp. Comexio's Web-IO push has two server-side bugs (reproduced
+# 2026-08-30): (1) json_stringify() rounds numeric values to 6 significant digits, and
+# (2) whenever a command's own Min/Max sit at/near the signed 16-bit boundary (~±32767/32768),
+# EVERY pushed value is silently clamped to Max. ±500,000 dodges both: it clears the int16
+# danger zone by a wide margin and never exceeds 6 significant digits.
+WEBIO_MARKER_ANALOG_MIN = -500_000
+WEBIO_MARKER_ANALOG_MAX = 500_000
+
+# Any Web-IO range whose Min or Max falls in this band gets widened to
+# WEBIO_MARKER_ANALOG_MIN/MAX (see bug (2) above).
+WEBIO_INT16_DANGER_ZONE = (30_000, 40_000)
+
+# KNX "API loopback": a second Web-IO command per K-element whose Lua script GETs the Comexio
+# server's own /api/?action=set endpoint to write the K-element's bridge marker directly,
+# closing the loop entirely inside Comexio. One class + one device per server; every
+# K-element gets one command in it.
+WEBIO_CLASS_NAME_KNX_LOOPBACK = "ComexioAPI"
+WEBIO_DEVICE_NAME_KNX_LOOPBACK = "Comexio API - KNX Loopback"
+
+
+def knx_loopback_command_name(k_id: int, marker_id: int) -> str:
+    """Web-IO command name for one K-element's API-loopback command, e.g. "KNX K1 to M300"."""
+    return f"KNX K{k_id} to M{marker_id}"
