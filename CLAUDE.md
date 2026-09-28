@@ -24,7 +24,9 @@ Pre-alpha. Planned order of the move:
      `resolve_knx_dpt`) and the plan paper/canvas helpers in `aiocomexio.function_plan.canvas`.
    - Done: `aiocomexio.webio` — Web-IO command builders, class-upload JSON and the KNX API-loopback
      command incl. its DPT range (`knx_loopback_range`).
-   - Open: the function plan backup diff.
+   - Done: `aiocomexio.function_plan.backup_diff` — renumbering-tolerant `plan_hash`, semantic
+     `diff_snapshots`, snapshot-to-live id translation and captured-at-backup-time labels. Snapshot
+     storage/rotation (HA `Store`) and the HA-timezone backup label stay in the integration.
 2. The client itself (RSA admin login, config scraping, Web-IO lifecycle, API writes), decoupled from
    Home Assistant: the caller injects an `aiohttp.ClientSession` (HA Core requirement — never create
    a session inside the library), CPU-bound work is not pushed to a HA executor, and nothing reads
