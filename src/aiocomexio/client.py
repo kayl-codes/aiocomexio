@@ -1,4 +1,4 @@
-"""Async client for the Comexio IO-Server: admin login, reads, value writes and the Web-IO lifecycle.
+"""Async client for the Comexio IO-Server: admin login, reads, value writes, Web-IO and function plans.
 
 The client works on an aiohttp.ClientSession the caller creates and owns (see
 session.session_kwargs for the settings it needs). It never closes that session. Every call
@@ -11,11 +11,12 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -29,7 +30,7 @@ from .exceptions import (
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
-from .function_plan.payload import normalize_plan_payload, plan_payload_has_elements
+from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_has_elements
 from .scrape import parse_comexio_version, parse_io_input_types, parse_io_types, scrape_js_vars
 from .session import is_local_address
 from .webio import CONTENT_TYPE_JSON
@@ -68,6 +69,15 @@ _MARKER_SAVE_PATH = "/admin/flag/saveOne"
 _KNX_HOME_PATH = "/admin/knx_one_wire/home"
 _KNX_SAVE_PATH = "/admin/knx_one_wire/saveKnx/"
 _DELETE_ELEMENT_PATH = "/admin/function_function_module/delete_element/"
+_PLAN_SAVE_PATH = "/admin/function_function_module/save_fub"
+_PLAN_DELETE_PATH = "/admin/function_function_module/delete/"
+_PLAN_RUN_PATH = "/admin/function_function_module/run_fup/"
+_PLAN_STOP_PATH = "/admin/function_function_module/stop_fup/"
+_PLAN_ADD_ELEMENT_PATH = "/admin/function_function_module/add_element/"
+_PLAN_SAVE_CONNECTION_PATH = "/admin/function_function_module/saveconnection/"
+_PLAN_SAVE_POSITIONS_PATH = "/admin/function_function_module/saveelementspos/"
+_PLAN_DELETE_ELEMENTS_PATH = "/admin/function_function_module/deleteelements/"
+_PLAN_SAVE_COMMENT_PATH = "/admin/function_function_module/savefupcommentelement/"
 
 # The admin page still shows the login form ("Anmeldung") when the session is not logged in.
 _LOGIN_PAGE_MARKER = "Anmeldung"
@@ -103,6 +113,25 @@ _WEBIO_CMD_VALUE_RE = re.compile(r'\bvalue="([^"]*)"')
 
 # Plain-text answer of fupValueData for a plan that is not running (instead of a JSON value dict).
 _JSON_START_CHARS = ("{", "[")
+
+# save_fub form values: paper format ids and orientation ids as Comexio's plan dialog sends them.
+_PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
+_PLAN_ORIENTATION_IDS = {"landscape": "0", "portrait": "1"}
+_PLAN_DPI_RANGE = range(45, 121)
+# save_fub / delete answer with a redirect whose query carries the verdict.
+_REDIRECT_STATUSES = frozenset({HTTPStatus.MOVED_PERMANENTLY, HTTPStatus.FOUND, HTTPStatus.SEE_OTHER})
+_PLAN_ADDED_TOKEN = "added=1"
+_PLAN_SAVED_TOKEN = "saved=1"
+_PLAN_DELETED_TOKEN = "delete=ok"
+# Element types and the catalog ref_id add_element needs for blocks that have no catalog entry.
+_ELEMENT_TYPE_COMMENT = 14
+_ELEMENT_TYPE_CONSTANT = 16
+_COMMENT_REF_ID = "3"
+# Comexio normalizes a constant's ref_id to 0 once saved, but refuses ref_id 0 on create.
+_CONSTANT_REF_ID = "1"
+_COMMENT_WIDTHS = range(1, 6)
+_CONNECTION_VALUE_TYPES = frozenset({"binary", "analog"})
+_ID_KEY = "id"
 # Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.
 _EMPTY_CONNECTION_VALUES: tuple[Any, ...] = (None, "", [], {})
 
@@ -329,15 +358,7 @@ class ComexioClient:
         strict=True raises ComexioDataError for a payload without a real elements collection
         instead of returning it as an empty plan — for callers whose next step is irreversible.
         """
-        data = await self._request_json(
-            "GET",
-            _LOAD_ELEMENTS_PATH,
-            what=f"Loading function plan {fub_id}",
-            params={"fubid": fub_id},
-            headers=self._xhr_headers(_FUNCTION_MODULE_PATH),
-        )
-        if not isinstance(data, dict):
-            raise ComexioDataError(f"Function plan {fub_id} payload is not an object: {_excerpt(data)}")
+        data = await self._load_plan_payload(fub_id)
         if strict and not plan_payload_has_elements(data):
             raise ComexioDataError(f"Function plan {fub_id} payload has no elements collection")
         plan = normalize_plan_payload(data)
@@ -788,6 +809,237 @@ class ComexioClient:
         _LOGGER.debug("%s: not deleted, answer: %s", what, _excerpt(result))
         return False
 
+    # --- function plans --------------------------------------------------------------------------
+
+    async def create_function_plan(
+        self,
+        name: str,
+        *,
+        comment: str = "",
+        paper_format: str = "A4",
+        orientation: str = "landscape",
+        dpi: int = 90,
+    ) -> int:
+        """Create an empty, inactive function plan and return its id.
+
+        paper_format is "A3", "A4" or "A5", orientation "landscape" or "portrait", dpi 45-120.
+        Comexio's answer carries no id, so the new plan is looked up by name in a fresh config
+        scrape. Raises ComexioRequestRejectedError if the name is taken or Comexio does not
+        confirm the plan.
+        """
+        what = f"Creating function plan {name!r}"
+        form = _plan_form(name, comment, paper_format, orientation, dpi)
+        await self._check_name_unique("fub", None, name, what=what)
+        form.update({"fub_position": "-1", "fub_active": "0", "fub_reset_on_close": "0", "fub_create": "Erzeugen"})
+        await self._post_plan_form(form, _PLAN_ADDED_TOKEN, what=what)
+        try:
+            config = await self.get_raw_config()
+        except ComexioError as err:
+            err.add_note(f"{what}: Comexio confirmed the plan, only reading back its id failed")
+            raise
+        return _plan_id_by_name(config.variables.get("Fubs"), name, what=what)
+
+    async def update_function_plan(
+        self,
+        fub_id: int,
+        *,
+        name: str,
+        comment: str,
+        position: int,
+        active: bool,
+        paper_format: str,
+        orientation: str,
+        dpi: int,
+        reset_outputs_on_stop: bool = False,
+    ) -> None:
+        """Save a plan's settings (name, comment, position, active flag, paper, orientation, dpi).
+
+        Comexio's save takes the whole settings form, so pass the current value of every setting
+        that should stay. $Fubs does not reveal "reset outputs on stop", so it is sent as given
+        (default off, Comexio's own default for new plans). Values as for create_function_plan.
+        Raises ComexioRequestRejectedError if Comexio does not confirm the save.
+        """
+        what = f"Saving settings of function plan {fub_id}"
+        form = _plan_form(name, comment, paper_format, orientation, dpi)
+        form.update(
+            {
+                "fub_id": str(fub_id),
+                "fub_position": str(position),
+                "fub_active": "1" if active else "0",
+                "fub_reset_on_close": "1" if reset_outputs_on_stop else "0",
+                "fub_save": "Speichern",
+            }
+        )
+        await self._post_plan_form(form, _PLAN_SAVED_TOKEN, what=what)
+
+    async def delete_function_plan(self, fub_id: int) -> None:
+        """Delete a whole function plan with everything on it.
+
+        Raises ComexioRequestRejectedError if Comexio does not confirm the deletion.
+        """
+        what = f"Deleting function plan {fub_id}"
+        location = await self._request_redirect(
+            "GET",
+            _PLAN_DELETE_PATH,
+            what=what,
+            params={"id": str(fub_id)},
+            headers=self._xhr_headers(_FUNCTION_MODULE_PATH),
+        )
+        if _PLAN_DELETED_TOKEN not in location:
+            raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
+
+    async def run_function_plan(self, fub_id: int, plan: Mapping[str, Any] | None = None) -> None:
+        """Save a plan's elements and connections and activate the plan (Comexio's run_fup).
+
+        plan is a plan as load_function_plan(..., strict=True) returns it; its content replaces
+        what is on the plan, so an empty plan wipes the live one. None activates the plan as it
+        is: its current state is loaded first and must carry both elements and connections, so a
+        broken answer never runs as an empty plan (ComexioDataError). Raises
+        ComexioRequestRejectedError if Comexio refuses to run it (e.g. an output used twice).
+        """
+        if plan is None:
+            payload = await self._current_run_payload(fub_id)
+        else:
+            payload = build_run_payload(plan)
+        await self._plan_state_request(
+            _PLAN_RUN_PATH, {"id": str(fub_id), "data": json.dumps(payload)}, what=f"Running function plan {fub_id}"
+        )
+
+    async def stop_function_plan(self, fub_id: int) -> None:
+        """Stop a running plan (Comexio's programming mode); Comexio only edits a stopped plan.
+
+        Raises ComexioRequestRejectedError if Comexio does not confirm the stop.
+        """
+        await self._plan_state_request(_PLAN_STOP_PATH, {"id": str(fub_id)}, what=f"Stopping function plan {fub_id}")
+
+    async def add_function_plan_element(
+        self,
+        fub_id: int,
+        ref_id: int,
+        element_type: int,
+        *,
+        x: float,
+        y: float,
+        connection: Mapping[str, Any] | None = None,
+    ) -> int:
+        """Place a marker, IO, Web-IO command, KNX object or catalog block on a plan; returns its element id.
+
+        ref_id is the id of the placed object within its element type ($FubModules group).
+        connection wires the new element in the same call, in Comexio's saveconnection shape
+        keyed by connection index — e.g. a Web-IO command fed by an existing marker element:
+        {"0": {"id": "new", "fub_id": <fub_id>, "type": "binary",
+        "input": {"element": "<marker element id>", "pos": "0", "inverted": False},
+        "output": {"0": {"element": "new", "pos": "0", "inverted": False}}}}.
+        Comments and constants have their own methods. Raises ComexioRequestRejectedError if
+        Comexio refuses the element.
+        """
+        form = {"name": "", "ref_id": str(ref_id), "type": str(element_type), "id": "undefined"}
+        if connection is not None:
+            form["connection"] = json.dumps(connection, separators=(",", ":"))
+        return await self._add_plan_element(
+            fub_id, form, x, y, what=f"Placing element type {element_type} ref {ref_id} on function plan {fub_id}"
+        )
+
+    async def add_function_plan_constant(self, fub_id: int, value: str, *, x: float, y: float) -> int:
+        """Place a constant block with the given value on a plan; returns its element id."""
+        form = {"name": value, "ref_id": _CONSTANT_REF_ID, "type": str(_ELEMENT_TYPE_CONSTANT), "id": "undefined"}
+        return await self._add_plan_element(fub_id, form, x, y, what=f"Placing a constant on function plan {fub_id}")
+
+    async def add_function_plan_comment(self, fub_id: int, text: str, *, x: float, y: float) -> int:
+        """Place a comment block on a plan; returns its element id.
+
+        Comexio places it at its default width; save_function_plan_comment sets another one.
+        """
+        form = {"name": text, "ref_id": _COMMENT_REF_ID, "type": str(_ELEMENT_TYPE_COMMENT), "id": "0"}
+        return await self._add_plan_element(fub_id, form, x, y, what=f"Placing a comment on function plan {fub_id}")
+
+    async def save_function_plan_comment(self, element_id: int, text: str, *, width: int) -> None:
+        """Save a comment block's text and width (1 = narrow ... 5 = Comexio's "very wide").
+
+        Raises ComexioRequestRejectedError if Comexio does not confirm the save.
+        """
+        if not _is_int(width) or width not in _COMMENT_WIDTHS:
+            raise ValueError(f"Comment width must be 1-5, not {width}")
+        what = f"Saving comment element {element_id}"
+        form = {
+            "id": str(element_id),
+            "use_base_64": "1",
+            "name": base64.b64encode(text.encode()).decode("ascii"),
+            "width": str(width),
+        }
+        result = await self._plan_json(_PLAN_SAVE_COMMENT_PATH, form, what=what)
+        if str(result.get(_RESULT_KEY)) != "1":
+            raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
+
+    async def save_function_plan_connection(
+        self,
+        fub_id: int,
+        source: int,
+        sinks: Sequence[tuple[int, int, bool]],
+        *,
+        value_type: str,
+        source_pos: int = 0,
+        source_inverted: bool = False,
+        connection_id: int | None = None,
+    ) -> int:
+        """Save the wire from one source pin to all its sinks; returns the connection id.
+
+        sinks are (element id, input pin, inverted). Comexio keeps ONE connection per source
+        pin with all sinks as its outputs, so this call always carries every sink of the pin:
+        saving sinks one by one made the wires of IO and constant sources vanish. value_type is
+        "binary" or "analog". connection_id must be the pin's existing connection id when the
+        pin already has one — resaving it as a new connection makes Comexio merge the outputs
+        but drop the connection's source, which leaves a wire without origin.
+        Raises ComexioRequestRejectedError if Comexio refuses the connection.
+        """
+        if value_type not in _CONNECTION_VALUE_TYPES:
+            raise ValueError(f"value_type must be 'binary' or 'analog', not {value_type!r}")
+        if not sinks:
+            raise ValueError("A connection needs at least one sink")
+        connection = {
+            _ID_KEY: "new" if connection_id is None else str(connection_id),
+            "fub_id": fub_id,
+            "input": {"element": str(source), "pos": str(source_pos), "inverted": source_inverted},
+            "type": value_type,
+            "output": {
+                str(i): {"element": str(sink), "pos": str(pin), "inverted": inverted}
+                for i, (sink, pin, inverted) in enumerate(sinks)
+            },
+        }
+        what = f"Saving connection from element {source} on function plan {fub_id}"
+        form = {"JSON": json.dumps(connection, separators=(",", ":")), "timestamp": _js_timestamp()}
+        return _answer_id(await self._plan_json(_PLAN_SAVE_CONNECTION_PATH, form, what=what), what)
+
+    async def move_function_plan_elements(self, positions: Sequence[tuple[int, float, float]]) -> None:
+        """Move elements to new canvas positions, given as (element id, x, y).
+
+        Raises ComexioRequestRejectedError if Comexio does not confirm the move.
+        """
+        if not positions:
+            raise ValueError("No element positions given")
+        what = f"Moving {len(positions)} function plan element(s)"
+        moves = {str(i): {"x": x, "y": y, _ID_KEY: element_id} for i, (element_id, x, y) in enumerate(positions)}
+        form = {"Json": json.dumps(moves, separators=(",", ":")), "timestamp": _js_timestamp()}
+        result = await self._plan_json(_PLAN_SAVE_POSITIONS_PATH, form, what=what)
+        if str(result.get(_RESULT_KEY)) != "1":
+            raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
+
+    async def delete_function_plan_elements(self, element_ids: Sequence[int]) -> None:
+        """Remove elements, and every connection touching them, from their function plan.
+
+        The objects behind them (markers, IOs, ...) stay. Raises ComexioRequestRejectedError if
+        Comexio does not confirm the deletion.
+        """
+        if isinstance(element_ids, (str, bytes)):
+            raise TypeError("element_ids must be a sequence of ids, not a string")
+        if not element_ids:
+            raise ValueError("No element ids given")
+        what = f"Deleting function plan elements {list(element_ids)}"
+        form = {"Json": json.dumps([str(element_id) for element_id in element_ids]), "timestamp": _js_timestamp()}
+        result = await self._plan_json(_PLAN_DELETE_ELEMENTS_PATH, form, what=what)
+        if result.get("delete") is not True:
+            raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
+
     async def system_emergency_reboot(self) -> None:
         """Reboot the whole Comexio system immediately — no confirmation, no way back.
 
@@ -829,22 +1081,77 @@ class ComexioClient:
         # The answer carries no verdict to check; logged so an ignored write can be traced.
         _LOGGER.debug("%s: %s", what, _excerpt(body))
 
-    async def _check_name_unique(self, model: str, object_id: str | int, name: str, *, what: str) -> None:
-        """Comexio's own uniqueness check before a rename; ComexioRequestRejectedError if name is taken."""
+    async def _check_name_unique(self, model: str, object_id: str | int | None, name: str, *, what: str) -> None:
+        """Comexio's own uniqueness check; ComexioRequestRejectedError if name is taken.
+
+        object_id is the object being renamed (its own name does not count), None for a new one.
+        """
         check = f"{what}: name check"
+        form = {"model": model, "field": "name", "value": name}
+        if object_id is not None:
+            form["id"] = str(object_id)
         result = _expect_object(
-            await self._request_json(
-                "POST",
-                _UNIQUE_CHECK_PATH,
-                what=check,
-                data={"model": model, "field": "name", "value": name, "id": str(object_id)},
-            ),
+            await self._request_json("POST", _UNIQUE_CHECK_PATH, what=check, data=form),
             check,
         )
         if _RESULT_KEY not in result:
             raise ComexioDataError(f"{check}: answer carries no result: {_excerpt(result)}")
         if not result[_RESULT_KEY]:
             raise ComexioRequestRejectedError(f"{what}: the name {name!r} is already in use ({_excerpt(result)})")
+
+    async def _load_plan_payload(self, fub_id: int) -> dict[str, Any]:
+        """The raw loadelements answer of one plan, checked to be an object."""
+        data = await self._request_json(
+            "GET",
+            _LOAD_ELEMENTS_PATH,
+            what=f"Loading function plan {fub_id}",
+            params={"fubid": fub_id},
+            headers=self._xhr_headers(_FUNCTION_MODULE_PATH),
+        )
+        if not isinstance(data, dict):
+            raise ComexioDataError(f"Function plan {fub_id} payload is not an object: {_excerpt(data)}")
+        return data
+
+    async def _current_run_payload(self, fub_id: int) -> dict[str, Any]:
+        """run_fup data for a plan's current state; ComexioDataError for anything short of a whole plan."""
+        data = await self._load_plan_payload(fub_id)
+        # normalize_plan_payload turns a missing collection into {} — fine to display, fatal to run.
+        missing = [key for key in ("elements", "connections") if not isinstance(data.get(key), (dict, list))]
+        if missing:
+            raise ComexioDataError(f"Function plan {fub_id} payload has no {' / '.join(missing)} collection")
+        try:
+            return build_run_payload(normalize_plan_payload(data))
+        except ValueError as err:
+            raise ComexioDataError(f"Function plan {fub_id} payload cannot be run: {err}") from err
+
+    async def _post_plan_form(self, form: dict[str, str], token: str, *, what: str) -> None:
+        """POST the plan settings form; ComexioRequestRejectedError unless the redirect carries token."""
+        location = await self._request_redirect(
+            "POST", _PLAN_SAVE_PATH, what=what, data=form, headers=self._xhr_headers(_FUNCTION_MODULE_PATH)
+        )
+        if token not in location:
+            raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
+
+    async def _plan_state_request(self, path: str, form: dict[str, str], *, what: str) -> None:
+        """run_fup / stop_fup; both answer {"result": true, "state": ...} on success."""
+        result = await self._plan_json(path, form, what=what)
+        if result.get(_RESULT_KEY) is not True:
+            raise ComexioRequestRejectedError(f"{what} was refused: {_excerpt(result)}")
+        _LOGGER.debug("%s: state %s", what, result.get("state"))
+
+    async def _add_plan_element(self, fub_id: int, form: dict[str, str], x: float, y: float, *, what: str) -> int:
+        """add_element with the fields every element shares; returns the new element id."""
+        form.update({"fubid": str(fub_id), "x": str(x), "y": str(y), "timestamp": _js_timestamp()})
+        return _answer_id(await self._plan_json(_PLAN_ADD_ELEMENT_PATH, form, what=what), what)
+
+    async def _plan_json(self, path: str, form: dict[str, str], *, what: str) -> dict[str, Any]:
+        """POST one function plan editor action and return its JSON object answer."""
+        return _expect_object(
+            await self._request_json(
+                "POST", path, what=what, data=form, headers=self._xhr_headers(_FUNCTION_MODULE_PATH)
+            ),
+            what,
+        )
 
     def _xhr_headers(self, referer_path: str) -> dict[str, str]:
         return {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}{referer_path}"}
@@ -880,6 +1187,34 @@ class ComexioClient:
         if _LOGIN_FORM_SUBMIT_MARKER in body:
             raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
         return body
+
+    async def _request_redirect(self, method: str, path: str, *, what: str, **kwargs: Any) -> str:
+        """Location of a form action Comexio answers with a redirect.
+
+        Any other answer is not the confirmation: the login form or a redirect to it raises
+        ComexioAuthenticationError, an error status ComexioResponseError, anything else
+        ComexioRequestRejectedError.
+        """
+        try:
+            async with self._session.request(
+                method, f"{self._base_url}{path}", allow_redirects=False, **kwargs
+            ) as resp:
+                if resp.status in _REDIRECT_STATUSES:
+                    location = resp.headers.get("Location", "")
+                    if "login" in urlsplit(location).path.lower():
+                        raise ComexioAuthenticationError(
+                            f"Comexio redirected to the login page, the session is not logged in ({what})"
+                        )
+                    return location
+                status = resp.status
+                body = await resp.text(errors="replace")
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise ComexioConnectionError(f"{what} failed: {err!r}") from err
+        if _LOGIN_FORM_SUBMIT_MARKER in body:
+            raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
+        if status != HTTPStatus.OK:
+            raise ComexioResponseError(f"{what} failed: HTTP {status}", status=status)
+        raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(body)}")
 
     async def _request_json(self, method: str, path: str, *, what: str, **kwargs: Any) -> Any:
         """Body of one request decoded as JSON (whatever the Content-Type header claims)."""
@@ -927,6 +1262,56 @@ def _expect_object(data: Any, what: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ComexioDataError(f"{what}: answer is not an object: {_excerpt(data)}")
     return data
+
+
+def _plan_form(name: str, comment: str, paper_format: str, orientation: str, dpi: int) -> dict[str, str]:
+    """The save_fub fields create and update share; ValueError for a value Comexio does not offer."""
+    try:
+        paper_id = _PLAN_PAPER_IDS[paper_format.upper()]
+    except KeyError:
+        raise ValueError(f"paper_format must be one of {sorted(_PLAN_PAPER_IDS)}, not {paper_format!r}") from None
+    try:
+        orientation_id = _PLAN_ORIENTATION_IDS[orientation.lower()]
+    except KeyError:
+        raise ValueError(f"orientation must be 'landscape' or 'portrait', not {orientation!r}") from None
+    if not _is_int(dpi) or dpi not in _PLAN_DPI_RANGE:
+        raise ValueError(f"dpi must be {_PLAN_DPI_RANGE.start}-{_PLAN_DPI_RANGE.stop - 1}, not {dpi}")
+    return {
+        "fub_type": "1",
+        "fub_page_count_x": "1",
+        "fub_page_count_y": "1",
+        "fub_name": name,
+        "fub_comment": comment,
+        "fub_paper": paper_id,
+        "fub_orientation": orientation_id,
+        "fub_resolution": str(dpi),
+    }
+
+
+def _is_int(value: Any) -> bool:
+    """True for an int that is not a bool (range membership lets True and 2.0 through)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _plan_id_by_name(fubs: Any, name: str, *, what: str) -> int:
+    """Id of the one plan in $Fubs named name; ComexioDataError for none or several."""
+    found = [plan_id for plan_id, plan in iter_group(fubs) if isinstance(plan, Mapping) and plan.get("Name") == name]
+    if len(found) != 1:
+        raise ComexioDataError(f"{what}: Comexio confirmed it, but $Fubs lists {len(found)} plans with that name")
+    try:
+        return int(found[0])
+    except ValueError as err:
+        raise ComexioDataError(f"{what}: the new plan has a non-numeric id {found[0]!r}") from err
+
+
+def _answer_id(result: dict[str, Any], what: str) -> int:
+    """The "id" of an add_element / saveconnection answer; an "error" answer is a refusal."""
+    if "error" in result:
+        raise ComexioRequestRejectedError(f"{what} was refused: {_excerpt(result)}")
+    try:
+        return int(result[_ID_KEY])
+    except (KeyError, TypeError, ValueError) as err:
+        raise ComexioDataError(f"{what}: answer carries no id: {_excerpt(result)}") from err
 
 
 def _marker_type(binary: bool) -> str:
