@@ -1,0 +1,382 @@
+# serializer version: 1
+# name: test_build_webio_commands_snapshot
+  list([
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { id="1", value=a, type="marker" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 1,
+      'Min': 0,
+      'Name': 'HA M1 Licht Wohnen',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 1,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { id="2", value=a, type="marker" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 500000,
+      'Min': -500000,
+      'Name': 'HA M2 Solltemperatur',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 2,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { id="3", value=a, type="marker" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 1,
+      'Min': 0,
+      'Name': 'HA M3 Status Anlage [RO]',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 1,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { id="4", value=a, type="marker" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 1,
+      'Min': 0,
+      'Name': 'HA M4 Klingel [TRIG]',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 1,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { id="7", value=a, type="marker" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 500000,
+      'Min': -500000,
+      'Name': 'HA M7 Rollo Wohnen [K3]',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 2,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { ext="BASE", io="I1", value=a, type="io" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 1,
+      'Min': 0,
+      'Name': 'HA IO BASE I1',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 1,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { ext="BASE", io="Q1", value=a, type="io" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 1,
+      'Min': 0,
+      'Name': 'HA IO BASE Q1',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 1,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { ext="BASE", io="AI1", value=a, type="io" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 80,
+      'Min': -40,
+      'Name': 'HA IO BASE AI1',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 2,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { ext="UD 1", io="QI1", value=a, type="io" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 100,
+      'Min': 0,
+      'Name': 'HA IO UD 1 QI1',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 2,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { id="1", value=a, type="knx" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 670760,
+      'Min': -273,
+      'Name': 'HA K1 Wohnen Temperatur',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 2,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { id="2", value=a, type="knx" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 1,
+      'Min': 0,
+      'Name': 'HA K2 Rollo Richtung',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 1,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { id="3", value=a, type="knx" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 7,
+      'Min': 0,
+      'Name': 'HA K3 Rollo Schritt',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 2,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+    dict({
+      'Authentication': 0,
+      'BaseId': 0,
+      'Changed': 1,
+      'Data': '''
+        function data(a)
+          local d = { id="4", value=a, type="knx" }
+          return json_stringify(d)
+        end
+      ''',
+      'DefaultActive': 1,
+      'DefaultValue': '',
+      'HeaderModifier': 'Content-Type: application/json',
+      'Input': 1,
+      'Max': 1,
+      'Min': 0,
+      'Name': 'HA K4 Unbekannter Typ',
+      'Parameter': '/api/webhook/comexio_srv',
+      'Port': '',
+      'PostGet': 1,
+      'Protocol': 0,
+      'ReplyInterpreter': '',
+      'ReqFreq': '',
+      'SendOnOne': 0,
+      'TypeId': 1,
+      'WebDeviceId': 0,
+      'io': list([
+      ]),
+    }),
+  ])
+# ---
