@@ -466,28 +466,40 @@ class ComexioClient:
         return match[1] if (match := re.search(pattern, html, re.IGNORECASE)) else None
 
     async def delete_webio_device(self, device_id: str | int) -> bool:
-        """Delete a Web-IO device. False if Comexio refuses because a function plan still uses it."""
+        """Delete a Web-IO device. False if Comexio refuses because a function plan still uses it.
+
+        True means Comexio reported no in-use error; its answer carries no other verdict, so
+        get_webio_device_id shows whether the device is really gone where it matters.
+        """
+        what = f"Deleting Web-IO device {device_id}"
         html = await self._request_admin_text(
             "GET",
             _WEBIO_DELETE_DEVICE_PATH,
-            what=f"Deleting Web-IO device {device_id}",
+            what=what,
             params={"id": str(device_id)},
             headers=self._xhr_headers(_WEBIO_HOME_PATH),
         )
         if _WEBIO_IN_USE_MARKER in html:
             _LOGGER.warning("Web-IO device %s is used in a function plan and cannot be deleted", device_id)
             return False
+        _LOGGER.debug("%s: %s", what, _excerpt(html))
         return True
 
     async def delete_webio_base(self, base_id: str | int) -> None:
-        """Delete a Web-IO class. Comexio only allows this once no device of the class is left."""
-        await self._request_admin_text(
+        """Delete a Web-IO class. Comexio only allows this once no device of the class is left.
+
+        Comexio's answer carries no verdict, so returning only means the request was accepted —
+        check with get_webio_base_info where it matters.
+        """
+        what = f"Deleting Web-IO class {base_id}"
+        body = await self._request_admin_text(
             "GET",
             _WEBIO_DELETE_BASE_PATH,
-            what=f"Deleting Web-IO class {base_id}",
+            what=what,
             params={"id": str(base_id)},
             headers=self._xhr_headers(_WEBIO_HOME_PATH),
         )
+        _LOGGER.debug("%s: %s", what, _excerpt(body))
 
     async def upload_webio_class(self, class_json: str, *, class_name: str, filename: str) -> str:
         """Upload a Web-IO class template (webio.generate_webio_json) under class_name; returns its base id.
@@ -553,8 +565,9 @@ class ComexioClient:
         """Point an existing Web-IO device at a new address ("host:port").
 
         Comexio's save handler takes the whole device form, so device_name must be the device's
-        current name (it is saved along). Raises ComexioRequestRejectedError if Comexio does not
-        confirm the save.
+        current name (it is saved along), and the device's Basic Auth credentials, TLS checks and
+        login mode are reset to none — only use it on a device without credentials. Raises
+        ComexioRequestRejectedError if Comexio does not confirm the save.
         """
         device_data = {
             "web_device_id": str(device_id),
@@ -642,13 +655,19 @@ class ComexioClient:
         )
 
     async def delete_webio_command(self, command_id: str | int, device_id: str | int) -> None:
-        """Delete one command of a Web-IO device."""
-        await self._request_admin_text(
+        """Delete one command of a Web-IO device.
+
+        Comexio's answer carries no verdict, so returning only means the request was accepted —
+        the next config scrape shows whether the command is gone.
+        """
+        what = f"Deleting Web-IO command {command_id}"
+        body = await self._request_admin_text(
             "GET",
             _WEBIO_DELETE_COMMAND_PATH,
-            what=f"Deleting Web-IO command {command_id}",
+            what=what,
             params={"id": str(command_id), "dev": str(device_id)},
         )
+        _LOGGER.debug("%s: %s", what, _excerpt(body))
 
     async def get_webio_command_range(
         self, command_id: str | int, device_id: str | int
@@ -764,7 +783,10 @@ class ComexioClient:
             ),
             what,
         )
-        return str(result.get(_RESULT_KEY)) == "1"
+        if str(result.get(_RESULT_KEY)) == "1":
+            return True
+        _LOGGER.debug("%s: not deleted, answer: %s", what, _excerpt(result))
+        return False
 
     async def system_emergency_reboot(self) -> None:
         """Reboot the whole Comexio system immediately — no confirmation, no way back.
@@ -819,7 +841,9 @@ class ComexioClient:
             ),
             check,
         )
-        if not result.get(_RESULT_KEY):
+        if _RESULT_KEY not in result:
+            raise ComexioDataError(f"{check}: answer carries no result: {_excerpt(result)}")
+        if not result[_RESULT_KEY]:
             raise ComexioRequestRejectedError(f"{what}: the name {name!r} is already in use ({_excerpt(result)})")
 
     def _xhr_headers(self, referer_path: str) -> dict[str, str]:

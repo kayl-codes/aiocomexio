@@ -480,6 +480,16 @@ async def test_rename_marker_name_taken_is_rejected_before_saving(
     assert comexio.received_at("POST", MARKER_SAVE_PATH) == []
 
 
+async def test_rename_marker_name_check_without_verdict_is_a_data_error(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_json("POST", UNIQUE_CHECK_PATH, {"error": "unknown model"})
+
+    with pytest.raises(ComexioDataError, match="no result"):
+        await logged_in.rename_marker(271, "Licht", binary=True)
+    assert comexio.received_at("POST", MARKER_SAVE_PATH) == []
+
+
 async def test_rename_marker_unconfirmed_save_raises(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve_json("POST", UNIQUE_CHECK_PATH, {"result": True})
     comexio.serve_json("POST", MARKER_SAVE_PATH, {"saved": 0})
@@ -589,6 +599,25 @@ async def test_login_form_in_base_window_is_not_an_undeletable_class(
 
     with pytest.raises(ComexioAuthenticationError):
         await logged_in.get_webio_base_info("HA [M]")
+
+
+_ADMIN_JSON_CALLS: list[tuple[str, Callable[[ComexioClient], Awaitable[Any]]]] = [
+    (WEBIO_UPLOAD_PATH, lambda client: client.upload_webio_class("{}", class_name="HA [M]", filename="ha.json")),
+    (WEBIO_SAVE_DEVICE_PATH, lambda client: client.update_webio_device_address(34, "h:8123", "HA [M]")),
+    (MARKER_ADD_PATH, lambda client: client.create_marker(binary=True)),
+    (UNIQUE_CHECK_PATH, lambda client: client.rename_marker(5, "Licht", binary=True)),
+    (DELETE_ELEMENT_PATH, lambda client: client.delete_marker(5)),
+]
+
+
+@pytest.mark.parametrize(("path", "call"), _ADMIN_JSON_CALLS)
+async def test_login_form_instead_of_json_raises_authentication_error(
+    logged_in: ComexioClient, comexio: FakeComexio, path: str, call: Callable[[ComexioClient], Awaitable[Any]]
+) -> None:
+    comexio.serve_text("POST", path, LOGIN_PAGE)
+
+    with pytest.raises(ComexioAuthenticationError):
+        await call(logged_in)
 
 
 async def test_anmeldung_label_alone_is_not_the_login_form(logged_in: ComexioClient, comexio: FakeComexio) -> None:
