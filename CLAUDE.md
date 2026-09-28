@@ -77,5 +77,5 @@ pre-commit run --all-files
 
 ## Workflow
 
-Branch off `main` and open a PR (template in `.github/PULL_REQUEST_TEMPLATE.md`); Sourcery and
+Branch off `master` and open a PR (template in `.github/PULL_REQUEST_TEMPLATE.md`); Sourcery and
 SonarCloud review every PR.
