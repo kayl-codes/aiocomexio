@@ -303,7 +303,7 @@ def test_malformed_identifiers_and_webio_command_names_do_not_crash(caplog: pyte
         "FubModules": {
             "1": {
                 "2": {
-                    "extension": {"Name": "EXT", "Identifier": None},
+                    "extension": {"Name": 7, "Identifier": None},
                     "inoutput": {
                         "5": {"Id": 5, "Identifier": 17, "Description": 3, "InOutputTypeId": 2, "Active": True},
                         "6": {"Id": 6, "Identifier": ["x"], "InOutputTypeId": 2, "Active": True},
@@ -314,9 +314,10 @@ def test_malformed_identifiers_and_webio_command_names_do_not_crash(caplog: pyte
         },
     }
 
-    result = parse_config(conf, io_types={})
+    result = parse_config(conf, io_types={"2": {"binary": False, "unit": 5}})
 
-    assert result["extensions"] == {"2": {"name": "EXT", "serial": ""}}
+    assert result["extensions"] == {"2": {"name": "Ext2", "serial": ""}}
+    assert result["io"][0]["unit"] == ""
     assert [io["identifier"] for io in result["io"]] == ["17", "6"]
     assert result["io"][0]["offline"] is True
     # An empty name stays visible to the consumer's audit; a missing one is skipped loudly.

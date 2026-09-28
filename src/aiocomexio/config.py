@@ -213,8 +213,10 @@ def marker_kind(title: str, *, is_marker: bool = True) -> MarkerKind:
     return MarkerKind.NORMAL
 
 
-def normalize_io_unit(unit: str) -> str:
-    """Normalize Comexio IO unit strings ("\\u00b0C", "0/1", "?", ...)."""
+def normalize_io_unit(unit: Any) -> str:
+    """Normalize Comexio IO unit strings ("\\u00b0C", "0/1", "?", ...); a non-string unit becomes ""."""
+    if not isinstance(unit, str):
+        return ""
     if unit in ("\\u00b0C", "°C", "°C", "C"):
         return "°C"
     return "" if unit in ("0/1", "1/0", "?") else unit
@@ -627,8 +629,12 @@ def _extension_meta(ext_id: str, ext_content: Mapping[str, Any]) -> tuple[str, s
     ext_meta = ext_content.get("extension")
     if not isinstance(ext_meta, Mapping):
         ext_meta = {}
+    ext_name = ext_meta.get("Name")
     ext_serial = ext_meta.get("Identifier")
-    return ext_meta.get("Name", f"Ext{ext_id}"), ext_serial if isinstance(ext_serial, str) else ""
+    return (
+        ext_name if isinstance(ext_name, str) else f"Ext{ext_id}",
+        ext_serial if isinstance(ext_serial, str) else "",
+    )
 
 
 def _process_ios(
