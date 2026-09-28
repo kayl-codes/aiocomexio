@@ -12,6 +12,7 @@ from syrupy.extensions.single_file import SingleFileSnapshotExtension, WriteMode
 from aiocomexio.function_plan import (
     analyze_function_plan,
     detect_self_reset_cycles,
+    element_id_sort_key,
     element_search_id,
     render_flow_svg,
     render_plan_svg,
@@ -63,6 +64,14 @@ def test_render_escapes_title(plan: dict[str, Any]) -> None:
 
     assert "Test &lt;Plan&gt;" in svg
     assert "<Plan>" not in svg
+
+
+def test_render_plan_id_marks_root_svg(plan: dict[str, Any]) -> None:
+    svg = _render(plan, plan_id='7"<x>')
+
+    assert svg.startswith("<svg ")
+    assert 'data-plan-id="7&quot;&lt;x&gt;"' in svg.split(">", 1)[0]
+    assert "data-plan-id" not in _render(plan)
 
 
 def test_render_empty_plan_does_not_crash() -> None:
@@ -191,3 +200,9 @@ def test_element_search_id(plan: dict[str, Any], element_id: str, expected: str)
 
 def test_element_search_id_unknown_io_is_empty() -> None:
     assert element_search_id({"reference": {"type": 1, "ref_id": 99}}, {}) == ""
+
+
+def test_element_id_sort_key_orders_numerically_and_never_raises() -> None:
+    ids = ["10", "b", "2", "²", "1"]
+
+    assert sorted(ids, key=element_id_sort_key) == ["1", "2", "10", "b", "²"]

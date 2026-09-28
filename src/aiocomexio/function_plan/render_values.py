@@ -57,13 +57,13 @@ def _element_raw_value(
     return (by_id.get(rid) or {}).get("value") if by_id is not None else None
 
 
-def _element_id_sort_key(eid: str) -> tuple[int, Any]:
+def element_id_sort_key(eid: str) -> tuple[int, Any]:
     """Numeric order for Comexio's numeric element ids ("2" before "10"), others after them.
 
     Shared by every place that iterates a set of element ids, so the output does not depend on
-    PYTHONHASHSEED.
+    PYTHONHASHSEED. isascii+isdecimal, not isdigit: "²".isdigit() is True but int("²") raises.
     """
-    return (0, int(eid)) if eid.isdigit() else (1, eid)
+    return (0, int(eid)) if eid.isascii() and eid.isdecimal() else (1, eid)
 
 
 # reference.type -> id prefix of the element kinds addressed by a plain "<prefix><ref_id>" id.
