@@ -22,9 +22,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
-# Runtime dependencies (aiohttp, cryptography) are added together with the code that
-# needs them when api.py moves over from homeassistant-comexio.
-dependencies = []
+# Floors, not pins: Home Assistant pins its own aiohttp/cryptography, and a consumer
+# integration must resolve against those (cryptography>=42 matches homeassistant-comexio).
+dependencies = [
+    "aiohttp>=3.11",
+    "cryptography>=42.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/kayl-codes/aiocomexio"

@@ -7,16 +7,49 @@ No dependency on Home Assistant or any other framework — usable as a standalon
 provide the communication layer of the
 [homeassistant-comexio](https://github.com/kayl-codes/homeassistant-comexio) integration.
 
-> **Status: pre-alpha.** The code is being moved over from the integration step by step. So far
-> only the network-free parts exist: admin page scraping (`aiocomexio.scrape`), config parsing
-> (`aiocomexio.config`), KNX DPT tables (`aiocomexio.knx`) and function plan rendering
-> (`aiocomexio.function_plan`). The client itself (login, polling, writes) is not there yet, and
-> the API may still change.
+> **Status: pre-alpha.** The code is being moved over from the integration step by step. So far:
+> admin login and read access (`ComexioClient`), admin page scraping (`aiocomexio.scrape`), config
+> parsing (`aiocomexio.config`), KNX DPT tables (`aiocomexio.knx`), Web-IO command builders
+> (`aiocomexio.webio`) and function plan rendering and diffing (`aiocomexio.function_plan`). Writes
+> (API values, Web-IO lifecycle, function plan editing) are not there yet, and the API may still
+> change.
 
 ## Installation
 
 ```bash
 pip install aiocomexio
+```
+
+## Usage
+
+The client works on an `aiohttp.ClientSession` you create and close yourself.
+`session_kwargs(host)` gives it the settings Comexio needs (a cookie jar that keeps the admin
+login for an IP-address host, a request timeout; `progress_log_interval=10` adds a "still
+waiting" log line for slow requests). Give every client its own session: `login()` clears the
+session's cookie jar. Every call either returns data or raises a
+`ComexioError` subclass (`ComexioAuthenticationError`, `ComexioConnectionError`,
+`ComexioResponseError`, `ComexioDataError`).
+
+```python
+import asyncio
+
+import aiohttp
+
+from aiocomexio import ComexioClient, session_kwargs
+from aiocomexio.config import parse_config
+
+
+async def main() -> None:
+    host = "192.168.0.20"
+    async with aiohttp.ClientSession(**session_kwargs(host)) as session:
+        client = ComexioClient(host, "admin", "secret", session=session)
+        await client.login()
+        raw = await client.get_raw_config()
+        config = parse_config(raw.variables, io_types=raw.io_types, io_input_types=raw.io_input_types)
+        print(len(config["markers"]), "markers on Comexio", raw.comexio_version)
+
+
+asyncio.run(main())
 ```
 
 ## Development

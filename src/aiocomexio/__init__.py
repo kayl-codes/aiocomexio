@@ -2,6 +2,29 @@
 
 from importlib.metadata import version
 
+from .client import ComexioClient, LiveStates, RawConfig
+from .exceptions import (
+    ComexioAuthenticationError,
+    ComexioConnectionError,
+    ComexioDataError,
+    ComexioError,
+    ComexioResponseError,
+)
+from .session import is_local_address, progress_trace_config, session_kwargs
+
 __version__ = version("aiocomexio")
 
-__all__ = ["__version__"]
+__all__ = [
+    "ComexioAuthenticationError",
+    "ComexioClient",
+    "ComexioConnectionError",
+    "ComexioDataError",
+    "ComexioError",
+    "ComexioResponseError",
+    "LiveStates",
+    "RawConfig",
+    "__version__",
+    "is_local_address",
+    "progress_trace_config",
+    "session_kwargs",
+]
