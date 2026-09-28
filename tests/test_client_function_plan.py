@@ -156,8 +156,9 @@ async def test_create_function_plan_not_found_once_in_fubs_is_a_data_error(
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
     _serve_plans(comexio, fubs)
 
-    with pytest.raises(ComexioDataError, match="plans with that name"):
+    with pytest.raises(ComexioDataError, match="plans with that name") as caught:
         await logged_in.create_function_plan("Neu")
+    assert any("only reading back its id failed" in note for note in caught.value.__notes__)
 
 
 async def test_create_function_plan_non_numeric_id_is_a_data_error(
@@ -167,8 +168,9 @@ async def test_create_function_plan_non_numeric_id_is_a_data_error(
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
     _serve_plans(comexio, {"x": {"Name": "Neu"}})
 
-    with pytest.raises(ComexioDataError, match="non-numeric id"):
+    with pytest.raises(ComexioDataError, match="non-numeric id") as caught:
         await logged_in.create_function_plan("Neu")
+    assert any("only reading back its id failed" in note for note in caught.value.__notes__)
 
 
 async def test_create_function_plan_unconfirmed_redirect_is_rejected(

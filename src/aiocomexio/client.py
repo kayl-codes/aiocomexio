@@ -828,7 +828,8 @@ class ComexioClient:
         paper_format is "A3", "A4" or "A5", orientation "landscape" or "portrait", dpi 45-120.
         Comexio's answer carries no id, so the new plan is looked up by name in a fresh config
         scrape. Raises ComexioRequestRejectedError if the name is taken or Comexio does not
-        confirm the plan.
+        confirm the plan. An error after the confirmation (the scrape fails, or $Fubs does not
+        list the plan exactly once) carries a note that the plan exists — do not create it again.
         """
         what = f"Creating function plan {name!r}"
         form = _plan_form(name, comment, paper_format, orientation, dpi)
@@ -837,10 +838,10 @@ class ComexioClient:
         await self._post_plan_form(form, _PLAN_ADDED_CONFIRMATION, what=what)
         try:
             config = await self.get_raw_config()
+            return _plan_id_by_name(config.variables.get("Fubs"), name, what=what)
         except ComexioError as err:
             err.add_note(f"{what}: Comexio confirmed the plan, only reading back its id failed")
             raise
-        return _plan_id_by_name(config.variables.get("Fubs"), name, what=what)
 
     async def update_function_plan(
         self,
@@ -1381,7 +1382,7 @@ def _plan_id_by_name(fubs: Any, name: str, *, what: str) -> int:
     """Id of the one plan in $Fubs named name; ComexioDataError for none or several."""
     found = [plan_id for plan_id, plan in iter_group(fubs) if isinstance(plan, Mapping) and plan.get("Name") == name]
     if len(found) != 1:
-        raise ComexioDataError(f"{what}: Comexio confirmed it, but $Fubs lists {len(found)} plans with that name")
+        raise ComexioDataError(f"{what}: $Fubs lists {len(found)} plans with that name")
     try:
         return int(found[0])
     except ValueError as err:
