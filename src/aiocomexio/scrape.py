@@ -27,12 +27,26 @@ COMEXIO_VERSION_RE = re.compile(
 _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _EMPTY_JS_ARRAY_RE = re.compile(r"\[\s*\]")
 _OBJECT_START_RE = re.compile(r"\s*\{")
-_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+_TRAILING_COMMA_RE = re.compile(r",\s*[}\]]")
 
 
 def normalize_js_like_object(obj_str: str) -> str:
-    """Remove trailing commas before closing braces/brackets to make JS objects JSON-compatible."""
-    return _TRAILING_COMMA_RE.sub(r"\1", obj_str)
+    """Remove trailing commas before closing braces/brackets to make JS objects JSON-compatible.
+
+    Commas inside quoted strings are kept — a label like "A,}" must survive unchanged.
+    """
+    out: list[str] = []
+    in_string: str | None = None
+    escape = False
+    for i, ch in enumerate(obj_str):
+        if in_string:
+            in_string, escape = _string_state(ch, in_string, escape)
+        elif ch in ("'", '"'):
+            in_string = ch
+        elif ch == "," and _TRAILING_COMMA_RE.match(obj_str, i):
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def _string_state(ch: str, in_string: str, escape: bool) -> tuple[str | None, bool]:

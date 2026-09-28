@@ -10,6 +10,7 @@ from aiocomexio.config import (
     ParseOptions,
     clean_value,
     io_schema_title,
+    is_extension_offline,
     iter_group,
     marker_kind,
     parse_config,
@@ -294,6 +295,38 @@ def test_malformed_config_entries_are_skipped() -> None:
     assert [m["id"] for m in result["markers"]] == ["2"]
     assert result["knx"][0]["type"] == TYPE_ANALOG
     assert result["webio_devices"][WebioClass.MARKER]["device_id"] == "30"
+
+
+def test_malformed_identifiers_and_webio_command_names_do_not_crash(caplog: pytest.LogCaptureFixture) -> None:
+    conf = {
+        "WebDevices": {"30": {"Name": "HomeAssistant [M]", "Ip": "1.2.3.4", "WebDeviceBaseId": 7}},
+        "FubModules": {
+            "1": {
+                "2": {
+                    "extension": {"Name": "EXT", "Identifier": None},
+                    "inoutput": {
+                        "5": {"Id": 5, "Identifier": 17, "Description": 3, "InOutputTypeId": 2, "Active": True},
+                        "6": {"Id": 6, "Identifier": ["x"], "InOutputTypeId": 2, "Active": True},
+                    },
+                }
+            },
+            "10": {"30": {"101": {"WebCommandId": 5, "TypeId": 1}, "102": {"Name": "", "TypeId": 1}}},
+        },
+    }
+
+    result = parse_config(conf, io_types={})
+
+    assert result["extensions"] == {"2": {"name": "EXT", "serial": ""}}
+    assert [io["identifier"] for io in result["io"]] == ["17", "6"]
+    assert result["io"][0]["offline"] is True
+    # An empty name stays visible to the consumer's audit; a missing one is skipped loudly.
+    assert list(result["webio_commands"]) == [""]
+    assert "non-string name None" in caplog.text
+
+
+@pytest.mark.parametrize("identifier", [None, "", "5010", 17])
+def test_is_extension_offline_without_serial(identifier: Any) -> None:
+    assert is_extension_offline(identifier) is True
 
 
 def test_non_mapping_fub_modules_yields_empty_result() -> None:

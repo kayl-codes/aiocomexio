@@ -20,6 +20,8 @@ from tests.common import load_fixture
         ('{"a": [1, 2, ], }', '{"a": [1, 2 ] }'),
         ('{"a": 1,\n  }', '{"a": 1\n  }'),
         ('{"a": 1}', '{"a": 1}'),
+        ('{"a": "x,}", "b": "y,]",}', '{"a": "x,}", "b": "y,]"}'),
+        ('{"a": "q\\",}",}', '{"a": "q\\",}"}'),
     ],
 )
 def test_normalize_js_like_object_strips_trailing_commas(raw: str, expected: str) -> None:

@@ -56,3 +56,11 @@ def test_malformed_plan_and_paper_entries_fall_back_to_defaults() -> None:
     assert plan_active(fubs, 1) is False
     assert plan_active(fubs, 2) is False
     assert plan_canvas_bounds(fubs, papers, 1) == pytest.approx((870.0, 720.0))
+
+
+def test_malformed_paper_fields_fall_back_to_defaults() -> None:
+    fubs = {"1": {"Paper": 9}}
+    papers = {"9": {"Name": None, "MMX": None, "MMY": "x"}}
+
+    assert plan_paper_format(fubs, papers, 1) == "A4"
+    assert plan_canvas_bounds(fubs, papers, 1) == pytest.approx((870.0, 720.0))

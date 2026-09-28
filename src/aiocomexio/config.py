@@ -71,7 +71,7 @@ _MODULE_KNX = "11"
 _OUTPUT_IO_RE = re.compile(r"^Q\d+$")
 _INPUT_IO_RE = re.compile(r"^(?:I|AI|QI)\d+$")
 _ANALOG_OUTPUT_IO_RE = re.compile(r"^QI\d+$")
-_BINARY_IO_RE = re.compile(r"^(?:Q|I)\d+$")
+_BINARY_IO_RE = re.compile(r"^[QI]\d+$")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -136,14 +136,14 @@ def clean_value(val: Any) -> float:
         return 0.0
 
 
-def is_extension_offline(identifier: str) -> bool:
+def is_extension_offline(identifier: str | None) -> bool:
     """Return True when an extension's Identifier indicates an offline module.
 
     Online extensions report a serial number in 'XXXX-XXXX-XXXX' format; offline ones carry
-    only a short model code without dashes (e.g. '5010'). An empty string (missing field) is
+    only a short model code without dashes (e.g. '5010'). An empty or missing identifier is
     also treated as offline.
     """
-    return "-" not in identifier
+    return not isinstance(identifier, str) or "-" not in identifier
 
 
 def _table_entry(table: Mapping[str, Any], key: Any) -> Mapping[str, Any]:
@@ -394,9 +394,16 @@ def _add_webhook_command(data: dict[str, Any], w_id: str, w_obj: dict[str, Any],
     except (ValueError, TypeError):
         val_type = 1
 
+    name = w_obj.get("Name")
+    if not isinstance(name, str):
+        # An empty-string name is kept on purpose: the consumer's audit sees it as a surplus
+        # command in its own class and can delete it. A non-string one has no usable key.
+        _LOGGER.warning("Skipping Web-IO command %s (webio_class=%s) with non-string name %r", w_id, webio_class, name)
+        return
+
     # webIoId (w_id) is a global counter across ALL Web-IO devices on the server — safe to key
     # this single flat dict by command name regardless of webio_class.
-    data[_KEY_WEBIO_COMMANDS][w_obj.get("Name")] = {
+    data[_KEY_WEBIO_COMMANDS][name] = {
         "webIoId": w_id,
         "cmdId": w_obj.get("WebCommandId"),
         "typeId": val_type,
@@ -627,7 +634,9 @@ def _process_ios(
         if not isinstance(ext_meta, Mapping):
             ext_meta = {}
         ext_name = ext_meta.get("Name", f"Ext{ext_id}")
-        ext_serial = ext_meta.get("Identifier", "")
+        ext_serial = ext_meta.get("Identifier")
+        if not isinstance(ext_serial, str):
+            ext_serial = ""
         data["extensions"][ext_id] = {"name": ext_name, "serial": ext_serial}
         ext_offline = is_extension_offline(ext_serial)
 
@@ -666,8 +675,12 @@ def _build_io_entry(
     options: ParseOptions,
 ) -> dict[str, Any]:
     """Build one IO entry (without the extension's offline flag)."""
-    ident = io_item.get("Identifier") or str(io_item.get("Id", "unknown"))
-    desc = io_item.get("Description") or ident
+    raw_ident = io_item.get("Identifier")
+    # A numeric identifier is stringified, not replaced — it feeds unique_id/entity_id.
+    ident = str(raw_ident) if raw_ident and isinstance(raw_ident, (str, int)) else str(io_item.get("Id", "unknown"))
+    desc = io_item.get("Description")
+    if not isinstance(desc, str) or not desc:
+        desc = ident
     type_info = _table_entry(io_types, io_item.get("InOutputTypeId"))
     is_binary = type_info.get("binary", False)
     v_max = type_info.get("max", 1)

@@ -43,9 +43,18 @@ def _int(value: Any, default: int) -> int:
         return default
 
 
+def _float(value: Any, default: float) -> float:
+    """float(value), or default for a missing/non-numeric field."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def plan_paper_format(fubs: Mapping[str, Any], papers: Mapping[str, Any], fub_id: int) -> str:
     """Paper format name (e.g. 'A4') of a function plan, defaulting to 'A4'."""
-    return str(_paper(papers, _plan(fubs, fub_id)).get("Name", "A4"))
+    name = _paper(papers, _plan(fubs, fub_id)).get("Name")
+    return name if isinstance(name, str) and name else "A4"
 
 
 def plan_dpi(fubs: Mapping[str, Any], fub_id: int) -> int:
@@ -87,14 +96,16 @@ def plan_canvas_bounds(
     else:
         orient_id = 1 if orientation.lower() == "portrait" else 0
 
+    mm_long: float
+    mm_short: float
     if paper_name and paper_name in _PAPER_MM_BY_NAME:
         mm_long, mm_short = _PAPER_MM_BY_NAME[paper_name]
     else:
         if paper_name:
             _LOGGER.debug("Unknown paper format %r for plan %s — using the plan's own paper", paper_name, fub_id)
         paper = _paper(papers, plan)
-        mm_long = paper.get("MMX", _CANVAS_REF_MM_LONG)
-        mm_short = paper.get("MMY", _CANVAS_REF_MM_SHORT)
+        mm_long = _float(paper.get("MMX"), _CANVAS_REF_MM_LONG)
+        mm_short = _float(paper.get("MMY"), _CANVAS_REF_MM_SHORT)
 
     width_mm, height_mm = (mm_long, mm_short) if orient_id == 0 else (mm_short, mm_long)
     x_max = _CANVAS_REF_X * (width_mm / _CANVAS_REF_MM_LONG) * (res / _CANVAS_REF_RES)
