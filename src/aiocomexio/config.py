@@ -148,7 +148,7 @@ def is_extension_offline(identifier: str | None) -> bool:
 
 def _label(value: Any) -> str:
     """A scraped label as str: a number is stringified, anything else non-string (or empty) is ""."""
-    return str(value) if value and isinstance(value, (str, int)) else ""
+    return str(value) if value and isinstance(value, (str, int, float)) else ""
 
 
 def _table_entry(table: Mapping[str, Any], key: Any) -> Mapping[str, Any]:
