@@ -403,11 +403,21 @@ async def test_load_function_plan_null_collections_are_empty(logged_in: ComexioC
     assert await logged_in.load_function_plan(4) == {"elements": {}, "connections": {}}
 
 
+async def test_load_function_plan_strict_accepts_empty_collections(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_json("GET", LOAD_ELEMENTS_PATH, {"elements": [], "connections": []})
+
+    assert await logged_in.load_function_plan(4, strict=True) == {"elements": {}, "connections": {}}
+
+
 @pytest.mark.parametrize(
     ("payload", "strict"),
     [
         ({"elements": None}, True),
         ({"error": "no plan"}, True),
+        ({"elements": {}}, True),
+        ({"elements": {}, "connections": None}, True),
         (["x"], False),
         ({"elements": [1]}, False),
         ({"elements": 5}, False),

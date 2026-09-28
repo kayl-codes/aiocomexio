@@ -14,7 +14,7 @@ from .backup_diff import (
     snapshot_label_maps,
 )
 from .canvas import plan_active, plan_canvas_bounds, plan_dpi, plan_orientation, plan_paper_format
-from .payload import normalize_plan_payload, plan_payload_has_elements
+from .payload import build_run_payload, normalize_plan_payload, plan_payload_has_elements
 from .render import render_plan_svg
 from .render_flow import render_flow_svg
 from .render_labels import resolve_element_label
@@ -23,6 +23,7 @@ from .render_values import element_search_id
 
 __all__ = [
     "analyze_function_plan",
+    "build_run_payload",
     "build_source_id_translation",
     "detect_self_reset_cycles",
     "diff_snapshots",
