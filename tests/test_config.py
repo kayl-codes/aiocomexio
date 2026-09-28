@@ -329,6 +329,21 @@ def test_is_extension_offline_without_serial(identifier: Any) -> None:
     assert is_extension_offline(identifier) is True
 
 
+def test_non_string_marker_and_knx_names_do_not_crash(caplog: pytest.LogCaptureFixture) -> None:
+    conf = {
+        "FubModules": {
+            "2": {"1": {"Id": 1, "Name": 42, "Type": 1}, "2": {"Id": 2, "Name": ["x"], "Type": 1}},
+            "11": {"1": {"Id": 1, "Name": {"x": 1}, "Type": 1}},
+        }
+    }
+
+    result = parse_config(conf, io_types={}, referenced_markers={"2"})
+
+    assert [(m["id"], m["title"], m["no_name"]) for m in result["markers"]] == [("1", "42", False), ("2", "#nn", True)]
+    assert result["knx"] == []
+    assert "K1 has a non-string name {'x': 1}" in caplog.text
+
+
 def test_non_mapping_fub_modules_yields_empty_result() -> None:
     result = parse_config({"FubModules": ["garbage"]})
 

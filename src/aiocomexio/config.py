@@ -146,6 +146,11 @@ def is_extension_offline(identifier: str | None) -> bool:
     return not isinstance(identifier, str) or "-" not in identifier
 
 
+def _label(value: Any) -> str:
+    """A scraped label as str: a number is stringified, anything else non-string (or empty) is ""."""
+    return str(value) if value and isinstance(value, (str, int)) else ""
+
+
 def _table_entry(table: Mapping[str, Any], key: Any) -> Mapping[str, Any]:
     """table[str(key)] if that is a mapping, else {} — a malformed type-table row must not crash parsing."""
     entry = table.get(str(key))
@@ -431,7 +436,10 @@ def _process_source_items(
         if not isinstance(raw, dict) or raw.get("Id") is None:
             continue
         item_id = str(raw.get("Id"))
-        has_name = bool(raw.get("Name"))
+        raw_name = raw.get("Name")
+        has_name = bool(_label(raw_name))
+        if raw_name and not has_name:
+            _LOGGER.warning("%s%s has a non-string name %r — treating it as unnamed", spec.id_prefix, item_id, raw_name)
         if not has_name and item_id not in referenced_ids:
             continue
         items.append(_build_source_item(raw, spec, item_id, has_name, io_types, server_alias, live_states))
@@ -450,7 +458,7 @@ def _build_source_item(
     """Build one Marker/KNX item dict from its raw $FubModules entry."""
     type_raw = raw.get("Type", 1)
     type_str, type_unresolved = _source_item_type(spec.module_key, type_raw, io_types)
-    title = raw.get("Name") or NO_NAME_TITLE
+    title = _label(raw.get("Name")) or NO_NAME_TITLE
 
     ha_name = spec.schema.format_map(
         SafeDict(ServerAlias=server_alias, **{spec.id_placeholder: item_id, spec.title_placeholder: title})
@@ -675,9 +683,8 @@ def _build_io_entry(
     options: ParseOptions,
 ) -> dict[str, Any]:
     """Build one IO entry (without the extension's offline flag)."""
-    raw_ident = io_item.get("Identifier")
     # A numeric identifier is stringified, not replaced — it feeds unique_id/entity_id.
-    ident = str(raw_ident) if raw_ident and isinstance(raw_ident, (str, int)) else str(io_item.get("Id", "unknown"))
+    ident = _label(io_item.get("Identifier")) or str(io_item.get("Id", "unknown"))
     desc = io_item.get("Description")
     if not isinstance(desc, str) or not desc:
         desc = ident
