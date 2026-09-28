@@ -622,6 +622,15 @@ def _tag_knx_dpt3_pair(device_id: str, pair: list[dict[str, Any]], knx_dpt_catal
     stepcode_item["knx_composite"] = {"role": "stepcode", "domain": domain, "partner_id": direction_item["id"]}
 
 
+def _extension_meta(ext_id: str, ext_content: Mapping[str, Any]) -> tuple[str, str]:
+    """(name, serial) of one extension; a missing/malformed Identifier yields serial "" (= offline)."""
+    ext_meta = ext_content.get("extension")
+    if not isinstance(ext_meta, Mapping):
+        ext_meta = {}
+    ext_serial = ext_meta.get("Identifier")
+    return ext_meta.get("Name", f"Ext{ext_id}"), ext_serial if isinstance(ext_serial, str) else ""
+
+
 def _process_ios(
     data: dict[str, Any],
     fub_modules: Mapping[str, Any],
@@ -638,13 +647,7 @@ def _process_ios(
         if not isinstance(ext_content, Mapping):
             _LOGGER.debug("Skipping non-dict extension entry %s: %r", ext_id, ext_content)
             continue
-        ext_meta = ext_content.get("extension")
-        if not isinstance(ext_meta, Mapping):
-            ext_meta = {}
-        ext_name = ext_meta.get("Name", f"Ext{ext_id}")
-        ext_serial = ext_meta.get("Identifier")
-        if not isinstance(ext_serial, str):
-            ext_serial = ""
+        ext_name, ext_serial = _extension_meta(ext_id, ext_content)
         data["extensions"][ext_id] = {"name": ext_name, "serial": ext_serial}
         ext_offline = is_extension_offline(ext_serial)
 

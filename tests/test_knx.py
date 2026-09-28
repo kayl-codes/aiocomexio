@@ -60,8 +60,8 @@ def test_analog_knx_object_gets_dpt_range_and_live_value(knx_items: dict[str, di
     item = knx_items["1"]
 
     assert (item["type"], item["value"], item["ha_name"]) == ("analog", 19.5, "K1 Wohnen Temperatur")
-    expected_range = KNX_DPT_ANALOG_RANGES[(9, 1)]
-    assert (item["dpt_min"], item["dpt_max"], item["dpt_unit"], item["dpt_step"]) == expected_range
+    dpt_range = (item["dpt_min"], item["dpt_max"], item["dpt_unit"], item["dpt_step"])
+    assert dpt_range == KNX_DPT_ANALOG_RANGES[(9, 1)]
     assert item["dpt_device_class"] == "temperature"
 
 
