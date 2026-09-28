@@ -8,6 +8,7 @@ IP address, and optional "still waiting" logging for slow requests.
 import asyncio
 import ipaddress
 import logging
+import math
 import re
 from contextlib import suppress
 from types import SimpleNamespace
@@ -75,8 +76,11 @@ def progress_trace_config(interval: float = DEFAULT_PROGRESS_LOG_INTERVAL_SEC) -
     A fast request never logs anything. A long, otherwise silent wait becomes visible instead of
     looking hung; a body download that stalls after the headers is not covered (the session
     timeout still ends it). aiohttp gives every request its own trace context, so one instance can serve a
-    whole session with concurrent requests.
+    whole session with concurrent requests. Raises ValueError for a non-positive interval (it
+    would turn the logging into a busy loop).
     """
+    if interval <= 0 or math.isnan(interval):
+        raise ValueError(f"progress log interval must be positive, got {interval}")
 
     # aiohttp requires async trace callbacks even when they never await (python:S7503).
     async def on_start(  # NOSONAR

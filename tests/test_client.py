@@ -350,7 +350,7 @@ async def test_get_function_plan_connection_values(
     assert await logged_in.get_function_plan_connection_values(3) == expected
 
 
-@pytest.mark.parametrize("connection", ["{broken", "[1,", 5, True])
+@pytest.mark.parametrize("connection", ["{broken", "[1,", 5, True, 0, False])
 async def test_get_function_plan_connection_values_malformed_raises(
     logged_in: ComexioClient, comexio: FakeComexio, connection: Any
 ) -> None:

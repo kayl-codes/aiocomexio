@@ -61,6 +61,8 @@ _MESSAGES_KEY = "messages"
 
 # Plain-text answer of fupValueData for a plan that is not running (instead of a JSON value dict).
 _JSON_START_CHARS = ("{", "[")
+# Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.
+_EMPTY_CONNECTION_VALUES: tuple[Any, ...] = (None, "", [], {})
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,7 +255,7 @@ class ComexioClient:
         if isinstance(raw, str) and raw and not raw.lstrip().startswith(_JSON_START_CHARS):
             _LOGGER.debug("No connection values for plan %s (not running: %s)", fub_id, raw)
             return {}
-        return _connection_values(raw, fub_id) if raw else {}
+        return {} if raw in _EMPTY_CONNECTION_VALUES else _connection_values(raw, fub_id)
 
     async def load_function_plan(self, fub_id: int, *, strict: bool = False) -> dict[str, Any]:
         """Elements and connections of one plan, both normalized to id-keyed dicts.

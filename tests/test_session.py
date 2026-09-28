@@ -42,6 +42,12 @@ async def test_session_kwargs_with_progress_logging() -> None:
     assert len(kwargs["trace_configs"]) == 1
 
 
+@pytest.mark.parametrize("interval", [0, -1, float("nan")])
+async def test_session_kwargs_rejects_non_positive_progress_interval(interval: float) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        session_kwargs(progress_log_interval=interval)
+
+
 async def test_session_kwargs_logs_nothing_by_default() -> None:
     assert set(session_kwargs()) == {"timeout", "cookie_jar"}
 
