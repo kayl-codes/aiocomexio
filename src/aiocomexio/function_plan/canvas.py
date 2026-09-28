@@ -5,6 +5,7 @@ paper id) of the function module page.
 """
 
 import logging
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -44,11 +45,12 @@ def _int(value: Any, default: int) -> int:
 
 
 def _float(value: Any, default: float) -> float:
-    """float(value), or default for a missing/non-numeric field."""
+    """float(value), or default for a missing/non-numeric/non-finite ("nan", "inf") field."""
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return default
+    return parsed if math.isfinite(parsed) else default
 
 
 def plan_paper_format(fubs: Mapping[str, Any], papers: Mapping[str, Any], fub_id: int) -> str:
