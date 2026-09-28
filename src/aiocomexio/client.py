@@ -1229,7 +1229,14 @@ class ComexioClient:
             ) as resp:
                 if resp.status in _REDIRECT_STATUSES:
                     location = resp.headers.get("Location", "")
-                    if "login" in urlsplit(location).path.lower():
+                    try:
+                        location_path = urlsplit(location).path
+                    except ValueError as err:
+                        raise ComexioResponseError(
+                            f"{what} failed: Comexio redirected to an unparsable location {location!r}",
+                            status=resp.status,
+                        ) from err
+                    if "login" in location_path.lower():
                         raise ComexioAuthenticationError(
                             f"Comexio redirected to the login page, the session is not logged in ({what})"
                         )
@@ -1386,23 +1393,28 @@ def _plan_id_by_name(fubs: Any, name: str, *, what: str) -> int:
     found = [plan_id for plan_id, plan in iter_group(fubs) if isinstance(plan, Mapping) and plan.get("Name") == name]
     if len(found) != 1:
         raise ComexioDataError(f"{what}: $Fubs lists {len(found)} plans with that name")
-    try:
-        return int(found[0])
-    except ValueError as err:
-        raise ComexioDataError(f"{what}: the new plan has a non-numeric id {found[0]!r}") from err
+    plan_id = _positive_id(found[0])
+    if plan_id is None:
+        raise ComexioDataError(f"{what}: the new plan has no valid id, $Fubs lists it under {found[0]!r}")
+    return plan_id
 
 
 def _answer_id(result: dict[str, Any], what: str) -> int:
     """The "id" of an add_element / saveconnection answer; an "error" answer is a refusal."""
     if "error" in result:
         raise ComexioRequestRejectedError(f"{what} was refused: {_excerpt(result)}")
-    value = result.get(_ID_KEY)
-    # int() would turn true into 1 and 1.9 into 1: only a positive integer, as number or digit string, is an id.
+    value = _positive_id(result.get(_ID_KEY))
+    if value is None:
+        raise ComexioDataError(f"{what}: answer carries no id: {_excerpt(result)}")
+    return value
+
+
+def _positive_id(value: Any) -> int | None:
+    """value as a Comexio id, or None: only a positive integer, as number or ASCII digit string."""
+    # int() would turn true into 1, 1.9 into 1 and "-3" into -3.
     if isinstance(value, str) and value.isascii() and value.isdigit():
         value = int(value)
-    if _is_int(value) and value > 0:
-        return value
-    raise ComexioDataError(f"{what}: answer carries no id: {_excerpt(result)}")
+    return value if _is_int(value) and value > 0 else None
 
 
 def _marker_type(binary: bool) -> str:

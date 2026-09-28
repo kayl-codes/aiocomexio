@@ -61,22 +61,28 @@ def build_run_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
     live one, so a missing or malformed collection raises ValueError instead. The same holds for
     anything that would run as a partial element or wire: an element that is no object, a
     connection without its input or output collection, an endpoint without its FubElementId, or
-    two connection ids that collapse into one key. A plan that is no mapping at all raises TypeError.
+    two element, connection or output ids that collapse into one JSON key. A plan that is no
+    mapping at all raises TypeError.
     """
     if not isinstance(plan, Mapping):
         raise TypeError(f"A plan to run must be a mapping, not {type(plan).__name__}")
     elements, connections = plan.get("elements"), plan.get("connections")
     if not isinstance(elements, Mapping) or not isinstance(connections, Mapping):
         raise ValueError("A plan to run needs its elements and connections as objects")
+    run_elements: dict[str, Any] = {}
     for element_id, element in elements.items():
         if not isinstance(element, Mapping):
             raise ValueError(f"Element {element_id!r} is {type(element).__name__}, not an object")
+        # 1 and "1" become one JSON key; json.dumps would silently keep only one of the two elements.
+        if str(element_id) in run_elements:
+            raise ValueError(f"Element ids collide on {str(element_id)!r}")
+        run_elements[str(element_id)] = element
     run_connections: dict[str, Any] = {}
     for conn_id, conn in connections.items():
         if str(conn_id) in run_connections:
             raise ValueError(f"Connection ids collide on {str(conn_id)!r}")
         run_connections[str(conn_id)] = _run_connection(conn_id, conn)
-    return {"elements": dict(elements), "connections": run_connections}
+    return {"elements": run_elements, "connections": run_connections}
 
 
 def _run_connection(conn_id: Any, conn: Any) -> dict[str, Any]:

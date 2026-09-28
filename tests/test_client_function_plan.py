@@ -161,14 +161,15 @@ async def test_create_function_plan_not_found_once_in_fubs_is_a_data_error(
     assert any("only reading back its id failed" in note for note in caught.value.__notes__)
 
 
-async def test_create_function_plan_non_numeric_id_is_a_data_error(
-    logged_in: ComexioClient, comexio: FakeComexio
+@pytest.mark.parametrize("plan_key", ["x", "0", "-3", "1.0"])
+async def test_create_function_plan_invalid_id_is_a_data_error(
+    logged_in: ComexioClient, comexio: FakeComexio, plan_key: str
 ) -> None:
     comexio.serve_json("POST", UNIQUE_CHECK_PATH, {"result": True})
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
-    _serve_plans(comexio, {"x": {"Name": "Neu"}})
+    _serve_plans(comexio, {plan_key: {"Name": "Neu"}})
 
-    with pytest.raises(ComexioDataError, match="non-numeric id") as caught:
+    with pytest.raises(ComexioDataError, match="no valid id") as caught:
         await logged_in.create_function_plan("Neu")
     assert any("only reading back its id failed" in note for note in caught.value.__notes__)
 
@@ -260,6 +261,13 @@ async def test_create_function_plan_read_back_failure_says_the_plan_exists(
     with pytest.raises(ComexioResponseError) as caught:
         await logged_in.create_function_plan("Neu")
     assert any("only reading back its id failed" in note for note in caught.value.__notes__)
+
+
+async def test_unparsable_redirect_location_is_a_response_error(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    _serve_redirect(comexio, "GET", PLAN_DELETE_PATH, "http://[::1/admin/home")
+
+    with pytest.raises(ComexioResponseError, match="unparsable location"):
+        await logged_in.delete_function_plan(9)
 
 
 @pytest.mark.parametrize("location", ["/board/home/login/", "http://comexio/admin/home/Login?next=saved=1"])

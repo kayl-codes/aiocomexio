@@ -113,6 +113,7 @@ def test_build_run_payload_turns_output_lists_into_indexed_objects() -> None:
         ),
         ({"elements": {}, "connections": {"1": {"input": _IN, "output": {0: _IN, "0": _IN}}}}, "Output ids .* collide"),
         ({"elements": {"10": None}, "connections": {}}, "Element '10'"),
+        ({"elements": {1: {}, "1": {}}, "connections": {}}, "Element ids collide"),
     ],
 )
 def test_build_run_payload_never_turns_a_broken_plan_into_an_empty_one(plan: dict[str, Any], match: str) -> None:
