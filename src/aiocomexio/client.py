@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import Any
+from typing import Any, TypeIs
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -120,9 +120,9 @@ _PLAN_ORIENTATION_IDS = {"landscape": "0", "portrait": "1"}
 _PLAN_DPI_RANGE = range(45, 121)
 # save_fub / delete answer with a redirect whose query carries the verdict.
 _REDIRECT_STATUSES = frozenset({HTTPStatus.MOVED_PERMANENTLY, HTTPStatus.FOUND, HTTPStatus.SEE_OTHER})
-_PLAN_ADDED_TOKEN = "added=1"
-_PLAN_SAVED_TOKEN = "saved=1"
-_PLAN_DELETED_TOKEN = "delete=ok"
+_PLAN_ADDED_CONFIRMATION = "added=1"
+_PLAN_SAVED_CONFIRMATION = "saved=1"
+_PLAN_DELETED_CONFIRMATION = "delete=ok"
 # Element types and the catalog ref_id add_element needs for blocks that have no catalog entry.
 _ELEMENT_TYPE_COMMENT = 14
 _ELEMENT_TYPE_CONSTANT = 16
@@ -831,7 +831,7 @@ class ComexioClient:
         form = _plan_form(name, comment, paper_format, orientation, dpi)
         await self._check_name_unique("fub", None, name, what=what)
         form.update({"fub_position": "-1", "fub_active": "0", "fub_reset_on_close": "0", "fub_create": "Erzeugen"})
-        await self._post_plan_form(form, _PLAN_ADDED_TOKEN, what=what)
+        await self._post_plan_form(form, _PLAN_ADDED_CONFIRMATION, what=what)
         try:
             config = await self.get_raw_config()
         except ComexioError as err:
@@ -870,7 +870,7 @@ class ComexioClient:
                 "fub_save": "Speichern",
             }
         )
-        await self._post_plan_form(form, _PLAN_SAVED_TOKEN, what=what)
+        await self._post_plan_form(form, _PLAN_SAVED_CONFIRMATION, what=what)
 
     async def delete_function_plan(self, fub_id: int) -> None:
         """Delete a whole function plan with everything on it.
@@ -885,7 +885,7 @@ class ComexioClient:
             params={"id": str(fub_id)},
             headers=self._xhr_headers(_FUNCTION_MODULE_PATH),
         )
-        if _PLAN_DELETED_TOKEN not in location:
+        if _PLAN_DELETED_CONFIRMATION not in location:
             raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
 
     async def run_function_plan(self, fub_id: int, plan: Mapping[str, Any] | None = None) -> None:
@@ -1266,6 +1266,8 @@ def _expect_object(data: Any, what: str) -> dict[str, Any]:
 
 def _plan_form(name: str, comment: str, paper_format: str, orientation: str, dpi: int) -> dict[str, str]:
     """The save_fub fields create and update share; ValueError for a value Comexio does not offer."""
+    if not isinstance(paper_format, str) or not isinstance(orientation, str):
+        raise TypeError(f"paper_format and orientation must be strings, not {paper_format!r} / {orientation!r}")
     try:
         paper_id = _PLAN_PAPER_IDS[paper_format.upper()]
     except KeyError:
@@ -1288,7 +1290,7 @@ def _plan_form(name: str, comment: str, paper_format: str, orientation: str, dpi
     }
 
 
-def _is_int(value: Any) -> bool:
+def _is_int(value: Any) -> TypeIs[int]:
     """True for an int that is not a bool (range membership lets True and 2.0 through)."""
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -1308,10 +1310,13 @@ def _answer_id(result: dict[str, Any], what: str) -> int:
     """The "id" of an add_element / saveconnection answer; an "error" answer is a refusal."""
     if "error" in result:
         raise ComexioRequestRejectedError(f"{what} was refused: {_excerpt(result)}")
-    try:
-        return int(result[_ID_KEY])
-    except (KeyError, TypeError, ValueError) as err:
-        raise ComexioDataError(f"{what}: answer carries no id: {_excerpt(result)}") from err
+    value = result.get(_ID_KEY)
+    # int() would turn true into 1 and 1.9 into 1: only a positive integer, as number or digit string, is an id.
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        value = int(value)
+    if _is_int(value) and value > 0:
+        return value
+    raise ComexioDataError(f"{what}: answer carries no id: {_excerpt(result)}")
 
 
 def _marker_type(binary: bool) -> str:

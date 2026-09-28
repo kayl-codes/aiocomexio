@@ -139,6 +139,15 @@ async def test_create_function_plan_invalid_settings_raise_before_any_request(
     assert comexio.received_at("POST", UNIQUE_CHECK_PATH) == []
 
 
+@pytest.mark.parametrize("kwargs", [{"paper_format": None}, {"orientation": 0}])
+async def test_create_function_plan_non_string_settings_raise_type_error_before_any_request(
+    logged_in: ComexioClient, comexio: FakeComexio, kwargs: dict[str, Any]
+) -> None:
+    with pytest.raises(TypeError, match="must be strings"):
+        await logged_in.create_function_plan("Neu", **kwargs)
+    assert comexio.received_at("POST", UNIQUE_CHECK_PATH) == []
+
+
 @pytest.mark.parametrize("fubs", [{"1": {"Name": "Alt"}}, {"1": {"Name": "Neu"}, "2": {"Name": "Neu"}}, []])
 async def test_create_function_plan_not_found_once_in_fubs_is_a_data_error(
     logged_in: ComexioClient, comexio: FakeComexio, fubs: Any
@@ -418,6 +427,14 @@ async def test_add_function_plan_element_with_connection(logged_in: ComexioClien
         ({}, ComexioDataError),
         ({"id": None}, ComexioDataError),
         ({"id": "neu"}, ComexioDataError),
+        ({"id": True}, ComexioDataError),
+        ({"id": 1.9}, ComexioDataError),
+        ({"id": "1.0"}, ComexioDataError),
+        ({"id": "-3"}, ComexioDataError),
+        ({"id": -3}, ComexioDataError),
+        ({"id": 0}, ComexioDataError),
+        ({"id": "0"}, ComexioDataError),
+        ({"id": "²"}, ComexioDataError),
         (["55"], ComexioDataError),
     ],
 )
