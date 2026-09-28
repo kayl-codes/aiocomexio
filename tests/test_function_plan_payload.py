@@ -66,13 +66,16 @@ def test_normalize_rejects_non_object_list_item() -> None:
 # --- run payload ---------------------------------------------------------------------------------
 
 
+_IN = {"FubElementId": 10, "IOPos": 0}
+
+
 def test_build_run_payload_turns_output_lists_into_indexed_objects() -> None:
     plan: dict[str, Any] = {
         "elements": {"10": {"id": 10}},
         "connections": {
-            "1": {"id": 1, "output": [{"FubElementId": 11}, {"FubElementId": 12}]},
-            "2": {"id": 2, "output": {"0": {"FubElementId": 13}}},
-            "3": {"id": 3},
+            "1": {"id": 1, "input": _IN, "output": [{"FubElementId": 11}, {"FubElementId": 12}]},
+            "2": {"id": 2, "input": _IN, "output": {"0": {"FubElementId": 13}}},
+            "3": {"id": 3, "input": _IN, "output": []},
         },
     }
 
@@ -81,9 +84,9 @@ def test_build_run_payload_turns_output_lists_into_indexed_objects() -> None:
     assert payload == {
         "elements": {"10": {"id": 10}},
         "connections": {
-            "1": {"id": 1, "output": {"0": {"FubElementId": 11}, "1": {"FubElementId": 12}}},
-            "2": {"id": 2, "output": {"0": {"FubElementId": 13}}},
-            "3": {"id": 3, "output": {}},
+            "1": {"id": 1, "input": _IN, "output": {"0": {"FubElementId": 11}, "1": {"FubElementId": 12}}},
+            "2": {"id": 2, "input": _IN, "output": {"0": {"FubElementId": 13}}},
+            "3": {"id": 3, "input": _IN, "output": {}},
         },
     }
     assert plan["connections"]["1"]["output"] == [{"FubElementId": 11}, {"FubElementId": 12}]
@@ -96,7 +99,19 @@ def test_build_run_payload_turns_output_lists_into_indexed_objects() -> None:
         ({"elements": {}}, "elements and connections"),
         ({"elements": [], "connections": {}}, "elements and connections"),
         ({"elements": {}, "connections": {"1": []}}, "not an object"),
-        ({"elements": {}, "connections": {"1": {"output": "x"}}}, "not a list"),
+        ({"elements": {}, "connections": {"1": {"input": _IN, "output": "x"}}}, "not a list or object"),
+        ({"elements": {}, "connections": {"1": {"id": 1, "input": _IN}}}, "no output collection"),
+        ({"elements": {}, "connections": {"1": {"id": 1, "output": []}}}, "no input endpoint"),
+        ({"elements": {}, "connections": {"1": {"input": None, "output": []}}}, "no input endpoint"),
+        ({"elements": {}, "connections": {"1": {"input": {"IOPos": 0}, "output": []}}}, "no input endpoint"),
+        ({"elements": {}, "connections": {"1": {"input": _IN, "output": [None]}}}, "no endpoint"),
+        ({"elements": {}, "connections": {"1": {"input": _IN, "output": {"0": 5}}}}, "no endpoint"),
+        ({"elements": {}, "connections": {"1": {"input": _IN, "output": [{"IOPos": 0}]}}}, "no endpoint"),
+        (
+            {"elements": {}, "connections": {1: {"input": _IN, "output": []}, "1": {"input": _IN, "output": []}}},
+            "collide",
+        ),
+        ({"elements": {"10": None}, "connections": {}}, "Element '10'"),
     ],
 )
 def test_build_run_payload_never_turns_a_broken_plan_into_an_empty_one(plan: dict[str, Any], match: str) -> None:

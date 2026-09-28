@@ -349,23 +349,34 @@ async def test_run_function_plan_never_runs_a_plan_that_failed_to_load(
     assert comexio.received_at("POST", PLAN_RUN_PATH) == []
 
 
+_SOURCE = {"FubElementId": 10}
+
+
 @pytest.mark.parametrize(
-    "answer",
+    ("answer", "match"),
     [
-        {"elements": {"10": {"id": 10}}},
-        {"elements": {"10": {"id": 10}}, "connections": None},
-        {"connections": []},
-        {"elements": {}, "connections": {"3": {"id": 3, "output": None}}},
-        {"elements": {}, "connections": {"3": None}},
+        (
+            {"elements": {"10": {"id": 10}}},
+            "no elements / connections collection|no connections collection|no elements collection",
+        ),
+        (
+            {"elements": {"10": {"id": 10}}, "connections": None},
+            "no elements / connections collection|no connections collection|no elements collection",
+        ),
+        ({"connections": []}, "no elements / connections collection|no connections collection|no elements collection"),
+        ({"elements": {}, "connections": {"3": {"id": 3, "input": _SOURCE, "output": None}}}, "not a list or object"),
+        ({"elements": {}, "connections": {"3": {"id": 3, "input": _SOURCE}}}, "no output collection"),
+        ({"elements": {}, "connections": {"3": {"id": 3, "output": []}}}, "no input endpoint"),
+        ({"elements": {}, "connections": {"3": None}}, "not an object"),
     ],
 )
 async def test_run_function_plan_without_plan_never_runs_an_incomplete_answer(
-    logged_in: ComexioClient, comexio: FakeComexio, answer: dict[str, Any]
+    logged_in: ComexioClient, comexio: FakeComexio, answer: dict[str, Any], match: str
 ) -> None:
     # A missing collection would be normalized to {} and wipe the live plan's elements or wires.
     comexio.serve_json("GET", LOAD_ELEMENTS_PATH, answer)
 
-    with pytest.raises(ComexioDataError):
+    with pytest.raises(ComexioDataError, match=match):
         await logged_in.run_function_plan(4)
     assert comexio.received_at("POST", PLAN_RUN_PATH) == []
 
