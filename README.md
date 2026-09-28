@@ -23,7 +23,7 @@ pip install aiocomexio
 ## Usage
 
 The client works on an `aiohttp.ClientSession` you create and close yourself.
-`session_kwargs(host)` gives it the settings Comexio needs (a cookie jar that keeps the admin
+`session_kwargs()` gives it the settings Comexio needs (a cookie jar that keeps the admin
 login for an IP-address host, a request timeout; `progress_log_interval=10` adds a "still
 waiting" log line for slow requests). Give every client its own session: `login()` clears the
 session's cookie jar. Every call either returns data or raises a
@@ -41,7 +41,7 @@ from aiocomexio.config import parse_config
 
 async def main() -> None:
     host = "192.168.0.20"
-    async with aiohttp.ClientSession(**session_kwargs(host)) as session:
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
         client = ComexioClient(host, "admin", "secret", session=session)
         await client.login()
         raw = await client.get_raw_config()

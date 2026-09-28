@@ -214,12 +214,10 @@ class ComexioClient:
         An id the server leaves out of its answer is absent from the result, not 0.
         """
         refresh: dict[str, Any] = {str(i): {"action": "get", "MarkerName": f"M{i}"} for i in range(1, marker_count + 1)}
-        refresh.update(
-            {
-                f"{_KNX_LIVE_KEY_PREFIX}{i}": {"action": "get", "KnxIo": f"K{i}", "Unit": "any"}
-                for i in range(1, knx_max_id + 1)
-            }
-        )
+        refresh |= {
+            f"{_KNX_LIVE_KEY_PREFIX}{i}": {"action": "get", "KnxIo": f"K{i}", "Unit": "any"}
+            for i in range(1, knx_max_id + 1)
+        }
         refresh[_MESSAGES_KEY] = {"action": "messages"}
 
         data = await self._dashboard_refresh(refresh, what="Live states")
@@ -255,9 +253,7 @@ class ComexioClient:
         if isinstance(raw, str) and raw and not raw.lstrip().startswith(_JSON_START_CHARS):
             _LOGGER.debug("No connection values for plan %s (not running: %s)", fub_id, raw)
             return {}
-        if not raw:
-            return {}
-        return _connection_values(raw, fub_id)
+        return _connection_values(raw, fub_id) if raw else {}
 
     async def load_function_plan(self, fub_id: int, *, strict: bool = False) -> dict[str, Any]:
         """Elements and connections of one plan, both normalized to id-keyed dicts.
@@ -311,8 +307,9 @@ class ComexioClient:
             raise ComexioDataError(f"Bulk function plan payload is not an object: {_excerpt(raw)}")
 
         plans: dict[int, dict[str, Any]] = {}
+        seen: set[int] = set()
         for fid_str, data in raw.items():
-            entry = _bulk_plan_entry(fid_str, data, wanted, strict=strict)
+            entry = _bulk_plan_entry(fid_str, data, wanted, seen, strict=strict)
             if entry is not None:
                 plans[entry[0]] = entry[1]
         _LOGGER.debug("Loaded %d function plans in %.2fs (bulk request)", len(plans), time.monotonic() - started)
@@ -441,14 +438,21 @@ def _connection_values(raw: Any, fub_id: int) -> dict[str, list[Any]]:
 
 
 def _bulk_plan_entry(
-    fid_str: Any, data: Any, wanted: set[int] | None, *, strict: bool
+    fid_str: Any, data: Any, wanted: set[int] | None, seen: set[int], *, strict: bool
 ) -> tuple[int, dict[str, Any]] | None:
-    """(fub_id, normalized plan) for one loadallelements entry, or None if skipped."""
+    """(fub_id, normalized plan) for one loadallelements entry, or None if skipped.
+
+    Raises ComexioDataError if the id was already seen (e.g. "1" and "01"): there is no way to
+    tell which payload is the real plan, even if one of them would be skipped as malformed.
+    """
     try:
         fub_id = int(fid_str)
     except (TypeError, ValueError):
         _LOGGER.warning("Skipping bulk function plan entry with non-numeric id %r", fid_str)
         return None
+    if fub_id in seen:
+        raise ComexioDataError(f"Bulk function plan payload lists plan {fub_id} twice")
+    seen.add(fub_id)
     if wanted is not None and fub_id not in wanted:
         return None
     if not isinstance(data, dict):

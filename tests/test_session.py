@@ -6,6 +6,7 @@ import logging
 import aiohttp
 import pytest
 from aiohttp import web
+from yarl import URL
 
 from aiocomexio import is_local_address, session_kwargs
 from tests.fake_comexio import ADMIN_PATH, FakeComexio
@@ -34,18 +35,24 @@ def test_is_local_address(host: str, expected: bool) -> None:
     assert is_local_address(host) is expected
 
 
-async def test_session_kwargs_local_host_gets_unsafe_cookie_jar() -> None:
-    kwargs = session_kwargs("192.168.0.5", timeout=30, progress_log_interval=10)
+async def test_session_kwargs_with_progress_logging() -> None:
+    kwargs = session_kwargs(timeout=30, progress_log_interval=10)
 
-    assert isinstance(kwargs["cookie_jar"], aiohttp.CookieJar)
     assert kwargs["timeout"].total == 30
     assert len(kwargs["trace_configs"]) == 1
 
 
-async def test_session_kwargs_remote_host_keeps_default_cookie_jar_and_logs_nothing_by_default() -> None:
-    kwargs = session_kwargs("comexio.example.com")
+async def test_session_kwargs_logs_nothing_by_default() -> None:
+    assert set(session_kwargs()) == {"timeout", "cookie_jar"}
 
-    assert set(kwargs) == {"timeout"}
+
+@pytest.mark.parametrize("ip", ["192.168.0.5", "203.0.113.7"])
+async def test_session_cookie_jar_keeps_cookies_from_private_and_public_ips(ip: str) -> None:
+    # aiohttp's default jar silently drops cookies from any IP host, which would lose the login.
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        session.cookie_jar.update_cookies({"PHPSESSID": "x"}, URL(f"http://{ip}/"))
+
+        assert session.cookie_jar.filter_cookies(URL(f"http://{ip}/admin/"))["PHPSESSID"].value == "x"
 
 
 async def test_progress_logging_stops_after_the_request(comexio: FakeComexio, caplog: pytest.LogCaptureFixture) -> None:
@@ -56,7 +63,7 @@ async def test_progress_logging_stops_after_the_request(comexio: FakeComexio, ca
     comexio.serve("GET", ADMIN_PATH, slow)
 
     with caplog.at_level(logging.INFO, logger="aiocomexio.session"):
-        async with aiohttp.ClientSession(**session_kwargs(comexio.host, progress_log_interval=0.1)) as session:
+        async with aiohttp.ClientSession(**session_kwargs(progress_log_interval=0.1)) as session:
             async with session.get(f"http://{comexio.host}{ADMIN_PATH}") as resp:
                 assert await resp.text() == "done"
             # A fast request after the slow one must not keep logging.
@@ -76,7 +83,7 @@ async def test_slow_request_progress_line(comexio: FakeComexio, caplog: pytest.L
     comexio.serve("GET", ADMIN_PATH, slow)
 
     with caplog.at_level(logging.INFO, logger="aiocomexio.session"):
-        async with aiohttp.ClientSession(**session_kwargs(comexio.host, progress_log_interval=0.1)) as session:
+        async with aiohttp.ClientSession(**session_kwargs(progress_log_interval=0.1)) as session:
             async with session.get(f"http://{comexio.host}{ADMIN_PATH}") as resp:
                 await resp.text()
 
@@ -90,7 +97,7 @@ async def test_progress_logging_stops_on_request_exception(
     await comexio.server.close()
 
     with caplog.at_level(logging.INFO, logger="aiocomexio.session"):
-        async with aiohttp.ClientSession(**session_kwargs(host, progress_log_interval=0.05)) as session:
+        async with aiohttp.ClientSession(**session_kwargs(progress_log_interval=0.05)) as session:
             with pytest.raises(aiohttp.ClientConnectionError):
                 await session.get(f"http://{host}{ADMIN_PATH}")
             # Refused connections can take seconds on Windows, logging while they wait — fine.

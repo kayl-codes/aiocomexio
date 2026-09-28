@@ -48,22 +48,22 @@ def is_local_address(host: str) -> bool:
 
 
 def session_kwargs(
-    host: str,
     *,
     timeout: float = DEFAULT_TIMEOUT_SEC,
     progress_log_interval: float | None = None,
 ) -> dict[str, Any]:
-    """Keyword arguments for the aiohttp.ClientSession a ComexioClient for host should use.
+    """Keyword arguments for the aiohttp.ClientSession a ComexioClient should use.
 
     Comexio's admin login is cookie-based. aiohttp's default cookie jar drops cookies from a bare
-    IP address, so for a local host the jar is created with unsafe=True. For a non-local host the
-    default jar is kept. Each session needs its own cookie jar — two clients sharing one would
-    share (and overwrite) one login, and the client clears the jar on every login. Pass
+    IP address (private or public), so the jar is always created with unsafe=True; for a host
+    name that flag changes nothing. Each session needs its own cookie jar — two clients sharing
+    one would share (and overwrite) one login, and the client clears the jar on every login. Pass
     progress_log_interval (e.g. DEFAULT_PROGRESS_LOG_INTERVAL_SEC) to log slow requests.
     """
-    kwargs: dict[str, Any] = {"timeout": aiohttp.ClientTimeout(total=timeout)}
-    if is_local_address(host):
-        kwargs["cookie_jar"] = aiohttp.CookieJar(unsafe=True)
+    kwargs: dict[str, Any] = {
+        "timeout": aiohttp.ClientTimeout(total=timeout),
+        "cookie_jar": aiohttp.CookieJar(unsafe=True),
+    }
     if progress_log_interval is not None:
         kwargs["trace_configs"] = [progress_trace_config(progress_log_interval)]
     return kwargs

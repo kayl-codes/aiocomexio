@@ -19,7 +19,7 @@ async def comexio() -> AsyncIterator[FakeComexio]:
 
 @pytest.fixture
 async def session(comexio: FakeComexio) -> AsyncIterator[aiohttp.ClientSession]:
-    async with aiohttp.ClientSession(**session_kwargs(comexio.host, progress_log_interval=None)) as session:
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
         yield session
 
 

@@ -35,6 +35,9 @@ var $IOInputTypes = {"1": {"input": true}};
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
+# One key for the whole test run: generating a 2048-bit key per test would slow the suite down.
+_RSA_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
 
 def json_response(payload: Any, status: int = 200) -> web.Response:
     """A JSON body served as text/html, like Comexio's own XHR endpoints."""
@@ -45,7 +48,7 @@ class FakeComexio:
     """Serves the Comexio endpoints the client reads; tests override single routes via .routes."""
 
     def __init__(self) -> None:
-        self._key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        self._key = _RSA_KEY
         self.logins: list[dict[str, str]] = []
         self.requests: list[tuple[str, str]] = []
         self.decrypted_blocks: list[str] = []

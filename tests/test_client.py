@@ -85,13 +85,13 @@ async def test_login_does_not_reuse_an_earlier_session_cookie(
 async def test_login_with_too_long_password_fails_before_sending_it(
     comexio: FakeComexio, session: aiohttp.ClientSession
 ) -> None:
-    # 1024-bit key: 128 - 11 padding bytes, minus salt and nonce, leaves 93 bytes for the password.
-    fitting = ComexioClient(comexio.host, USERNAME, "x" * 93, session=session)
-    too_long = ComexioClient(comexio.host, USERNAME, "x" * 94, session=session)
+    # 2048-bit key: 256 - 11 padding bytes, minus salt and nonce, leaves 221 bytes for the password.
+    fitting = ComexioClient(comexio.host, USERNAME, "x" * 221, session=session)
+    too_long = ComexioClient(comexio.host, USERNAME, "x" * 222, session=session)
 
     with pytest.raises(ComexioAuthenticationError, match="rejected"):
         await fitting.login()
-    with pytest.raises(ComexioAuthenticationError, match="too long.*93 bytes"):
+    with pytest.raises(ComexioAuthenticationError, match="too long.*221 bytes"):
         await too_long.login()
     assert len(comexio.logins) == 1
 
@@ -144,7 +144,7 @@ async def test_login_on_unreachable_server_raises_connection_error(comexio: Fake
     host = comexio.host
     await comexio.server.close()
 
-    async with aiohttp.ClientSession(**session_kwargs(host, progress_log_interval=None)) as session:
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
         client = ComexioClient(host, USERNAME, PASSWORD, session=session)
         with pytest.raises(ComexioConnectionError):
             await client.login()
@@ -157,7 +157,7 @@ async def test_request_timeout_raises_connection_error(comexio: FakeComexio) -> 
 
     comexio.serve("GET", ADMIN_PATH, slow)
 
-    async with aiohttp.ClientSession(**session_kwargs(comexio.host, timeout=0.1, progress_log_interval=None)) as s:
+    async with aiohttp.ClientSession(**session_kwargs(timeout=0.1)) as s:
         client = ComexioClient(comexio.host, USERNAME, PASSWORD, session=s)
         with pytest.raises(ComexioConnectionError):
             await client.get_raw_config()
@@ -173,8 +173,9 @@ def test_plain_http_warning_only_for_non_local_hosts_and_only_once(caplog: pytes
         remote._warn_plain_http()
         local._warn_plain_http()
 
-    assert caplog.text.count("plain HTTP") == 1
-    assert "comexio.example.com" in caplog.text
+    (record,) = caplog.records
+    assert "plain HTTP" in record.message
+    assert record.args == ("comexio.example.com",)
 
 
 # --- config scraping -----------------------------------------------------------------------
@@ -464,6 +465,16 @@ async def test_load_all_function_plans_empty_array_is_no_plans(logged_in: Comexi
     comexio.serve_json("GET", LOAD_ALL_ELEMENTS_PATH, [])
 
     assert await logged_in.load_all_function_plans() == {}
+
+
+@pytest.mark.parametrize("second", [{"elements": {"7": _ELEMENT}}, "not an object"])
+async def test_load_all_function_plans_same_id_twice_raises(
+    logged_in: ComexioClient, comexio: FakeComexio, second: Any
+) -> None:
+    comexio.serve_json("GET", LOAD_ALL_ELEMENTS_PATH, {"1": {"elements": {}}, "01": second})
+
+    with pytest.raises(ComexioDataError, match="plan 1 twice"):
+        await logged_in.load_all_function_plans()
 
 
 async def test_load_all_function_plans_non_object_raises(logged_in: ComexioClient, comexio: FakeComexio) -> None:
