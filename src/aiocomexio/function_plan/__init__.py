@@ -6,6 +6,7 @@ backup snapshot render identically.
 """
 
 from .analysis import analyze_function_plan
+from .canvas import plan_active, plan_canvas_bounds, plan_dpi, plan_orientation, plan_paper_format
 from .render import render_plan_svg
 from .render_flow import render_flow_svg
 from .render_labels import resolve_element_label
@@ -16,6 +17,11 @@ __all__ = [
     "analyze_function_plan",
     "detect_self_reset_cycles",
     "element_search_id",
+    "plan_active",
+    "plan_canvas_bounds",
+    "plan_dpi",
+    "plan_orientation",
+    "plan_paper_format",
     "render_flow_svg",
     "render_plan_svg",
     "resolve_element_label",

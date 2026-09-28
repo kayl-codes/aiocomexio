@@ -88,7 +88,7 @@ def render_plan_svg(
     dependency of its own.
 
     canvas: optional (width, height) of the plan's paper in Studio units (see
-    api.get_fub_canvas_bounds). When given, the viewBox spans the whole paper and elements
+    canvas.plan_canvas_bounds). When given, the viewBox spans the whole paper and elements
     keep their absolute canvas coordinates, so plans of the same paper size all render at
     the same relative scale (a nearly empty plan no longer blows up to card width). None
     (e.g. snapshots of deleted plans) falls back to fitting the content bounding box.

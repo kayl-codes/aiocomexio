@@ -18,9 +18,12 @@ Pre-alpha. Planned order of the move:
    the integration's `tests/unit/` and `tests/fixtures/comexio/`.
    - Done: `aiocomexio.function_plan` — SVG preview (`render_plan_svg`), signal-flow diagram
      (`render_flow_svg`), read-only health check (`analyze_function_plan`) and label/search helpers.
-   - Open: config parsing, Web-IO command builders, KNX DPT handling (currently `ComexioAPI`
-     methods in the integration's `api.py`, need to become free functions first) and the function
-     plan backup diff.
+   - Done: `aiocomexio.scrape` (`var $Name = {...}` scraping, IO type tables, firmware version),
+     `aiocomexio.config.parse_config` (markers, IOs, KNX objects, Web-IO commands — consumer
+     settings come in as `ParseOptions`, no `ConfigEntry`), `aiocomexio.knx` (DPT tables and
+     `resolve_knx_dpt`) and the plan paper/canvas helpers in `aiocomexio.function_plan.canvas`.
+   - Open: Web-IO command builders (incl. the KNX loopback range) and the function plan backup
+     diff.
 2. The client itself (RSA admin login, config scraping, Web-IO lifecycle, API writes), decoupled from
    Home Assistant: the caller injects an `aiohttp.ClientSession` (HA Core requirement — never create
    a session inside the library), CPU-bound work is not pushed to a HA executor, and nothing reads
