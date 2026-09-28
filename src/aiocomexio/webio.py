@@ -22,6 +22,7 @@ from .const import (
 from .knx import KNX_DPT_ANALOG_RANGES, resolve_knx_dpt
 
 __all__ = [
+    "CONTENT_TYPE_JSON",
     "build_io_webio_command",
     "build_knx_loopback_webio_command",
     "build_marker_webio_command",
@@ -36,7 +37,8 @@ __all__ = [
 
 _LOGGER = logging.getLogger(__name__)
 
-_CONTENT_TYPE_JSON = "Content-Type: application/json"
+# HeaderModifier of every JSON-POST Web-IO command (the default of ComexioClient.save_webio_command).
+CONTENT_TYPE_JSON = "Content-Type: application/json"
 
 
 def lua_escape(value: Any) -> str:
@@ -59,7 +61,7 @@ def _webio_command(
         "Min": min_v,
         "Max": max_v,
         "Parameter": webhook_path,
-        "HeaderModifier": _CONTENT_TYPE_JSON,
+        "HeaderModifier": CONTENT_TYPE_JSON,
         "Data": data,
         "Protocol": 0,
         "PostGet": 1,

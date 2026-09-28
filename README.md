@@ -8,11 +8,11 @@ provide the communication layer of the
 [homeassistant-comexio](https://github.com/kayl-codes/homeassistant-comexio) integration.
 
 > **Status: pre-alpha.** The code is being moved over from the integration step by step. So far:
-> admin login and read access (`ComexioClient`), admin page scraping (`aiocomexio.scrape`), config
-> parsing (`aiocomexio.config`), KNX DPT tables (`aiocomexio.knx`), Web-IO command builders
-> (`aiocomexio.webio`) and function plan rendering and diffing (`aiocomexio.function_plan`). Writes
-> (API values, Web-IO lifecycle, function plan editing) are not there yet, and the API may still
-> change.
+> admin login, read access, value writes, the Web-IO lifecycle and marker / KNX object management
+> (`ComexioClient`), admin page scraping (`aiocomexio.scrape`), config parsing
+> (`aiocomexio.config`), KNX DPT tables (`aiocomexio.knx`), Web-IO command builders
+> (`aiocomexio.webio`) and function plan rendering and diffing (`aiocomexio.function_plan`).
+> Function plan editing is not there yet, and the API may still change.
 
 ## Installation
 
@@ -26,9 +26,11 @@ The client works on an `aiohttp.ClientSession` you create and close yourself.
 `session_kwargs()` gives it the settings Comexio needs (a cookie jar that keeps the admin
 login for an IP-address host, a request timeout; `progress_log_interval=10` adds a "still
 waiting" log line for slow requests). Give every client its own session: `login()` clears the
-session's cookie jar. Every call either returns data or raises a
-`ComexioError` subclass (`ComexioAuthenticationError`, `ComexioConnectionError`,
-`ComexioResponseError`, `ComexioDataError`).
+session's cookie jar. Value writes (`set_marker_value`, `set_io_value`, `set_knx_value`) go
+through Comexio's `/api/` with a separate API user: pass `api_username` / `api_password` to the
+client. Every call either returns data or raises a `ComexioError` subclass
+(`ComexioAuthenticationError`, `ComexioConnectionError`, `ComexioResponseError`,
+`ComexioDataError`, `ComexioRequestRejectedError` for a write the server refused).
 
 ```python
 import asyncio

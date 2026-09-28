@@ -2,6 +2,8 @@
 
 Every client call either returns real data or raises one of these — never an empty
 placeholder that a caller could mistake for "the server has nothing to report".
+Invalid arguments are the caller's bug, not the server's: they raise the usual
+ValueError / KeyError / TypeError, never a ComexioError.
 """
 
 
@@ -27,3 +29,7 @@ class ComexioResponseError(ComexioError):
 
 class ComexioDataError(ComexioError):
     """The server answered, but the payload was not in the expected shape."""
+
+
+class ComexioRequestRejectedError(ComexioError):
+    """The server understood a write request but refused it (e.g. a name already in use)."""

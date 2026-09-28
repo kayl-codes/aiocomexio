@@ -1,4 +1,4 @@
-"""Async client for the Comexio IO-Server: admin login and read access.
+"""Async client for the Comexio IO-Server: admin login, reads, value writes and the Web-IO lifecycle.
 
 The client works on an aiohttp.ClientSession the caller creates and owns (see
 session.session_kwargs for the settings it needs). It never closes that session. Every call
@@ -8,10 +8,12 @@ either returns real data or raises a ComexioError subclass.
 import base64
 import json
 import logging
+import re
 import secrets
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Any
 
@@ -24,13 +26,15 @@ from .exceptions import (
     ComexioConnectionError,
     ComexioDataError,
     ComexioError,
+    ComexioRequestRejectedError,
     ComexioResponseError,
 )
 from .function_plan.payload import normalize_plan_payload, plan_payload_has_elements
 from .scrape import parse_comexio_version, parse_io_input_types, parse_io_types, scrape_js_vars
 from .session import is_local_address
+from .webio import CONTENT_TYPE_JSON
 
-__all__ = ["ComexioClient", "LiveStates", "RawConfig"]
+__all__ = ["ComexioClient", "LiveStates", "RawConfig", "WebioBaseInfo"]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,9 +48,34 @@ _LOAD_ALL_ELEMENTS_PATH = "/admin/function_function_module/loadallelements"
 _BUS_WORKLOAD_PATH = "/admin/in_output/inoutputinfo"
 _BUS_WORKLOAD_REFERER_PATH = "/admin/in_output/home"
 _EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
+_SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
+_API_PATH = "/api/"
+_WEBIO_HOME_PATH = "/admin/web_io/home"
+_WEBIO_ADD_PATH = "/admin/web_io/add"
+_WEBIO_BASE_WINDOW_PATH = "/admin/web_io/baseDeviceWindow/"
+_WEBIO_DELETE_DEVICE_PATH = "/admin/web_io/delete_device/"
+_WEBIO_DELETE_BASE_PATH = "/admin/web_io/delete_web_device_base/"
+_WEBIO_SAVE_DEVICE_PATH = "/admin/web_io/save"
+_WEBIO_CREATE_DEVICE_PATH = "/admin/web_io/saveDeviceWindow"
+_WEBIO_UPLOAD_PATH = "/admin/web_io/upload_device_settings"
+_WEBIO_SAVE_COMMAND_PATH = "/admin/web_io/save_command"
+_WEBIO_DELETE_COMMAND_PATH = "/admin/web_io/delete_web_command/"
+_WEBIO_EDIT_COMMAND_PATH = "/admin/web_io/edit_command/"
+_UNIQUE_CHECK_PATH = "/admin/_helper/isunique"
+_MARKER_HOME_PATH = "/admin/flag/home"
+_MARKER_ADD_PATH = "/admin/flag/add/"
+_MARKER_SAVE_PATH = "/admin/flag/saveOne"
+_KNX_HOME_PATH = "/admin/knx_one_wire/home"
+_KNX_SAVE_PATH = "/admin/knx_one_wire/saveKnx/"
+_DELETE_ELEMENT_PATH = "/admin/function_function_module/delete_element/"
 
 # The admin page still shows the login form ("Anmeldung") when the session is not logged in.
 _LOGIN_PAGE_MARKER = "Anmeldung"
+# The login form's submit button. An admin request without a logged-in session answers HTTP 200
+# with the login form (checked against a live server), so endpoints whose answer carries no data
+# to check look for this — more specific than _LOGIN_PAGE_MARKER, which a Web-IO dialog could
+# carry as a label.
+_LOGIN_FORM_SUBMIT_MARKER = 'id="loginsubmit"'
 # The login form is ISO-8859-1; RSA blocks are encrypted over its byte encoding.
 _LOGIN_ENCODING = "iso-8859-1"
 _LOGIN_NONCE_LENGTH = 20
@@ -58,6 +87,19 @@ _PKCS1_PADDING_BYTES = 11
 # response back apart.
 _KNX_LIVE_KEY_PREFIX = "knxIo_11_"
 _MESSAGES_KEY = "messages"
+_RESULT_KEY = "result"
+
+# $FubModules type of markers; delete_element needs it to know which object list the id is in.
+_MARKER_FUB_MODULE_TYPE = "2"
+# Marker type in the flag forms: 1 = digital, 2 = analog.
+_MARKER_TYPE_BINARY = "1"
+_MARKER_TYPE_ANALOG = "2"
+# The Web-IO delete answer carries a jQuery UI error box when the device is still used in a plan.
+_WEBIO_IN_USE_MARKER = "ui-state-error"
+# The min/max <input> tags on a Web-IO command's edit form, e.g.
+# <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
+_WEBIO_CMD_INPUT_RE = re.compile(r'<input\b[^>]*\bid="(min|max)_cmd_io_0"[^>]*>', re.IGNORECASE)
+_WEBIO_CMD_VALUE_RE = re.compile(r'\bvalue="([^"]*)"')
 
 # Plain-text answer of fupValueData for a plan that is not running (instead of a JSON value dict).
 _JSON_START_CHARS = ("{", "[")
@@ -82,6 +124,17 @@ class RawConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WebioBaseInfo:
+    """A Web-IO class (Comexio's "device base") and whether Comexio offers to delete it.
+
+    deletable is False while a device of the class still exists.
+    """
+
+    base_id: str
+    deletable: bool
+
+
+@dataclass(frozen=True, slots=True)
 class LiveStates:
     """Live values from one dashboard refresh, keyed by plain numeric id per source.
 
@@ -98,15 +151,28 @@ class ComexioClient:
 
     host is "hostname", "ip" or either with ":port". The server only speaks plain HTTP. session
     must have its own cookie jar (session.session_kwargs), since the admin login lives in it.
-    Call login() before any other method.
+    Call login() before any other admin method. api_username / api_password are the separate
+    Comexio API user the set_*_value methods send as Basic Auth; without api_username they send
+    no credentials at all.
     """
 
-    def __init__(self, host: str, username: str, password: str, *, session: aiohttp.ClientSession) -> None:
+    def __init__(
+        self,
+        host: str,
+        username: str,
+        password: str,
+        *,
+        session: aiohttp.ClientSession,
+        api_username: str = "",
+        api_password: str = "",  # nosec B107
+    ) -> None:
         self._host = host
         self._username = username
         self._password = password
+        self._api_username = api_username
+        self._api_password = api_password
         self._session = session
-        # The IO-Server has no HTTPS endpoint; _warn_plain_http flags non-local hosts at login.
+        # The IO-Server has no HTTPS endpoint; _warn_plain_http flags non-local hosts before credentials go out.
         self._base_url = f"http://{host}"  # NOSONAR
         self._plain_http_warned = False
 
@@ -223,7 +289,7 @@ class ComexioClient:
         refresh[_MESSAGES_KEY] = {"action": "messages"}
 
         data = await self._dashboard_refresh(refresh, what="Live states")
-        result = data.get("result") if isinstance(data, dict) else None
+        result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
         if not isinstance(result, dict):
             raise ComexioDataError(f"Live states response has no result object: {_excerpt(data)}")
         knx = {
@@ -248,7 +314,7 @@ class ComexioClient:
         """
         payload = {"connection": {"action": "fupValueData", "fupId": fub_id}}
         data = await self._dashboard_refresh(payload, what=f"Connection values of plan {fub_id}")
-        result = data.get("result") if isinstance(data, dict) else None
+        result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
         if not isinstance(result, dict) or "connection" not in result:
             raise ComexioDataError(f"Connection values of plan {fub_id}: no result.connection in {_excerpt(data)}")
         raw = result["connection"]
@@ -359,16 +425,426 @@ class ComexioClient:
             raise ComexioDataError(f"Extension firmware data is not a list of objects: {_excerpt(data)}")
         return data
 
+    # --- value writes (/api/, Basic Auth) ---
+
+    async def set_marker_value(self, marker_id: int, value: float) -> None:
+        """Write a marker's value through the /api/ interface."""
+        await self._api_set({"marker": f"M{marker_id}"}, value, what=f"Writing marker M{marker_id}")
+
+    async def set_knx_value(self, knx_id: int, value: float) -> None:
+        """Write a KNX object's value through the /api/ interface (query parameter knx=K<id>)."""
+        await self._api_set({"knx": f"K{knx_id}"}, value, what=f"Writing KNX object K{knx_id}")
+
+    async def set_io_value(self, ext: str, io: str, value: float) -> None:
+        """Write an IO's value through the /api/ interface; ext is the extension name, io its identifier."""
+        await self._api_set({"ext": ext, "io": io}, value, what=f"Writing IO {io} of {ext}")
+
+    # --- Web-IO lifecycle (admin session) ---
+
+    async def get_webio_base_info(self, class_name: str) -> WebioBaseInfo | None:
+        """The Web-IO class named class_name, or None if the server has no such class.
+
+        None is only returned for a page that was fetched and really lists no such class — a
+        failed fetch raises, so a caller never uploads a duplicate class next to one that is
+        still there. Raises ComexioAuthenticationError if the session is not logged in.
+        """
+        html = await self._request_admin_text("GET", _WEBIO_ADD_PATH, what="Web-IO add page")
+        pattern = rf'<option value="(\d+)"[^>]*>{re.escape(class_name)}</option>'
+        if not (match := re.search(pattern, html, re.IGNORECASE)):
+            return None
+        base_id = match[1]
+        window = await self._request_admin_text("GET", _WEBIO_BASE_WINDOW_PATH, what="Web-IO base window")
+        return WebioBaseInfo(base_id=base_id, deletable=f"delete_web_device_base/?id={base_id}" in window)
+
+    async def get_webio_device_id(self, device_name: str) -> str | None:
+        """Id of the Web-IO device named device_name, or None if the server has no such device.
+
+        Same contract as get_webio_base_info: None only for a fetched page without that device.
+        """
+        html = await self._request_admin_text("GET", _WEBIO_HOME_PATH, what="Web-IO home page")
+        pattern = rf'<a id="tab-link-(\d+)"[^>]*>{re.escape(device_name)}</a>'
+        return match[1] if (match := re.search(pattern, html, re.IGNORECASE)) else None
+
+    async def delete_webio_device(self, device_id: str | int) -> bool:
+        """Delete a Web-IO device. False if Comexio refuses because a function plan still uses it.
+
+        True means Comexio reported no in-use error; its answer carries no other verdict, so
+        get_webio_device_id shows whether the device is really gone where it matters.
+        """
+        what = f"Deleting Web-IO device {device_id}"
+        html = await self._request_admin_text(
+            "GET",
+            _WEBIO_DELETE_DEVICE_PATH,
+            what=what,
+            params={"id": str(device_id)},
+            headers=self._xhr_headers(_WEBIO_HOME_PATH),
+        )
+        if _WEBIO_IN_USE_MARKER in html:
+            _LOGGER.warning("Web-IO device %s is used in a function plan and cannot be deleted", device_id)
+            return False
+        _LOGGER.debug("%s: %s", what, _excerpt(html))
+        return True
+
+    async def delete_webio_base(self, base_id: str | int) -> None:
+        """Delete a Web-IO class. Comexio only allows this once no device of the class is left.
+
+        Comexio's answer carries no verdict, so returning only means the request was accepted —
+        check with get_webio_base_info where it matters.
+        """
+        what = f"Deleting Web-IO class {base_id}"
+        body = await self._request_admin_text(
+            "GET",
+            _WEBIO_DELETE_BASE_PATH,
+            what=what,
+            params={"id": str(base_id)},
+            headers=self._xhr_headers(_WEBIO_HOME_PATH),
+        )
+        _LOGGER.debug("%s: %s", what, _excerpt(body))
+
+    async def upload_webio_class(self, class_json: str, *, class_name: str, filename: str) -> str:
+        """Upload a Web-IO class template (webio.generate_webio_json) under class_name; returns its base id.
+
+        filename is the name of the uploaded file as Comexio records it (e.g. "ha_<server>.json").
+        Raises ComexioRequestRejectedError if Comexio answers without "ok".
+        """
+        form = aiohttp.FormData()
+        form.add_field("file", class_json.encode(), filename=filename, content_type="application/json")
+        form.add_field("set_name", class_name)
+        what = f"Uploading Web-IO class {class_name!r}"
+        result = _expect_object(
+            await self._request_json(
+                "POST", _WEBIO_UPLOAD_PATH, what=what, data=form, headers=self._xhr_headers(_WEBIO_HOME_PATH)
+            ),
+            what,
+        )
+        _LOGGER.debug("%s: %s", what, _excerpt(result))
+        if not result.get("ok"):
+            raise ComexioRequestRejectedError(f"{what} was refused: {_excerpt(result)}")
+        base_id = result.get("base_id")
+        if base_id is None or base_id == "":
+            raise ComexioDataError(f"{what}: answer carries no base_id: {_excerpt(result)}")
+        return str(base_id)
+
+    async def create_webio_device(
+        self,
+        name: str,
+        base_id: str | int,
+        address: str,
+        *,
+        username: str = "",
+        password: str = "",  # nosec B107
+    ) -> None:
+        """Create a device of the Web-IO class base_id that sends to address ("host:port").
+
+        username / password are the Basic Auth credentials the device attaches to commands that
+        ask for authentication; leave them empty for a target without login. Comexio's answer
+        carries no verdict, so returning only means the request was accepted — check with
+        get_webio_device_id(name) where it matters.
+        """
+        payload = {
+            "name": name,
+            "ip": address,
+            "web_device_base": str(base_id),
+            "username": username,
+            "password": password,
+            "web_device_base_sample": "none",
+            "identifier": "",
+            "form_login": "2",
+        }
+        body = await self._request_admin_text(
+            "POST",
+            _WEBIO_CREATE_DEVICE_PATH,
+            what=f"Creating Web-IO device {name!r}",
+            data=payload,
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        # The answer carries no verdict to check; logged so a silent refusal can be traced.
+        _LOGGER.debug("Creating Web-IO device %r (class %s): %s", name, base_id, _excerpt(body))
+
+    async def update_webio_device_address(self, device_id: str | int, address: str, device_name: str) -> None:
+        """Point an existing Web-IO device at a new address ("host:port").
+
+        Comexio's save handler takes the whole device form, so device_name must be the device's
+        current name (it is saved along), and the device's Basic Auth credentials, TLS checks and
+        login mode are reset to none — only use it on a device without credentials. Raises
+        ComexioRequestRejectedError if Comexio does not confirm the save.
+        """
+        device_data = {
+            "web_device_id": str(device_id),
+            f"name_{device_id}": device_name,
+            f"ip_{device_id}": address,
+            f"username_{device_id}": "",
+            f"password_{device_id}": "",  # nosec B105
+            f"checkca_{device_id}": "0",
+            f"pinnedpubkey_{device_id}": "",
+            f"form_login_{device_id}": "2",
+        }
+        what = f"Updating the address of Web-IO device {device_id}"
+        result = _expect_object(
+            await self._request_json(
+                "POST",
+                _WEBIO_SAVE_DEVICE_PATH,
+                what=what,
+                data={"no_reload": "true", "JSON": json.dumps(device_data)},
+                headers=self._xhr_headers(_WEBIO_HOME_PATH),
+            ),
+            what,
+        )
+        if result.get("save") != 1:
+            raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
+
+    async def save_webio_command(
+        self,
+        device_id: str | int,
+        command: Mapping[str, Any],
+        *,
+        base_id: str | int | None = None,
+        command_id: str | int | None = None,
+    ) -> None:
+        """Add a command to a Web-IO device (command_id None) or update the existing command command_id.
+
+        command is one entry of webio.build_webio_commands (Name, Parameter, Data, TypeId, Min,
+        Max, optionally HeaderModifier / PostGet / Authentication — the KNX loopback command
+        needs its own values for those three). base_id is the device's class, only used for a
+        new command. command_id must be numeric (ValueError otherwise). Comexio's answer carries
+        no verdict, so returning only means the request was accepted — the next config scrape
+        shows whether the command is there.
+        """
+        payload: dict[str, Any] = {
+            "dlg_web_device_id": str(device_id),
+            "protocol": 0,
+            "parameter": command["Parameter"],
+            "header_modifier": command.get("HeaderModifier", CONTENT_TYPE_JSON),
+            "data": command["Data"],
+            "port": "",
+            "post_get": command.get("PostGet", 1),
+            "authentication": command.get("Authentication", 0),
+            "req_freq": "",
+            "reply_interpreter": "",
+            "id_cmd_io_0": _command_ref(command_id),
+            "name_cmd_io_0": command["Name"],
+            "function_cmd_io_0": "1_1_0",
+            "input_cmd_io_0": 1,
+            "type_cmd_io_0": command["TypeId"],
+            "send_on_one_cmd_io_0": 0,
+            "min_cmd_io_0": command["Min"],
+            "max_cmd_io_0": command["Max"],
+            "default_value_cmd_io_0": "",
+            # Comexio's form always posts its hidden template row along.
+            "id_cmd_io_sample": "",
+            "name_cmd_io_sample": "",
+            "function_cmd_io_sample": "0_1_0",
+            "input_cmd_io_sample": 1,
+            "type_cmd_io_sample": 2,
+            "send_on_one_cmd_io_sample": 0,
+            "min_cmd_io_sample": 0,
+            "max_cmd_io_sample": 1,
+            "default_value_cmd_io_sample": "",
+            "DefaultActive": 1,
+        }
+        if command_id is not None:
+            payload["id"] = str(command_id)
+        else:
+            payload["deviceBaseId"] = "0" if base_id is None else str(base_id)
+        await self._request_admin_text(
+            "POST",
+            _WEBIO_SAVE_COMMAND_PATH,
+            what=f"Saving Web-IO command {command['Name']!r}",
+            data=payload,
+            headers=self._xhr_headers(_WEBIO_HOME_PATH),
+        )
+
+    async def delete_webio_command(self, command_id: str | int, device_id: str | int) -> None:
+        """Delete one command of a Web-IO device.
+
+        Comexio's answer carries no verdict, so returning only means the request was accepted —
+        the next config scrape shows whether the command is gone.
+        """
+        what = f"Deleting Web-IO command {command_id}"
+        body = await self._request_admin_text(
+            "GET",
+            _WEBIO_DELETE_COMMAND_PATH,
+            what=what,
+            params={"id": str(command_id), "dev": str(device_id)},
+        )
+        _LOGGER.debug("%s: %s", what, _excerpt(body))
+
+    async def get_webio_command_range(
+        self, command_id: str | int, device_id: str | int
+    ) -> tuple[float | None, float | None]:
+        """(Min, Max) of one Web-IO command, read from its edit form.
+
+        The config scrape never carries Min/Max of Web-IO commands, so the edit form is the only
+        source. A field that is missing or not numeric comes back as None; a form without any
+        min/max field raises ComexioDataError (or ComexioAuthenticationError for the login form).
+        """
+        html = await self._request_admin_text(
+            "GET",
+            _WEBIO_EDIT_COMMAND_PATH,
+            what=f"Web-IO command {command_id} edit form",
+            params={"Id": str(command_id), "TestDevice": str(device_id)},
+        )
+        return _command_range(html, command_id)
+
+    # --- markers and KNX objects (admin session) ---
+
+    async def create_marker(self, *, binary: bool) -> int:
+        """Create an untitled marker (value 0) and return its id.
+
+        Comexio always hands out the next free id; there is no way to ask for a specific one.
+        """
+        what = f"Creating a {'digital' if binary else 'analog'} marker"
+        result = _expect_object(
+            await self._request_json(
+                "POST",
+                _MARKER_ADD_PATH,
+                what=what,
+                data={"type": _marker_type(binary)},
+                headers=self._xhr_headers(_MARKER_HOME_PATH),
+            ),
+            what,
+        )
+        if not result.get("ok"):
+            raise ComexioRequestRejectedError(f"{what} was refused: {_excerpt(result)}")
+        try:
+            marker_id = int(result["saved"])
+        except (KeyError, TypeError, ValueError) as err:
+            raise ComexioDataError(f"{what}: answer carries no marker id: {_excerpt(result)}") from err
+        _LOGGER.debug("Created marker M%s (binary=%s)", marker_id, binary)
+        return marker_id
+
+    async def rename_marker(self, marker_id: int, name: str, *, binary: bool) -> None:
+        """Set a marker's title (after Comexio's own uniqueness check).
+
+        Comexio's marker save takes the whole form, so this also resets the marker's default
+        value and "store in memory" flag to 0 — only use it on a marker whose state is known,
+        e.g. one just made with create_marker. binary must match the marker's real type.
+        Raises ComexioRequestRejectedError if the name is taken or the save is not confirmed.
+        """
+        what = f"Renaming marker M{marker_id}"
+        await self._check_name_unique("memory", marker_id, name, what=what)
+        marker_type = _marker_type(binary)
+        payload = {
+            "id": str(marker_id),
+            "default_default": "0",
+            "default_type": marker_type,
+            "name": name,
+            "type": marker_type,
+            f"value_{marker_id}": "0",
+            "default": "0",
+            "store_memory": "0",
+        }
+        result = _expect_object(
+            await self._request_json(
+                "POST", _MARKER_SAVE_PATH, what=what, data=payload, headers=self._xhr_headers(_MARKER_HOME_PATH)
+            ),
+            what,
+        )
+        if str(result.get("saved")) != str(marker_id):
+            raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
+
+    async def rename_knx_object(self, knx_id: str | int, name: str) -> None:
+        """Set a KNX object's title (after Comexio's own uniqueness check); nothing else changes.
+
+        Raises ComexioRequestRejectedError if the name is taken or the save is not confirmed.
+        """
+        what = f"Renaming KNX object K{knx_id}"
+        await self._check_name_unique("oneWire", knx_id, name, what=what)
+        result = _expect_object(
+            await self._request_json(
+                "POST",
+                _KNX_SAVE_PATH,
+                what=what,
+                data={"id": str(knx_id), "field": "name", "value": name},
+                headers=self._xhr_headers(_KNX_HOME_PATH),
+            ),
+            what,
+        )
+        if str(result.get("Ok")) != "1":
+            raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
+
+    async def delete_marker(self, marker_id: int) -> bool:
+        """Delete a marker from Comexio's marker list (not an element in a function plan).
+
+        True if Comexio reports it deleted. False if Comexio answered but did not delete it —
+        most often because the id does not exist (any more), but Comexio reports a refusal the
+        same way, so a caller that just saw the marker should treat False as suspicious.
+        """
+        payload = {
+            "elementId": str(marker_id),
+            "type": _MARKER_FUB_MODULE_TYPE,
+            "full": "true",
+            "timestamp": _js_timestamp(),
+        }
+        what = f"Deleting marker M{marker_id}"
+        result = _expect_object(
+            await self._request_json(
+                "POST", _DELETE_ELEMENT_PATH, what=what, data=payload, headers=self._xhr_headers(_FUNCTION_MODULE_PATH)
+            ),
+            what,
+        )
+        if str(result.get(_RESULT_KEY)) == "1":
+            return True
+        _LOGGER.debug("%s: not deleted, answer: %s", what, _excerpt(result))
+        return False
+
+    async def system_emergency_reboot(self) -> None:
+        """Reboot the whole Comexio system immediately — no confirmation, no way back.
+
+        Comexio answers before it goes down; success only means the request was accepted.
+        """
+        await self._request_admin_text(
+            "GET", _SYSTEM_DASHBOARD_PATH, what="System reboot", params={"id": "system", "restart": "1"}
+        )
+        _LOGGER.warning("Comexio at %s accepted the system reboot request", self._host)
+
     def _warn_plain_http(self) -> None:
         """Warn once that credentials go over plain HTTP to a non-local address."""
         if self._plain_http_warned or is_local_address(self._host):
             return
         _LOGGER.warning(
-            "Logging into Comexio over plain HTTP on a non-local address (%s). "
-            "Credentials may be transmitted in clear text.",
+            "Sending Comexio credentials over plain HTTP to a non-local address (%s). "
+            "They may be transmitted in clear text.",
             self._host,
         )
         self._plain_http_warned = True
+
+    async def _api_set(self, target: dict[str, str], value: float, *, what: str) -> None:
+        """One /api/?action=set request; HTTP 401 means the API credentials were rejected."""
+        headers: dict[str, str] = {}
+        if self._api_username:
+            self._warn_plain_http()
+            headers["Authorization"] = _basic_auth_header(self._api_username, self._api_password)
+        params: dict[str, str | float] = {"action": "set", "value": value, **target}
+        try:
+            body = await self._request_text("GET", _API_PATH, what=what, params=params, headers=headers)
+        except ComexioResponseError as err:
+            if err.status != HTTPStatus.UNAUTHORIZED:
+                raise
+            if not self._api_username:
+                raise ComexioAuthenticationError(
+                    f"Comexio at {self._host} requires API credentials, none are configured (api_username)"
+                ) from err
+            raise ComexioAuthenticationError(f"Comexio at {self._host} rejected the API credentials") from err
+        # The answer carries no verdict to check; logged so an ignored write can be traced.
+        _LOGGER.debug("%s: %s", what, _excerpt(body))
+
+    async def _check_name_unique(self, model: str, object_id: str | int, name: str, *, what: str) -> None:
+        """Comexio's own uniqueness check before a rename; ComexioRequestRejectedError if name is taken."""
+        check = f"{what}: name check"
+        result = _expect_object(
+            await self._request_json(
+                "POST",
+                _UNIQUE_CHECK_PATH,
+                what=check,
+                data={"model": model, "field": "name", "value": name, "id": str(object_id)},
+            ),
+            check,
+        )
+        if _RESULT_KEY not in result:
+            raise ComexioDataError(f"{check}: answer carries no result: {_excerpt(result)}")
+        if not result[_RESULT_KEY]:
+            raise ComexioRequestRejectedError(f"{what}: the name {name!r} is already in use ({_excerpt(result)})")
 
     def _xhr_headers(self, referer_path: str) -> dict[str, str]:
         return {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}{referer_path}"}
@@ -394,6 +870,16 @@ class ComexioClient:
                     raise ComexioDataError(f"{what}: response is not valid {resp.get_encoding()}") from err
         except (aiohttp.ClientError, TimeoutError) as err:
             raise ComexioConnectionError(f"{what} failed: {err!r}") from err
+
+    async def _request_admin_text(self, method: str, path: str, *, what: str, **kwargs: Any) -> str:
+        """_request_text for an admin page or action; the login form raises ComexioAuthenticationError.
+
+        For endpoints whose answer is not JSON — a lapsed session would otherwise read as success.
+        """
+        body = await self._request_text(method, path, what=what, **kwargs)
+        if _LOGIN_FORM_SUBMIT_MARKER in body:
+            raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
+        return body
 
     async def _request_json(self, method: str, path: str, *, what: str, **kwargs: Any) -> Any:
         """Body of one request decoded as JSON (whatever the Content-Type header claims)."""
@@ -423,6 +909,57 @@ def _missing_data_error(body: str, message: str) -> ComexioError:
     if _LOGIN_PAGE_MARKER in body:
         return ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({message})")
     return ComexioDataError(message)
+
+
+def _basic_auth_header(username: str, password: str) -> str:
+    """Authorization header value for Basic Auth, encoded as ISO-8859-1 (aiohttp.BasicAuth's default)."""
+    if ":" in username:
+        raise ComexioAuthenticationError("The API username must not contain ':' (Basic Auth separator)")
+    try:
+        credentials = f"{username}:{password}".encode(_LOGIN_ENCODING)
+    except UnicodeEncodeError as err:
+        raise ComexioAuthenticationError("The API credentials contain characters outside ISO-8859-1") from err
+    return f"Basic {base64.b64encode(credentials).decode('ascii')}"
+
+
+def _expect_object(data: Any, what: str) -> dict[str, Any]:
+    """data if it is a JSON object, else ComexioDataError."""
+    if not isinstance(data, dict):
+        raise ComexioDataError(f"{what}: answer is not an object: {_excerpt(data)}")
+    return data
+
+
+def _marker_type(binary: bool) -> str:
+    return _MARKER_TYPE_BINARY if binary else _MARKER_TYPE_ANALOG
+
+
+def _js_timestamp() -> str:
+    """Current UTC time the way JavaScript's Date.toISOString() writes it (millisecond precision)."""
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _command_ref(command_id: str | int | None) -> str:
+    """Base64 command reference of the Web-IO command form: {"src":"command","id":<id or null>}."""
+    ref = {"src": "command", "id": None if command_id is None else int(command_id)}
+    return base64.b64encode(json.dumps(ref, separators=(",", ":")).encode()).decode()
+
+
+def _command_range(html: str, command_id: str | int) -> tuple[float | None, float | None]:
+    """(Min, Max) from a Web-IO command edit form; see ComexioClient.get_webio_command_range."""
+    values: dict[str, float | None] = {"min": None, "max": None}
+    matched = False
+    for tag_match in _WEBIO_CMD_INPUT_RE.finditer(html):
+        matched = True
+        field = tag_match[1].lower()
+        if not (value_match := _WEBIO_CMD_VALUE_RE.search(tag_match[0])):
+            continue
+        try:
+            values[field] = float(value_match[1])
+        except ValueError:
+            _LOGGER.warning("Web-IO command %s has a non-numeric %s value: %r", command_id, field, value_match[1])
+    if not matched:
+        raise _missing_data_error(html, f"Web-IO command {command_id} edit form has no min/max fields")
+    return values["min"], values["max"]
 
 
 def _connection_values(raw: Any, fub_id: int) -> dict[str, list[Any]]:

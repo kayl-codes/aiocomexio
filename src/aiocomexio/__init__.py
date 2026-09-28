@@ -2,12 +2,13 @@
 
 from importlib.metadata import version
 
-from .client import ComexioClient, LiveStates, RawConfig
+from .client import ComexioClient, LiveStates, RawConfig, WebioBaseInfo
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioConnectionError,
     ComexioDataError,
     ComexioError,
+    ComexioRequestRejectedError,
     ComexioResponseError,
 )
 from .session import is_local_address, progress_trace_config, session_kwargs
@@ -20,9 +21,11 @@ __all__ = [
     "ComexioConnectionError",
     "ComexioDataError",
     "ComexioError",
+    "ComexioRequestRejectedError",
     "ComexioResponseError",
     "LiveStates",
     "RawConfig",
+    "WebioBaseInfo",
     "__version__",
     "is_local_address",
     "progress_trace_config",
