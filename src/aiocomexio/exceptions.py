@@ -2,6 +2,8 @@
 
 Every client call either returns real data or raises one of these — never an empty
 placeholder that a caller could mistake for "the server has nothing to report".
+Invalid arguments are the caller's bug, not the server's: they raise the usual
+ValueError / KeyError / TypeError, never a ComexioError.
 """
 
 
