@@ -1318,7 +1318,7 @@ def _plan_form(name: str, comment: str, paper_format: str, orientation: str, dpi
 
 
 def _is_int(value: Any) -> TypeIs[int]:
-    """True for an int that is not a bool (range membership lets True and 2.0 through)."""
+    """True for an int that is not a bool; a bare `in range(...)` check would also accept True and 2.0."""
     return isinstance(value, int) and not isinstance(value, bool)
 
 

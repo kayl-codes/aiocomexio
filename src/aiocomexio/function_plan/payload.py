@@ -93,9 +93,15 @@ def _run_connection(conn_id: Any, conn: Any) -> dict[str, Any]:
         outputs = {str(i): output for i, output in enumerate(outputs)}
     elif not isinstance(outputs, Mapping):
         raise ValueError(f"Outputs of connection {conn_id!r} are {type(outputs).__name__}, not a list or object")
-    if not all(_is_endpoint(output) for output in outputs.values()):
-        raise ValueError(f"Connection {conn_id!r} has an output that is no endpoint")
-    return {**conn, "output": dict(outputs)}
+    run_outputs: dict[str, Any] = {}
+    for output_id, output in outputs.items():
+        if not _is_endpoint(output):
+            raise ValueError(f"Connection {conn_id!r} has an output that is no endpoint")
+        # 0 and "0" become one JSON key; json.dumps would silently keep only one of the two sinks.
+        if str(output_id) in run_outputs:
+            raise ValueError(f"Output ids of connection {conn_id!r} collide on {str(output_id)!r}")
+        run_outputs[str(output_id)] = output
+    return {**conn, "output": run_outputs}
 
 
 def _is_endpoint(endpoint: Any) -> bool:

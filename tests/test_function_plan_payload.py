@@ -111,6 +111,7 @@ def test_build_run_payload_turns_output_lists_into_indexed_objects() -> None:
             {"elements": {}, "connections": {1: {"input": _IN, "output": []}, "1": {"input": _IN, "output": []}}},
             "collide",
         ),
+        ({"elements": {}, "connections": {"1": {"input": _IN, "output": {0: _IN, "0": _IN}}}}, "Output ids .* collide"),
         ({"elements": {"10": None}, "connections": {}}, "Element '10'"),
     ],
 )
