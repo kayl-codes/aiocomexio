@@ -16,7 +16,7 @@ through a debouncing timer is deliberate, not a wiring mistake.
 from typing import Any
 
 from .render_geometry import _sink_list
-from .render_values import _element_id_sort_key
+from .render_values import element_id_sort_key
 
 __all__ = ["detect_self_reset_cycles", "detect_self_reset_elements"]
 
@@ -59,7 +59,7 @@ def _cycles_via_timer(
         return [(marker_id, timer_id)]
     return [
         (marker_id, timer_id, o_id)
-        for o_id in sorted(outgoing.get(timer_id, ()), key=_element_id_sort_key)
+        for o_id in sorted(outgoing.get(timer_id, ()), key=element_id_sort_key)
         if _is_or_gate(elements, fub_base, o_id) and marker_id in outgoing.get(o_id, ())
     ]
 
@@ -75,10 +75,10 @@ def detect_self_reset_cycles(
     cycles: list[tuple[str, ...]] = []
     # Element-id order throughout (not set or caller mapping order): keeps the cycle list, and
     # thereby analyze_function_plan's SELF_RESET findings, identical for the same plan.
-    for eid in sorted(elements, key=_element_id_sort_key):
+    for eid in sorted(elements, key=element_id_sort_key):
         if _element_type(elements, eid) != 2:  # marker
             continue
-        for t_id in sorted(outgoing.get(eid, ()), key=_element_id_sort_key):
+        for t_id in sorted(outgoing.get(eid, ()), key=element_id_sort_key):
             if _is_on_pulse_timer(elements, time_modules, t_id):
                 cycles.extend(_cycles_via_timer(elements, fub_base, outgoing, eid, t_id))
     return cycles

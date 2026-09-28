@@ -19,7 +19,7 @@ from .render import render_plan_svg
 from .render_flow import render_flow_svg
 from .render_labels import resolve_element_label
 from .render_selfreset import detect_self_reset_cycles
-from .render_values import element_search_id
+from .render_values import element_id_sort_key, element_search_id
 
 __all__ = [
     "analyze_function_plan",
@@ -27,6 +27,7 @@ __all__ = [
     "build_source_id_translation",
     "detect_self_reset_cycles",
     "diff_snapshots",
+    "element_id_sort_key",
     "element_search_id",
     "normalize_plan_payload",
     "plan_active",
