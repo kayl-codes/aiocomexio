@@ -11,6 +11,7 @@ element's FULL bounds like in the Studio DOM — the pin zones are part of the e
 body rect is inset _PIN_LEN left/right (see render module docstring).
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 from .render_constants import (
@@ -35,7 +36,7 @@ from .render_values import (
 
 def _sink_list(conn: dict[str, Any]) -> list[dict[str, Any]]:
     sinks = conn.get("output") or []
-    return list(sinks.values()) if isinstance(sinks, dict) else sinks
+    return list(sinks.values()) if isinstance(sinks, Mapping) else sinks
 
 
 def _used_ports(connections: dict[str, Any]) -> tuple[dict[str, set[int]], dict[str, set[int]]]:

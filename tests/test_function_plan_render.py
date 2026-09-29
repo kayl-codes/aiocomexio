@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -72,6 +73,19 @@ def test_render_plan_id_marks_root_svg(plan: dict[str, Any]) -> None:
     assert svg.startswith("<svg ")
     assert 'data-plan-id="7&quot;&lt;x&gt;"' in svg.split(">", 1)[0]
     assert "data-plan-id" not in _render(plan)
+
+
+def test_render_accepts_output_as_any_mapping(plan: dict[str, Any]) -> None:
+    # Regression: only a dict output group was unpacked; a read-only mapping was iterated as keys.
+    as_proxy = {
+        **plan,
+        "connections": {
+            cid: {**conn, "output": MappingProxyType({str(i): out for i, out in enumerate(conn["output"])})}
+            for cid, conn in plan["connections"].items()
+        },
+    }
+
+    assert _render(as_proxy) == _render(plan)
 
 
 def test_render_empty_plan_does_not_crash() -> None:
