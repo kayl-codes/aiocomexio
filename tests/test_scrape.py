@@ -132,13 +132,45 @@ def test_parse_io_types(html: str) -> None:
         "var $IOTypesBinary = 5;",  # no object literal after the declaration
         # A non-object value must not grab the NEXT declaration's object.
         'var $IOTypesBinary = 5; var $Other = {"1": {"binary": true}};',
-        "var $IOTypesBinary = [1, 2];",
         'var $IOTypesBinary = {"1": {"binary": true}',  # unterminated
     ],
 )
 def test_parse_io_types_missing_falls_back_to_empty(html: str, caplog: pytest.LogCaptureFixture) -> None:
     assert parse_io_types(html) == {}
     assert "No IO type data found" in caplog.text
+
+
+def test_parse_io_types_gap_free_array_is_keyed_by_index() -> None:
+    # Regression: PHP's json_encode renders a table with the keys 0..n-1 as a JSON array — that
+    # was dropped (debug log only) and every IO fell back to its identifier.
+    html = 'var $IOTypesBinary = [{"binary": false}, {"binary": true}];'
+
+    assert parse_io_types(html) == {"0": {"binary": False}, "1": {"binary": True}}
+
+
+def test_scrape_js_vars_array_literal_is_keyed_by_index() -> None:
+    html = '<script>var $Fubs = [{"Id": 0}, {"Id": 1, "Name": "a]b"}]; var $Next = {"x": 1};</script>'
+
+    assert scrape_js_vars(html, page_label="test") == {
+        "Fubs": {"0": {"Id": 0}, "1": {"Id": 1, "Name": "a]b"}},
+        "Next": {"x": 1},
+    }
+
+
+@pytest.mark.parametrize(
+    "array",
+    [
+        "[2, 5, 7]",  # a plain list, no records
+        '[{"Id": 1}, {"Id": 2}]',  # records whose ids are not their positions
+        '[{"binary": true}, null]',
+    ],
+)
+def test_array_that_is_no_id_group_is_skipped(array: str) -> None:
+    # A list-valued legacy $ioTypes must not hide the real table, nor positions pass for ids.
+    html = f'<script>var $ioTypes = {array}; var $IOTypesBinary = {{"1": {{"binary": true}}}};</script>'
+
+    assert parse_io_types(html) == {"1": {"binary": True}}
+    assert scrape_js_vars(html, page_label="test") == {"IOTypesBinary": {"1": {"binary": True}}}
 
 
 def test_parse_io_input_types() -> None:

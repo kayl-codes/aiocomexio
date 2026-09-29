@@ -6,7 +6,7 @@ import pytest
 from syrupy.assertion import SnapshotAssertion
 
 from aiocomexio.config import (
-    TYPE_ANALOG,
+    TYPE_DIGITAL,
     ParseOptions,
     clean_value,
     io_schema_title,
@@ -118,6 +118,54 @@ def test_io_classification_without_type_tables_falls_back_to_identifier() -> Non
     assert (ios["Q1"]["is_binary"], ios["Q1"]["max"], ios["Q1"]["is_input"]) == (True, 1, False)
     assert (ios["QI1"]["is_binary"], ios["QI1"]["max"], ios["QI1"]["is_input"]) == (False, 0, True)
     assert (ios["Temp"]["type_id_raw"], ios["Temp"]["is_input"]) == (1, True)
+
+
+def test_io_type_missing_from_the_table_falls_back_to_identifier() -> None:
+    # Regression: with io_types present, an IO whose type row is missing became "analog, max 1"
+    # — a QI1 dimmer output then got the range 0..1 instead of the identifier's analog default.
+    conf = {
+        "FubModules": {
+            "1": {
+                "1": {
+                    "extension": {"Name": "BASE", "Identifier": "1000-2000-3000"},
+                    "inoutput": {
+                        "1": {"Id": 1, "Identifier": "Q1", "InOutputTypeId": 99, "Active": True},
+                        "2": {"Id": 2, "Identifier": "QI1", "InOutputTypeId": 98, "Active": True},
+                        "3": {"Id": 3, "Identifier": "AI1", "InOutputTypeId": 3, "Active": True},
+                    },
+                }
+            }
+        }
+    }
+    io_types = {"3": {"binary": False, "min": 0, "max": 100, "unit": "%"}}
+
+    ios = {io["identifier"]: io for io in parse_config(conf, io_types=io_types)["io"]}
+
+    assert (ios["Q1"]["is_binary"], ios["Q1"]["max"]) == (True, 1)
+    assert (ios["QI1"]["is_binary"], ios["QI1"]["max"]) == (False, 0)
+    assert (ios["AI1"]["is_binary"], ios["AI1"]["max"]) == (False, 100)
+
+
+@pytest.mark.parametrize("description", ["ai1", " AI1 ", "AI1", "", None])
+def test_io_description_repeating_the_identifier_is_no_description(description: str | None) -> None:
+    # Regression: the legacy name compared case-sensitively and unstripped, so "ai1" gave
+    # "BASE AI1 ai1" while {IoTitle} (casefolded) already said "#nn".
+    conf = {
+        "FubModules": {
+            "1": {
+                "1": {
+                    "extension": {"Name": "BASE", "Identifier": "1000-2000-3000"},
+                    "inoutput": {
+                        "1": {"Id": 1, "Identifier": "AI1", "Description": description, "Active": True},
+                    },
+                }
+            }
+        }
+    }
+
+    [io] = parse_config(conf, io_types={})["io"]
+
+    assert (io["name"], io["ha_name"]) == ("BASE AI1", "AI1 #nn")
 
 
 def test_inactive_io_is_labelled_but_gets_no_entity(basic_result: dict[str, Any]) -> None:
@@ -291,9 +339,11 @@ def test_malformed_config_entries_are_skipped() -> None:
 
     assert [io["identifier"] for io in result["io"]] == ["Q1"]
     assert result["io"][0]["ext_name"] == "Ext2"
+    # A garbage type row is no row: classified by identifier / unresolved, not silently "analog".
+    assert (result["io"][0]["is_binary"], result["io"][0]["max"]) == (True, 1)
     assert result["extensions"] == {"2": {"name": "Ext2", "serial": ""}}
     assert [m["id"] for m in result["markers"]] == ["2"]
-    assert result["knx"][0]["type"] == TYPE_ANALOG
+    assert (result["knx"][0]["type"], result["knx"][0]["dpt_ambiguous"]) == (TYPE_DIGITAL, True)
     assert result["webio_devices"][WebioClass.MARKER]["device_id"] == "30"
 
 
