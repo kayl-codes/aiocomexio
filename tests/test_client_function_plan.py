@@ -13,9 +13,11 @@ from aiocomexio import (
     ComexioAuthenticationError,
     ComexioClient,
     ComexioConnectionError,
+    ComexioCreatedWithoutIdError,
     ComexioDataError,
     ComexioRequestRejectedError,
     ComexioResponseError,
+    CreatedFunctionPlan,
 )
 from tests.fake_comexio import FUNCTION_MODULE_PATH, LOAD_ELEMENTS_PATH, LOGIN_PAGE, FakeComexio
 
@@ -57,13 +59,13 @@ def _serve_plans(comexio: FakeComexio, fubs: Any) -> None:
 async def test_create_function_plan(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve_json("POST", UNIQUE_CHECK_PATH, {"result": True})
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
-    _serve_plans(comexio, {"1": {"Name": "Alt"}, "7": {"Name": "HA - Marker"}})
+    _serve_plans(comexio, {"1": {"Name": "Alt"}, "7": {"Name": "HA - Marker", "Active": "0"}})
 
-    fub_id = await logged_in.create_function_plan(
+    created = await logged_in.create_function_plan(
         "HA - Marker", comment="von HA", paper_format="a3", orientation="Portrait", dpi=120
     )
 
-    assert fub_id == 7
+    assert created == CreatedFunctionPlan(7, {"Name": "HA - Marker", "Active": "0"})
     (check,) = comexio.received_at("POST", UNIQUE_CHECK_PATH)
     assert check.form == {"model": "fub", "field": "name", "value": "HA - Marker"}
     (request,) = comexio.received_at("POST", PLAN_SAVE_PATH)
@@ -91,7 +93,7 @@ async def test_create_function_plan_defaults_to_a4_landscape_90_dpi(
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
     _serve_plans(comexio, {"3": {"Name": "Neu"}})
 
-    assert await logged_in.create_function_plan("Neu") == 3
+    assert (await logged_in.create_function_plan("Neu")).fub_id == 3
     (request,) = comexio.received_at("POST", PLAN_SAVE_PATH)
     assert (request.form["fub_paper"], request.form["fub_orientation"], request.form["fub_resolution"]) == (
         "3",
@@ -156,9 +158,9 @@ async def test_create_function_plan_not_found_once_in_fubs_is_a_data_error(
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
     _serve_plans(comexio, fubs)
 
-    with pytest.raises(ComexioDataError, match="plans with that name") as caught:
+    with pytest.raises(ComexioCreatedWithoutIdError, match="plans with that name") as caught:
         await logged_in.create_function_plan("Neu")
-    assert any("only reading back its id failed" in note for note in caught.value.__notes__)
+    assert isinstance(caught.value.__cause__, ComexioDataError)
 
 
 @pytest.mark.parametrize("plan_key", ["x", "0", "-3", "1.0"])
@@ -169,9 +171,9 @@ async def test_create_function_plan_invalid_id_is_a_data_error(
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
     _serve_plans(comexio, {plan_key: {"Name": "Neu"}})
 
-    with pytest.raises(ComexioDataError, match="no valid id") as caught:
+    with pytest.raises(ComexioCreatedWithoutIdError, match="no valid id") as caught:
         await logged_in.create_function_plan("Neu")
-    assert any("only reading back its id failed" in note for note in caught.value.__notes__)
+    assert isinstance(caught.value.__cause__, ComexioDataError)
 
 
 async def test_create_function_plan_unconfirmed_redirect_is_rejected(
@@ -258,9 +260,9 @@ async def test_create_function_plan_read_back_failure_says_the_plan_exists(
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
     comexio.serve_text("GET", FUNCTION_MODULE_PATH, "", status=500)
 
-    with pytest.raises(ComexioResponseError) as caught:
+    with pytest.raises(ComexioCreatedWithoutIdError, match="only reading back its id failed") as caught:
         await logged_in.create_function_plan("Neu")
-    assert any("only reading back its id failed" in note for note in caught.value.__notes__)
+    assert isinstance(caught.value.__cause__, ComexioResponseError)
 
 
 async def test_unparsable_redirect_location_is_a_response_error(logged_in: ComexioClient, comexio: FakeComexio) -> None:

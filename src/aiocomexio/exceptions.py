@@ -33,3 +33,11 @@ class ComexioDataError(ComexioError):
 
 class ComexioRequestRejectedError(ComexioError):
     """The server understood a write request but refused it (e.g. a name already in use)."""
+
+
+class ComexioCreatedWithoutIdError(ComexioError):
+    """The server confirmed a create request, but the new object's id could not be read back.
+
+    The object exists — creating it again would leave a duplicate. __cause__ is the error that
+    stopped the read-back.
+    """

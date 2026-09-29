@@ -26,6 +26,7 @@ from .config import iter_group
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioConnectionError,
+    ComexioCreatedWithoutIdError,
     ComexioDataError,
     ComexioError,
     ComexioRequestRejectedError,
@@ -36,7 +37,7 @@ from .scrape import parse_comexio_version, parse_io_input_types, parse_io_types,
 from .session import is_local_address
 from .webio import CONTENT_TYPE_JSON
 
-__all__ = ["ComexioClient", "LiveStates", "RawConfig", "WebioBaseInfo"]
+__all__ = ["ComexioClient", "CreatedFunctionPlan", "LiveStates", "RawConfig", "WebioBaseInfo"]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -151,6 +152,14 @@ class RawConfig:
     io_types: dict[str, Any]
     io_input_types: dict[str, Any]
     comexio_version: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CreatedFunctionPlan:
+    """A plan create_function_plan created: its id and its $Fubs entry as the config lists it."""
+
+    fub_id: int
+    fubs_entry: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +428,41 @@ class ComexioClient:
             except (AttributeError, TypeError, ValueError):
                 _LOGGER.warning("Skipping malformed marker entry %r", marker_id)
         return titles
+
+    async def is_logged_in(self) -> bool:
+        """Whether the admin session is (still) logged in, asked with a cheap read-only admin request.
+
+        True for the JSON object the request returns, False for Comexio's login form; any other
+        answer raises ComexioDataError, so a mere error page never passes for "logged out". A
+        dropped connection — typically a pooled keep-alive connection Comexio had already
+        closed — is asked once more; any other failure raises as the request would.
+        """
+        body = await self._session_check_body()
+        if _LOGIN_FORM_SUBMIT_MARKER in body:
+            return False
+        try:
+            answer = json.loads(body)
+        except ValueError as err:
+            raise ComexioDataError(f"Session check: response is not JSON: {_excerpt(body)}") from err
+        if not isinstance(answer, dict):
+            raise ComexioDataError(f"Session check: expected a JSON object, got {_excerpt(body)}")
+        return True
+
+    async def _session_check_body(self) -> str:
+        """Body of the session check request, asked once more after a dropped connection."""
+        for attempt in range(2):
+            try:
+                return await self._request_text(
+                    "POST",
+                    _BUS_WORKLOAD_PATH,
+                    what="Session check",
+                    headers=self._xhr_headers(_BUS_WORKLOAD_REFERER_PATH),
+                )
+            except ComexioConnectionError as err:
+                if attempt or not isinstance(err.__cause__, aiohttp.ServerDisconnectedError):
+                    raise
+                _LOGGER.debug("Session check: %s — asking once more", err)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def get_bus_workload(self) -> dict[str, Any]:
         """Internal bus workload and SD card presence (the admin in/output info)."""
@@ -794,6 +838,7 @@ class ComexioClient:
         most often because the id does not exist (any more), but Comexio reports a refusal the
         same way, so a caller that just saw the marker should treat False as suspicious.
         """
+        _require_ints(marker_id=marker_id)
         payload = {
             "elementId": str(marker_id),
             "type": _MARKER_FUB_MODULE_TYPE,
@@ -822,14 +867,16 @@ class ComexioClient:
         paper_format: str = "A4",
         orientation: str = "landscape",
         dpi: int = 90,
-    ) -> int:
-        """Create an empty, inactive function plan and return its id.
+    ) -> CreatedFunctionPlan:
+        """Create an empty, inactive function plan; its id and $Fubs entry.
 
         paper_format is "A3", "A4" or "A5", orientation "landscape" or "portrait", dpi 45-120.
         Comexio's answer carries no id, so the new plan is looked up by name in a fresh config
         scrape. Raises ComexioRequestRejectedError if the name is taken or Comexio does not
-        confirm the plan. An error after the confirmation (the scrape fails, or $Fubs does not
-        list the plan exactly once) carries a note that the plan exists — do not create it again.
+        confirm the plan, ComexioCreatedWithoutIdError if it confirmed the plan but the scrape
+        failed or $Fubs does not list it exactly once — the plan exists, do not create it again.
+        A ComexioConnectionError from the create request itself leaves open whether the plan
+        was created; look it up by name before creating it again.
         """
         what = f"Creating function plan {name!r}"
         form = _plan_form(name, comment, paper_format, orientation, dpi)
@@ -838,10 +885,11 @@ class ComexioClient:
         await self._post_plan_form(form, _PLAN_ADDED_CONFIRMATION, what=what)
         try:
             config = await self.get_raw_config()
-            return _plan_id_by_name(config.variables.get("Fubs"), name, what=what)
+            return _plan_by_name(config.variables.get("Fubs"), name, what=what)
         except ComexioError as err:
-            err.add_note(f"{what}: Comexio confirmed the plan, only reading back its id failed")
-            raise
+            raise ComexioCreatedWithoutIdError(
+                f"{what}: Comexio confirmed the plan, only reading back its id failed: {err}"
+            ) from err
 
     async def update_function_plan(
         self,
@@ -1157,6 +1205,7 @@ class ComexioClient:
         )
         if token not in location:
             raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
+        _LOGGER.debug("%s confirmed (redirect to %r)", what, location)
 
     async def _plan_state_request(self, path: str, form: dict[str, str], *, what: str) -> None:
         """run_fup / stop_fup; both answer {"result": true, "state": ...} on success."""
@@ -1388,15 +1437,16 @@ def _check_position(position: Any) -> None:
     _require_numbers(x=x, y=y)
 
 
-def _plan_id_by_name(fubs: Any, name: str, *, what: str) -> int:
-    """Id of the one plan in $Fubs named name; ComexioDataError for none or several."""
-    found = [plan_id for plan_id, plan in iter_group(fubs) if isinstance(plan, Mapping) and plan.get("Name") == name]
+def _plan_by_name(fubs: Any, name: str, *, what: str) -> CreatedFunctionPlan:
+    """The one plan in $Fubs named name; ComexioDataError for none or several."""
+    found = [(key, plan) for key, plan in iter_group(fubs) if isinstance(plan, Mapping) and plan.get("Name") == name]
     if len(found) != 1:
         raise ComexioDataError(f"{what}: $Fubs lists {len(found)} plans with that name")
-    plan_id = _positive_id(found[0])
+    key, plan = found[0]
+    plan_id = _positive_id(key)
     if plan_id is None:
-        raise ComexioDataError(f"{what}: the new plan has no valid id, $Fubs lists it under {found[0]!r}")
-    return plan_id
+        raise ComexioDataError(f"{what}: the new plan has no valid id, $Fubs lists it under {key!r}")
+    return CreatedFunctionPlan(plan_id, dict(plan))
 
 
 def _answer_id(result: dict[str, Any], what: str) -> int:
