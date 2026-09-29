@@ -545,6 +545,16 @@ async def test_delete_marker_failed_request_raises(
         await logged_in.delete_marker(271)
 
 
+@pytest.mark.parametrize("marker_id", ["271", 271.0, True, None])
+async def test_delete_marker_non_int_id_raises_before_any_request(
+    logged_in: ComexioClient, comexio: FakeComexio, marker_id: Any
+) -> None:
+    # Regression: "271" or True went out as the id — a delete of whatever element matches that text.
+    with pytest.raises(TypeError):
+        await logged_in.delete_marker(marker_id)
+    assert comexio.received_at("POST", DELETE_ELEMENT_PATH) == []
+
+
 # --- system --------------------------------------------------------------------------------------------
 
 

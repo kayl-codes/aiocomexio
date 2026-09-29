@@ -2,10 +2,11 @@
 
 from importlib.metadata import version
 
-from .client import ComexioClient, LiveStates, RawConfig, WebioBaseInfo
+from .client import ComexioClient, CreatedFunctionPlan, LiveStates, RawConfig, WebioBaseInfo
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioConnectionError,
+    ComexioCreatedWithoutIdError,
     ComexioDataError,
     ComexioError,
     ComexioRequestRejectedError,
@@ -19,10 +20,12 @@ __all__ = [
     "ComexioAuthenticationError",
     "ComexioClient",
     "ComexioConnectionError",
+    "ComexioCreatedWithoutIdError",
     "ComexioDataError",
     "ComexioError",
     "ComexioRequestRejectedError",
     "ComexioResponseError",
+    "CreatedFunctionPlan",
     "LiveStates",
     "RawConfig",
     "WebioBaseInfo",

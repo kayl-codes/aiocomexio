@@ -27,6 +27,7 @@ from tests.fake_comexio import (
     KNX_CATALOG_PATH,
     LOAD_ALL_ELEMENTS_PATH,
     LOAD_ELEMENTS_PATH,
+    LOGIN_PAGE,
     LOGIN_PATH,
     PASSWORD,
     SALT,
@@ -508,6 +509,89 @@ async def test_get_bus_workload_non_object_raises(logged_in: ComexioClient, come
 
     with pytest.raises(ComexioDataError):
         await logged_in.get_bus_workload()
+
+
+async def test_is_logged_in(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_json("POST", BUS_WORKLOAD_PATH, {"workload": 12})
+
+    assert await logged_in.is_logged_in() is True
+
+
+async def test_is_logged_in_false_on_the_login_page(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("POST", BUS_WORKLOAD_PATH, LOGIN_PAGE)
+
+    assert await logged_in.is_logged_in() is False
+
+
+@pytest.mark.parametrize("body", ["<html><nav>Anmeldung</nav>Fehler</html>", "null", "[12]"])
+async def test_is_logged_in_other_answer_is_a_data_error(
+    logged_in: ComexioClient, comexio: FakeComexio, body: str
+) -> None:
+    # Only the login form means "logged out" — an error page that mentions "Anmeldung" does not.
+    comexio.serve_text("POST", BUS_WORKLOAD_PATH, body)
+
+    with pytest.raises(ComexioDataError):
+        await logged_in.is_logged_in()
+
+
+async def test_is_logged_in_asks_once_more_after_a_dropped_connection(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # A pooled keep-alive connection Comexio already closed must not read as "logged out" or an error.
+    calls = 0
+
+    async def drop_first(request: web.Request) -> web.StreamResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert request.transport is not None
+            request.transport.close()
+        return web.json_response({"workload": 12})
+
+    comexio.serve("POST", BUS_WORKLOAD_PATH, drop_first)
+
+    assert await logged_in.is_logged_in() is True
+    assert calls == 2
+
+
+async def test_is_logged_in_raises_when_the_connection_drops_twice(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    async def drop(request: web.Request) -> web.StreamResponse:
+        assert request.transport is not None
+        request.transport.close()
+        return web.Response()
+
+    comexio.serve("POST", BUS_WORKLOAD_PATH, drop)
+
+    with pytest.raises(ComexioConnectionError):
+        await logged_in.is_logged_in()
+    assert len(comexio.received_at("POST", BUS_WORKLOAD_PATH)) == 2
+
+
+async def test_is_logged_in_does_not_retry_other_failures(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("POST", BUS_WORKLOAD_PATH, "", status=500)
+
+    with pytest.raises(ComexioResponseError):
+        await logged_in.is_logged_in()
+    assert len(comexio.received_at("POST", BUS_WORKLOAD_PATH)) == 1
+
+
+async def test_is_logged_in_does_not_retry_other_connection_errors(
+    logged_in: ComexioClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    async def refuse(*_args: Any, **_kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        raise ComexioConnectionError("Session check failed") from aiohttp.ClientConnectionError("refused")
+
+    monkeypatch.setattr(logged_in, "_request_text", refuse)
+
+    with pytest.raises(ComexioConnectionError):
+        await logged_in.is_logged_in()
+    assert calls == 1
 
 
 async def test_check_extension_firmware(logged_in: ComexioClient, comexio: FakeComexio) -> None:

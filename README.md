@@ -30,7 +30,9 @@ session's cookie jar. Value writes (`set_marker_value`, `set_io_value`, `set_knx
 through Comexio's `/api/` with a separate API user: pass `api_username` / `api_password` to the
 client. Every call either returns data or raises a `ComexioError` subclass
 (`ComexioAuthenticationError`, `ComexioConnectionError`, `ComexioResponseError`,
-`ComexioDataError`, `ComexioRequestRejectedError` for a write the server refused).
+`ComexioDataError`, `ComexioRequestRejectedError` for a write the server refused,
+`ComexioCreatedWithoutIdError` for a create the server confirmed but whose id could not be read
+back — the object exists, do not create it again).
 
 ```python
 import asyncio
