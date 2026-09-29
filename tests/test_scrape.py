@@ -149,10 +149,13 @@ def test_parse_io_types_gap_free_array_is_keyed_by_index() -> None:
 
 
 def test_scrape_js_vars_array_literal_is_keyed_by_index() -> None:
-    html = '<script>var $Fubs = [{"Id": 0}, {"Id": 1, "Name": "a]b"}]; var $Next = {"x": 1};</script>'
+    # Nested arrays (also inside a record) raise the depth too, so only the outer "]" closes it.
+    html = (
+        '<script>var $Fubs = [{"Id": 0, "Plans": [[1], []]}, {"Id": 1, "Name": "a]b"}]; var $Next = {"x": 1};</script>'
+    )
 
     assert scrape_js_vars(html, page_label="test") == {
-        "Fubs": {"0": {"Id": 0}, "1": {"Id": 1, "Name": "a]b"}},
+        "Fubs": {"0": {"Id": 0, "Plans": [[1], []]}, "1": {"Id": 1, "Name": "a]b"}},
         "Next": {"x": 1},
     }
 
