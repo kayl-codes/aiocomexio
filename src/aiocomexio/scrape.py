@@ -121,7 +121,7 @@ def _as_id_mapping(decoded: dict[str, Any] | list[Any], var_name: str) -> dict[s
 
 
 def scrape_js_vars(html: str, *, page_label: str) -> dict[str, Any]:
-    """Extract every top-level `var $Name = {...}` JS object literal from an HTML page.
+    """Extract every top-level `var $Name = {...}` object literal, or id-group array literal, from an HTML page.
 
     Keys are the variable names without the `$`. An array literal that is an id group (PHP's
     json_encode of one with the ids 0..n-1, `[]` when empty) becomes a dict keyed by index. Any
