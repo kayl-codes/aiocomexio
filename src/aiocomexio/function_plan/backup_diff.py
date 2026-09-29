@@ -37,6 +37,26 @@ _STABLE_REF_TYPES = {1, 2, 10, 4}
 _LABEL_REF_TYPES = {2: "markers", 10: "webio", 1: "ios"}
 
 
+def _reference(elem: Mapping[str, Any]) -> Mapping[str, Any]:
+    """An element's "reference", or {} if it has none, it is null or no object."""
+    ref = elem.get("reference")
+    return ref if isinstance(ref, Mapping) else {}
+
+
+def _ref_id(ref: Mapping[str, Any]) -> Any:
+    """reference.ref_id with a digit string as int — the same id must not differ by its JSON type.
+
+    int, not str, so that the plan_hash of a snapshot with int ids stays what it always was.
+    """
+    ref_id = ref.get("ref_id")
+    return int(ref_id) if isinstance(ref_id, str) and _is_ascii_int(ref_id) else ref_id
+
+
+def _is_ascii_int(text: str) -> bool:
+    """Whether int(text) parses — str.isdigit alone also accepts e.g. "²"."""
+    return text.isascii() and text.isdigit()
+
+
 def _element_identity(elem: Mapping[str, Any]) -> _Identity:
     """Stable cross-snapshot identity for one plan element (see _STABLE_REF_TYPES).
 
@@ -53,9 +73,9 @@ def _element_identity(elem: Mapping[str, Any]) -> _Identity:
     whose endpoint only moved and report it as one "moved" entry, instead of either a
     confusing added+removed pair (raw diff) or silently hiding the move (rounded diff).
     """
-    ref = elem.get("reference", {})
+    ref = _reference(elem)
     etype = ref.get("type")
-    ref_id = ref.get("ref_id")
+    ref_id = _ref_id(ref)
     if etype in _STABLE_REF_TYPES:
         return (etype, ref_id, None, None, None)
     return (etype, ref_id, elem.get("position_x"), elem.get("position_y"), elem.get("name"))
@@ -74,18 +94,32 @@ def build_source_id_translation(
     current live plan. Only covers the _STABLE_REF_TYPES kinds (IO/marker/WebIO/time module); a
     block instance, constant or comment has no cross-snapshot identity to match on and is
     simply left untranslated.
+
+    An element placed more than once (the same marker twice) pairs its copies up in id order;
+    copies the live plan has fewer of map to its first one — all copies carry the same value.
     """
-    live_by_identity = {
-        _element_identity(elem): elem_id
-        for elem_id, elem in live_elements.items()
-        if elem.get("reference", {}).get("type") in _STABLE_REF_TYPES
-    }
-    return {
-        elem_id: live_by_identity[identity]
-        for elem_id, elem in snapshot_elements.items()
-        if elem.get("reference", {}).get("type") in _STABLE_REF_TYPES
-        and (identity := _element_identity(elem)) in live_by_identity
-    }
+    live_ids = _stable_ids_by_identity(live_elements)
+    translation: dict[str, str] = {}
+    for identity, snapshot_ids in _stable_ids_by_identity(snapshot_elements).items():
+        if targets := live_ids.get(identity):
+            for index, elem_id in enumerate(snapshot_ids):
+                translation[elem_id] = targets[index] if index < len(targets) else targets[0]
+    return translation
+
+
+def _stable_ids_by_identity(elements: Mapping[str, Any]) -> dict[_Identity, list[str]]:
+    """The ids of the _STABLE_REF_TYPES elements per identity, in id order."""
+    ids: dict[_Identity, list[str]] = {}
+    for elem_id in sorted(elements, key=_id_order):
+        elem = elements[elem_id]
+        if _reference(elem).get("type") in _STABLE_REF_TYPES:
+            ids.setdefault(_element_identity(elem), []).append(elem_id)
+    return ids
+
+
+def _id_order(elem_id: str) -> tuple[int, int | str]:
+    """Sort key for element ids: numeric ids numerically, before any other."""
+    return (0, int(elem_id)) if _is_ascii_int(elem_id) else (1, elem_id)
 
 
 def _strip_position(identity: _Identity) -> tuple[Any, Any, Any]:
@@ -99,14 +133,36 @@ def _wire_key(wire: _Wire) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     return (_strip_position(src_id), src_pos, src_inv), (_strip_position(dst_id), dst_pos, dst_inv)
 
 
-def _split_moved(added: set[_Wire], removed: set[_Wire]) -> tuple[list[_Wire], list[_Wire], list[tuple[_Wire, _Wire]]]:
+def _moved_kinds(older_ids: set[_Identity], newer_ids: set[_Identity]) -> set[tuple[Any, Any, Any]]:
+    """The element kinds (see _strip_position) of which a position is gone and another appeared.
+
+    Only such a kind can have moved — two unmoved blocks of the same kind are no move, so
+    rewiring from one to the other stays a removed + an added wire. Per kind, not per
+    position: blocks shifted together by exactly their spacing land on each other's spots.
+    """
+    gone = {_strip_position(identity) for identity in older_ids - newer_ids}
+    return gone & {_strip_position(identity) for identity in newer_ids - older_ids}
+
+
+def _is_move(old_wire: _Wire, new_wire: _Wire, moved_kinds: set[tuple[Any, Any, Any]]) -> bool:
+    """Whether every end of old_wire is new_wire's end, or an element of a kind that moved."""
+    return all(
+        old_end[0] == new_end[0] or _strip_position(old_end[0]) in moved_kinds
+        for old_end, new_end in zip(old_wire, new_wire, strict=True)
+    )
+
+
+def _split_moved(
+    added: set[_Wire], removed: set[_Wire], moved_kinds: set[tuple[Any, Any, Any]]
+) -> tuple[list[_Wire], list[_Wire], list[tuple[_Wire, _Wire]]]:
     """Pair up added/removed wires that differ only by a block's position.
 
     A block instance (fubBase/constant/comment — identified via position since its ref_id is
     shared across every instance of that kind) that gets dragged to a new spot, or drifts by a
     sub-unit float amount on a Comexio re-save, without the wiring itself actually changing,
     would otherwise show up as one bogus "removed" wire plus one bogus "added" wire with an
-    identical resolved label. This surfaces it as a single "moved" entry instead.
+    identical resolved label. This surfaces it as a single "moved" entry instead
+    (moved_kinds: see _moved_kinds).
     """
     added_by_key: dict[tuple[Any, ...], list[_Wire]] = {}
     for wire in added:
@@ -117,8 +173,12 @@ def _split_moved(added: set[_Wire], removed: set[_Wire]) -> tuple[list[_Wire], l
 
     moved: list[tuple[_Wire, _Wire]] = []
     for key in added_by_key.keys() & removed_by_key.keys():
-        pairs = zip(sorted(removed_by_key[key], key=str), sorted(added_by_key[key], key=str), strict=False)
-        for old_wire, new_wire in pairs:
+        candidates = sorted(added_by_key[key], key=str)
+        for old_wire in sorted(removed_by_key[key], key=str):
+            new_wire = next((wire for wire in candidates if _is_move(old_wire, wire, moved_kinds)), None)
+            if new_wire is None:
+                continue
+            candidates.remove(new_wire)
             moved.append((old_wire, new_wire))
             removed.discard(old_wire)
             added.discard(new_wire)
@@ -127,7 +187,7 @@ def _split_moved(added: set[_Wire], removed: set[_Wire]) -> tuple[list[_Wire], l
 
 
 def _named_identities(elements: Mapping[str, Any], ref_type: int) -> set[_Identity]:
-    return {_element_identity(elem) for elem in elements.values() if elem.get("reference", {}).get("type") == ref_type}
+    return {_element_identity(elem) for elem in elements.values() if _reference(elem).get("type") == ref_type}
 
 
 def _connection_wires(snapshot: Mapping[str, Any]) -> set[_Wire]:
@@ -135,6 +195,9 @@ def _connection_wires(snapshot: Mapping[str, Any]) -> set[_Wire]:
     elements = snapshot.get("elements", {})
 
     def _endpoint(port: Mapping[str, Any]) -> _Endpoint:
+        # An end without an element — Comexio keeps connections without any "input" — gets the
+        # empty identity: its raw FubElementId (if any) is exactly what renumbering changes, so
+        # two such ends at the same port of the same element hash and diff as one.
         elem = elements.get(str(port.get("FubElementId")), {})
         return (_element_identity(elem), port.get("IOPos"), bool(port.get("Inverted")))
 
@@ -191,7 +254,11 @@ def diff_snapshots(newer: Mapping[str, Any], older: Mapping[str, Any]) -> dict[s
         return {"added": sorted(newer_set - older_set, key=str), "removed": sorted(older_set - newer_set, key=str)}
 
     added_wires, removed_wires = newer_wires - older_wires, older_wires - newer_wires
-    added_c, removed_c, moved_c = _split_moved(added_wires, removed_wires)
+    moved_kinds = _moved_kinds(
+        {_element_identity(elem) for elem in older_elements.values()},
+        {_element_identity(elem) for elem in newer_elements.values()},
+    )
+    added_c, removed_c, moved_c = _split_moved(added_wires, removed_wires, moved_kinds)
 
     return {
         "markers": _added_removed(_named_identities(newer_elements, 2), _named_identities(older_elements, 2)),
@@ -217,7 +284,7 @@ def referenced_label_metadata(
     by_type = {2: markers_by_id, 10: webio_by_id, 1: ios_by_id}
     metadata: dict[str, dict[str, str]] = {}
     for elem in plan_data.get("elements", {}).values():
-        ref = elem.get("reference") or {}
+        ref = _reference(elem)
         ref_type: Any = ref.get("type")
         key = _LABEL_REF_TYPES.get(ref_type)
         if key is None:
