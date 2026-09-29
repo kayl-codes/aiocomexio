@@ -25,8 +25,8 @@ COMEXIO_VERSION_RE = re.compile(
     r'module/admin/function_function_module/js/cmb_function_function_module\.js)"'
 )
 _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
-_EMPTY_JS_ARRAY_RE = re.compile(r"\[\s*\]")
-_OBJECT_START_RE = re.compile(r"\s*\{")
+_LITERAL_START_RE = re.compile(r"\s*([{\[])")
+_LITERAL_CLOSERS = {"{": "}", "[": "]"}
 _TRAILING_COMMA_RE = re.compile(r",\s*[}\]]")
 
 
@@ -64,7 +64,13 @@ def extract_js_object_literal(script_text: str, start_index: int) -> tuple[str |
     Returns (literal, end index), or (None, start_index) if there is no balanced literal there.
     Braces inside single- or double-quoted strings are ignored.
     """
-    if start_index >= len(script_text) or script_text[start_index] != "{":
+    return _extract_balanced(script_text, start_index, "{")
+
+
+def _extract_balanced(script_text: str, start_index: int, opener: str) -> tuple[str | None, int]:
+    """extract_js_object_literal for an object ('{') or array ('[') literal."""
+    closer = _LITERAL_CLOSERS[opener]
+    if start_index >= len(script_text) or script_text[start_index] != opener:
         return None, start_index
 
     depth = 0
@@ -77,32 +83,50 @@ def extract_js_object_literal(script_text: str, start_index: int) -> tuple[str |
             in_string, escape = _string_state(ch, in_string, escape)
         elif ch in ("'", '"'):
             in_string = ch
-        elif ch == "{":
+        elif ch == opener:
             depth += 1
-        elif ch == "}":
+        elif ch == closer:
             depth -= 1
             if depth == 0:
                 return script_text[start_index : i + 1], i + 1
     return None, start_index
 
 
-def _object_start(text: str, pos: int) -> int | None:
-    """Index of the '{' opening the value assigned at pos, or None if that value isn't an object literal.
+def _literal_at(text: str, pos: int) -> str | None:
+    """The object or array literal assigned at pos, or None if the value is neither.
 
-    Only whitespace may sit between `=` and `{` — searching on for the next "{" would hand a
-    `var $A = 5;` (or `[]`, PHP's json_encode of an empty array) the NEXT variable's object.
+    Only whitespace may sit between `=` and the literal — searching on for the next "{" would
+    hand a `var $A = 5;` the NEXT variable's object.
     """
-    match = _OBJECT_START_RE.match(text, pos)
-    return match.end() - 1 if match else None
+    match = _LITERAL_START_RE.match(text, pos)
+    return None if match is None else _extract_balanced(text, match.start(1), match.group(1))[0]
+
+
+def _as_id_mapping(decoded: dict[str, Any] | list[Any], var_name: str) -> dict[str, Any] | None:
+    """A decoded object or array literal as a dict keyed by id, or None if it is no id group.
+
+    PHP's json_encode renders an array with the keys 0..n-1 as a JSON array (`[]` when empty,
+    e.g. $Fubs without any plan) — the index then IS the id, as in config.iter_group. An array
+    counts as such an id group only if every member is an object whose "Id", where it has one,
+    equals its position: a plain list would otherwise pass off positions as ids, and e.g. a
+    list-valued legacy $ioTypes would hide the real $IOTypesBinary table.
+    """
+    if isinstance(decoded, dict):
+        return decoded
+    for index, member in enumerate(decoded):
+        if not isinstance(member, dict) or str(member.get("Id", index)) != str(index):
+            _LOGGER.debug("Skipping %s: an array, but no id group (member %d)", var_name, index)
+            return None
+    return {str(index): member for index, member in enumerate(decoded)}
 
 
 def scrape_js_vars(html: str, *, page_label: str) -> dict[str, Any]:
-    """Extract every top-level `var $Name = {...}` JS object literal from an HTML page.
+    """Extract every top-level `var $Name = {...}` object literal, or id-group array literal, from an HTML page.
 
-    Keys are the variable names without the `$`. An empty array `[]` (PHP's json_encode of an
-    empty id group) becomes {}. A value that isn't an object literal is skipped; one that isn't
-    valid JSON (after stripping trailing commas) is skipped with a warning — page_label only
-    names the page in that warning.
+    Keys are the variable names without the `$`. An array literal that is an id group (PHP's
+    json_encode of one with the ids 0..n-1, `[]` when empty) becomes a dict keyed by index. Any
+    other value is skipped; one that isn't valid JSON (after stripping trailing commas) with a
+    warning — page_label only names the page in that warning.
     """
     # Restrict search to script tags to avoid scanning entire HTML with a single DOTALL regex
     script_blocks = _SCRIPT_BLOCK_RE.findall(html)
@@ -111,20 +135,18 @@ def scrape_js_vars(html: str, *, page_label: str) -> dict[str, Any]:
     for script in script_blocks:
         for m in _VAR_DECL_RE.finditer(script):
             var_name = m.group(1)
-            if _EMPTY_JS_ARRAY_RE.match(script, m.end()):
-                # PHP json_encode renders an empty array as `[]` (e.g. $Fubs without any plan).
-                result[var_name] = {}
-                continue
-            brace_index = _object_start(script, m.end())
-            raw_obj = None if brace_index is None else extract_js_object_literal(script, brace_index)[0]
+            raw_obj = _literal_at(script, m.end())
             if raw_obj is None:
-                _LOGGER.debug("Skipping $%s on %s page: not an object literal", var_name, page_label)
+                _LOGGER.debug("Skipping $%s on %s page: not an object or array literal", var_name, page_label)
                 continue
 
             try:
-                result[var_name] = json.loads(normalize_js_like_object(raw_obj))
+                decoded = json.loads(normalize_js_like_object(raw_obj))
             except json.JSONDecodeError as exc:
                 _LOGGER.warning("Failed to decode JSON for variable $%s on %s page: %s", var_name, page_label, exc)
+                continue
+            if (mapping := _as_id_mapping(decoded, f"${var_name}")) is not None:
+                result[var_name] = mapping
     return result
 
 
@@ -136,23 +158,20 @@ def parse_comexio_version(html: str) -> str | None:
 
 
 def _decode_js_var(html: str, decl_re: re.Pattern[str], var_name: str) -> dict[str, Any] | None:
-    """Decode the object literal assigned by the first match of decl_re, or None if absent/invalid."""
+    """Decode the object or array literal assigned by the first match of decl_re, or None if absent/invalid."""
     assign_match = decl_re.search(html)
     if assign_match is None:
         return None
-    if _EMPTY_JS_ARRAY_RE.match(html, assign_match.end()):
-        return {}
-    brace_index = _object_start(html, assign_match.end())
-    raw_object = None if brace_index is None else extract_js_object_literal(html, brace_index)[0]
+    raw_object = _literal_at(html, assign_match.end())
     if raw_object is None:
-        _LOGGER.debug("Skipping %s: not an object literal", var_name)
+        _LOGGER.debug("Skipping %s: not an object or array literal", var_name)
         return None
     try:
         decoded = json.loads(normalize_js_like_object(raw_object))
     except json.JSONDecodeError as exc:
         _LOGGER.warning("Failed to decode %s: %s", var_name, exc)
         return None
-    return decoded if isinstance(decoded, dict) else None
+    return _as_id_mapping(decoded, var_name)
 
 
 def parse_io_types(html: str) -> dict[str, Any]:

@@ -174,6 +174,12 @@ def iter_group(group: Any) -> Iterable[tuple[str, Any]]:
     return ((str(gid), member) for gid, member in items)
 
 
+def _io_description(desc: str, ident: str) -> str:
+    """The IO's description, stripped, or "" if it is empty or merely repeats the identifier."""
+    title = (desc or "").strip()
+    return "" if title.casefold() == ident.strip().casefold() else title
+
+
 def io_schema_title(desc: str, ident: str) -> str:
     """{IoTitle} for the entity-name schema: the IO's description, or "#nn" if there is none.
 
@@ -181,10 +187,7 @@ def io_schema_title(desc: str, ident: str) -> str:
     using it would render "AI1 AI1" under the default schema — so both get the placeholder
     unnamed markers use.
     """
-    title = (desc or "").strip()
-    if not title or title.casefold() == ident.strip().casefold():
-        return NO_NAME_TITLE
-    return title
+    return _io_description(desc, ident) or NO_NAME_TITLE
 
 
 def marker_kind(title: str, *, is_marker: bool = True) -> MarkerKind:
@@ -488,14 +491,14 @@ def _source_item_type(module_key: str, type_raw: Any, io_types: Mapping[str, Any
     """digital/analog classification for one raw Marker/KNX Type value -> (type, unresolved).
 
     KNX Type is a rich catalog code in the same value space as IOs' $IOTypesBinary, not the
-    simple {1,2,3} marker scale. A KNX Type without any io_types entry is reported unresolved
-    and defaults to "digital" — the safer of the two, it never exposes a possibly-binary
-    datapoint to analog writes.
+    simple {1,2,3} marker scale. A KNX Type without a usable io_types entry (missing, null, no
+    object or an empty one) is reported unresolved and defaults to "digital" — the safer of the two, it
+    never exposes a possibly-binary datapoint to analog writes.
     """
     if module_key == _MODULE_KNX:
-        if str(type_raw) not in io_types:
+        if not (entry := _table_entry(io_types, type_raw)):
             return TYPE_DIGITAL, True
-        return (TYPE_DIGITAL if _table_entry(io_types, type_raw).get("binary", False) else TYPE_ANALOG), False
+        return (TYPE_DIGITAL if entry.get("binary", False) else TYPE_ANALOG), False
     return (TYPE_ANALOG if type_raw in [2, 3] else TYPE_DIGITAL), False
 
 
@@ -694,9 +697,8 @@ def _build_io_entry(
     """Build one IO entry (without the extension's offline flag)."""
     # A numeric identifier is stringified, not replaced — it feeds unique_id/entity_id.
     ident = _label(io_item.get("Identifier")) or str(io_item.get("Id", "unknown"))
-    desc = io_item.get("Description")
-    if not isinstance(desc, str) or not desc:
-        desc = ident
+    raw_desc = io_item.get("Description")
+    description = _io_description(raw_desc if isinstance(raw_desc, str) else "", ident)
     type_info = _table_entry(io_types, io_item.get("InOutputTypeId"))
     is_binary = type_info.get("binary", False)
     v_max = type_info.get("max", 1)
@@ -707,18 +709,25 @@ def _build_io_entry(
     except (ValueError, TypeError):
         type_id_raw = 1
 
-    # Fallback classification when the IO type table is unavailable.
-    if not io_types:
+    # Fallback classification when the IO type table has no usable row for this IO — not only
+    # when the whole table is unavailable: a missing row would otherwise make a QI1 "analog, max 1".
+    if not type_info:
+        if io_types:
+            _LOGGER.debug(
+                "IO %s %s: no usable row for type %r in the IO type table — classified by identifier",
+                ext_name,
+                ident,
+                io_item.get("InOutputTypeId"),
+            )
         if _ANALOG_OUTPUT_IO_RE.match(ident_upper):
             is_binary, v_max = False, 0
         elif _BINARY_IO_RE.match(ident_upper):
             is_binary, v_max = True, 1
 
-    has_desc = bool(desc.strip()) and desc != ident
-    io_name = f"{ext_name} {ident} {desc.strip()}" if has_desc else f"{ext_name} {ident}"
+    io_name = f"{ext_name} {ident} {description}" if description else f"{ext_name} {ident}"
 
     ha_name = options.schema_io.format_map(
-        SafeDict(ServerAlias=options.server_alias, ExtName=ext_name, IoId=ident, IoTitle=io_schema_title(desc, ident))
+        SafeDict(ServerAlias=options.server_alias, ExtName=ext_name, IoId=ident, IoTitle=description or NO_NAME_TITLE)
     )
     return {
         "id": str(io_item.get("Id")),
