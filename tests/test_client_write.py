@@ -1,6 +1,7 @@
 """ComexioClient writes (API values, Web-IO lifecycle, markers) against the fake Comexio server."""
 
 import base64
+import html
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -158,8 +159,20 @@ async def test_set_value_http_error_raises_response_error(api_client: ComexioCli
 # --- Web-IO classes and devices ---------------------------------------------------------------
 
 
+def _webio_add_page(bases: dict[str, str], devices: dict[str, str] | None = None) -> str:
+    """A Web-IO add page as Comexio renders it: both lists as JSON, the classes also as <option>s."""
+    base_list = {key: {"Id": int(key), "Identifier": name, "BaseId": 0} for key, name in bases.items()}
+    device_list = {key: {"Id": int(key), "Name": name, "WebDeviceBaseId": 1} for key, name in (devices or {}).items()}
+    options = "".join(f'<option value="{key}">{html.escape(name)}</option>' for key, name in bases.items())
+    return (
+        '<div id="add_edit_device_info_message_hover"></div><script type="text/javascript"> '
+        f"DeviceList={json.dumps(device_list) if device_list else '[]'}; DeviceBaseList={json.dumps(base_list)}; "
+        f'</script> <form id="new_device_form"><select id="web_device_base">{options}</select></form>'
+    )
+
+
 async def test_get_webio_base_info_finds_class_and_deletability(logged_in: ComexioClient, comexio: FakeComexio) -> None:
-    comexio.serve_text("GET", WEBIO_ADD_PATH, '<select><option value="12" selected>HA [M]</option></select>')
+    comexio.serve_text("GET", WEBIO_ADD_PATH, _webio_add_page({"12": "HA [M]"}))
     comexio.serve_text("GET", WEBIO_BASE_WINDOW_PATH, '<a href="/admin/web_io/delete_web_device_base/?id=12">x</a>')
 
     assert await logged_in.get_webio_base_info("ha [m]") == WebioBaseInfo(base_id="12", deletable=True)
@@ -168,17 +181,80 @@ async def test_get_webio_base_info_finds_class_and_deletability(logged_in: Comex
 async def test_get_webio_base_info_class_in_use_is_not_deletable(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
-    comexio.serve_text("GET", WEBIO_ADD_PATH, '<option value="12">HA [M]</option>')
+    comexio.serve_text("GET", WEBIO_ADD_PATH, _webio_add_page({"12": "HA [M]"}))
     comexio.serve_text("GET", WEBIO_BASE_WINDOW_PATH, "<div>no delete link</div>")
 
     assert await logged_in.get_webio_base_info("HA [M]") == WebioBaseInfo(base_id="12", deletable=False)
 
 
+async def test_get_webio_base_info_delete_link_of_a_longer_id_is_not_deletable(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """Class 1 is in use; only class 12 has a delete link, which must not count for class 1."""
+    comexio.serve_text("GET", WEBIO_ADD_PATH, _webio_add_page({"1": "HA [M]", "12": "Other"}))
+    comexio.serve_text("GET", WEBIO_BASE_WINDOW_PATH, '<a href="/admin/web_io/delete_web_device_base/?id=12">x</a>')
+
+    assert await logged_in.get_webio_base_info("HA [M]") == WebioBaseInfo(base_id="1", deletable=False)
+
+
+async def test_get_webio_base_info_matches_names_with_html_special_characters(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """The <option> label reads "A &amp; B"; the JSON list carries the real name."""
+    comexio.serve_text("GET", WEBIO_ADD_PATH, _webio_add_page({"12": "A & B", "13": "a & b"}))
+    comexio.serve_text("GET", WEBIO_BASE_WINDOW_PATH, "<div></div>")
+
+    assert await logged_in.get_webio_base_info("a & b") == WebioBaseInfo(base_id="13", deletable=False)
+
+
 async def test_get_webio_base_info_absent_class_is_none(logged_in: ComexioClient, comexio: FakeComexio) -> None:
-    comexio.serve_text("GET", WEBIO_ADD_PATH, '<option value="12">Other</option>')
+    comexio.serve_text("GET", WEBIO_ADD_PATH, _webio_add_page({"12": "Other"}))
 
     assert await logged_in.get_webio_base_info("HA [M]") is None
     assert comexio.received_at("GET", WEBIO_BASE_WINDOW_PATH) == []
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        '<select><option value="12">Other</option></select>',
+        "<script>DeviceBaseList={};</script>",
+        "<html><body>Wartungsmodus</body></html>",
+        "<script>DeviceList=null; DeviceBaseList={};</script>",
+        "<script>DeviceList=[]; DeviceBaseList={}; DeviceList={};</script>",
+        '<script>DeviceList=[]; DeviceBaseList={"12": {"Id": 12, "Identifier": "HA [M]"</script>',
+    ],
+)
+async def test_webio_lookups_on_a_page_without_both_lists_raise(
+    logged_in: ComexioClient, comexio: FakeComexio, page: str
+) -> None:
+    """Not the add page: "no such class/device" would make the caller upload or recreate one."""
+    comexio.serve_text("GET", WEBIO_ADD_PATH, page)
+
+    with pytest.raises(ComexioDataError, match="DeviceBaseList/DeviceList"):
+        await logged_in.get_webio_base_info("HA [M]")
+    with pytest.raises(ComexioDataError, match="DeviceBaseList/DeviceList"):
+        await logged_in.get_webio_device_id("HA [IO]")
+
+
+@pytest.mark.parametrize(
+    "base_list",
+    [
+        {"12": {"Id": 12, "Ident": "HA [M]"}},  # field renamed
+        {"12": {"Id": 12, "Identifier": None}},
+        {"0": {"Id": 12, "Identifier": "HA [M]"}},  # keyed by position, not by id
+        {"12": "HA [M]"},
+    ],
+)
+async def test_webio_list_with_unexpected_entries_raises_instead_of_reporting_absent(
+    logged_in: ComexioClient, comexio: FakeComexio, base_list: dict[str, Any]
+) -> None:
+    comexio.serve_text(
+        "GET", WEBIO_ADD_PATH, f"<script>DeviceList=[]; DeviceBaseList={json.dumps(base_list)};</script>"
+    )
+
+    with pytest.raises(ComexioDataError, match="Web-IO list entry"):
+        await logged_in.get_webio_base_info("Other")
 
 
 async def test_get_webio_base_info_login_form_is_not_an_absent_class(
@@ -198,14 +274,22 @@ async def test_get_webio_base_info_failed_fetch_raises(logged_in: ComexioClient,
 
 
 async def test_get_webio_device_id(logged_in: ComexioClient, comexio: FakeComexio) -> None:
-    comexio.serve_text("GET", WEBIO_HOME_PATH, '<a id="tab-link-34" href="#t34">HA [IO]</a>')
+    comexio.serve_text("GET", WEBIO_ADD_PATH, _webio_add_page({"1": "HA [IO]"}, {"34": "HA [IO]", "35": "Küche"}))
 
     assert await logged_in.get_webio_device_id("HA [IO]") == "34"
+    assert await logged_in.get_webio_device_id("küche") == "35"
     assert await logged_in.get_webio_device_id("HA [M]") is None
 
 
+async def test_get_webio_device_id_without_devices_is_none(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    """PHP renders an empty device list as []; that is a valid page listing no device."""
+    comexio.serve_text("GET", WEBIO_ADD_PATH, _webio_add_page({"1": "HA [IO]"}))
+
+    assert await logged_in.get_webio_device_id("HA [IO]") is None
+
+
 async def test_get_webio_device_id_login_form_raises(logged_in: ComexioClient, comexio: FakeComexio) -> None:
-    comexio.serve_text("GET", WEBIO_HOME_PATH, LOGIN_PAGE)
+    comexio.serve_text("GET", WEBIO_ADD_PATH, LOGIN_PAGE)
 
     with pytest.raises(ComexioAuthenticationError):
         await logged_in.get_webio_device_id("HA [IO]")
@@ -604,7 +688,7 @@ async def test_login_form_answer_is_not_reported_as_success(
 async def test_login_form_in_base_window_is_not_an_undeletable_class(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
-    comexio.serve_text("GET", WEBIO_ADD_PATH, '<option value="12">HA [M]</option>')
+    comexio.serve_text("GET", WEBIO_ADD_PATH, _webio_add_page({"12": "HA [M]"}))
     comexio.serve_text("GET", WEBIO_BASE_WINDOW_PATH, LOGIN_PAGE)
 
     with pytest.raises(ComexioAuthenticationError):

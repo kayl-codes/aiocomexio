@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Any, TypeIs
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -33,7 +33,13 @@ from .exceptions import (
     ComexioResponseError,
 )
 from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_has_elements
-from .scrape import parse_comexio_version, parse_io_input_types, parse_io_types, scrape_js_vars
+from .scrape import (
+    parse_comexio_version,
+    parse_io_input_types,
+    parse_io_types,
+    parse_webio_add_page,
+    scrape_js_vars,
+)
 from .session import is_local_address
 from .webio import CONTENT_TYPE_JSON
 
@@ -115,16 +121,23 @@ _WEBIO_CMD_VALUE_RE = re.compile(r'\bvalue="([^"]*)"')
 
 # Plain-text answer of fupValueData for a plan that is not running (instead of a JSON value dict).
 _JSON_START_CHARS = ("{", "[")
+# dashboard/refresh answers under the request's keys; one fupValueData key per plan.
+_RUN_STATE_KEY_PREFIX = "fup_"
+# Each entry of the Web-IO add page's DeviceBaseList / DeviceList carries its key as "Id".
+_WEBIO_LIST_ID_FIELD = "Id"
+# fupValueData's answer for a stopped plan, observed live as "0:not_found".
+_NOT_RUNNING_SENTINEL_RE = re.compile(r"\d+:not_found")
 
 # save_fub form values: paper format ids and orientation ids as Comexio's plan dialog sends them.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
 _PLAN_ORIENTATION_IDS = {"landscape": "0", "portrait": "1"}
 _PLAN_DPI_RANGE = range(45, 121)
-# save_fub / delete answer with a redirect whose query carries the verdict.
+# save_fub / delete answer with a redirect whose query carries the verdict as one (key, value)
+# parameter; the home page renders its message from exactly that parameter (verified live).
 _REDIRECT_STATUSES = frozenset({HTTPStatus.MOVED_PERMANENTLY, HTTPStatus.FOUND, HTTPStatus.SEE_OTHER})
-_PLAN_ADDED_CONFIRMATION = "added=1"
-_PLAN_SAVED_CONFIRMATION = "saved=1"
-_PLAN_DELETED_CONFIRMATION = "delete=ok"
+_PLAN_ADDED_CONFIRMATION = ("added", "1")
+_PLAN_SAVED_CONFIRMATION = ("saved", "1")
+_PLAN_DELETED_CONFIRMATION = ("delete", "ok")
 # Element types and the catalog ref_id add_element needs for blocks that have no catalog entry.
 _ELEMENT_TYPE_COMMENT = 14
 _ELEMENT_TYPE_CONSTANT = 16
@@ -362,6 +375,33 @@ class ComexioClient:
             return {}
         return {} if raw in _EMPTY_CONNECTION_VALUES else _connection_values(raw, fub_id)
 
+    async def get_function_plan_run_states(self, fub_ids: Iterable[int]) -> dict[int, bool]:
+        """Whether each plan is running, for all of fub_ids in one dashboard/refresh request.
+
+        Asks fupValueData for every plan under its own key: a running plan answers with its
+        value set as JSON ("{}" when it has no value elements), a stopped one with a plain-text
+        sentinel such as "0:not_found". A plan the answer leaves out, or answers with anything
+        else (a PHP warning, an error text, broken JSON), is absent from the result, never
+        guessed: a caller keeps its last known state for it.
+        """
+        ids = list(dict.fromkeys(fub_ids))
+        _require_ints(**{f"fub_ids[{index}]": fub_id for index, fub_id in enumerate(ids)})
+        if not ids:
+            return {}
+        payload = {f"{_RUN_STATE_KEY_PREFIX}{fub_id}": {"action": "fupValueData", "fupId": fub_id} for fub_id in ids}
+        data = await self._dashboard_refresh(payload, what="Function plan run states")
+        result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
+        if not isinstance(result, dict):
+            raise ComexioDataError(f"Function plan run states response has no result object: {_excerpt(data)}")
+        states: dict[int, bool] = {}
+        for fub_id in ids:
+            raw = result.get(f"{_RUN_STATE_KEY_PREFIX}{fub_id}")
+            if (running := _plan_running(raw)) is None:
+                _LOGGER.debug("Run state of plan %s unknown, fupValueData answered %s", fub_id, _excerpt(raw))
+            else:
+                states[fub_id] = running
+        return states
+
     async def load_function_plan(self, fub_id: int, *, strict: bool = False) -> dict[str, Any]:
         """Elements and connections of one plan, both normalized to id-keyed dicts.
 
@@ -516,22 +556,31 @@ class ComexioClient:
         failed fetch raises, so a caller never uploads a duplicate class next to one that is
         still there. Raises ComexioAuthenticationError if the session is not logged in.
         """
-        html = await self._request_admin_text("GET", _WEBIO_ADD_PATH, what="Web-IO add page")
-        pattern = rf'<option value="(\d+)"[^>]*>{re.escape(class_name)}</option>'
-        if not (match := re.search(pattern, html, re.IGNORECASE)):
+        base_list, _ = await self._get_webio_lists()
+        if (base_id := _find_by_label(base_list, "Identifier", class_name)) is None:
             return None
-        base_id = match[1]
         window = await self._request_admin_text("GET", _WEBIO_BASE_WINDOW_PATH, what="Web-IO base window")
-        return WebioBaseInfo(base_id=base_id, deletable=f"delete_web_device_base/?id={base_id}" in window)
+        delete_link = re.compile(rf"delete_web_device_base/\?id={re.escape(base_id)}(?!\d)")
+        return WebioBaseInfo(base_id=base_id, deletable=delete_link.search(window) is not None)
 
     async def get_webio_device_id(self, device_name: str) -> str | None:
         """Id of the Web-IO device named device_name, or None if the server has no such device.
 
         Same contract as get_webio_base_info: None only for a fetched page without that device.
         """
-        html = await self._request_admin_text("GET", _WEBIO_HOME_PATH, what="Web-IO home page")
-        pattern = rf'<a id="tab-link-(\d+)"[^>]*>{re.escape(device_name)}</a>'
-        return match[1] if (match := re.search(pattern, html, re.IGNORECASE)) else None
+        _, device_list = await self._get_webio_lists()
+        return _find_by_label(device_list, "Name", device_name)
+
+    async def _get_webio_lists(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(classes, devices) from the Web-IO add page; ComexioDataError unless it carries both lists.
+
+        A page without the lists is not the add page, so it must not pass as one listing no
+        such class or device: callers upload a class or recreate a device on that basis.
+        """
+        html = await self._request_admin_text("GET", _WEBIO_ADD_PATH, what="Web-IO add page")
+        if (lists := parse_webio_add_page(html)) is None:
+            raise ComexioDataError("The Web-IO add page carries no DeviceBaseList/DeviceList, the page layout changed")
+        return lists
 
     async def delete_webio_device(self, device_id: str | int) -> bool:
         """Delete a Web-IO device. False if Comexio refuses because a function plan still uses it.
@@ -940,7 +989,7 @@ class ComexioClient:
             params={"id": str(fub_id)},
             headers=self._xhr_headers(_FUNCTION_MODULE_PATH),
         )
-        if _PLAN_DELETED_CONFIRMATION not in location:
+        if not _redirect_confirms(location, _PLAN_DELETED_CONFIRMATION):
             raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
 
     async def run_function_plan(self, fub_id: int, plan: Mapping[str, Any] | None = None) -> None:
@@ -1198,12 +1247,12 @@ class ComexioClient:
         except ValueError as err:
             raise ComexioDataError(f"Function plan {fub_id} payload cannot be run: {err}") from err
 
-    async def _post_plan_form(self, form: dict[str, str], token: str, *, what: str) -> None:
-        """POST the plan settings form; ComexioRequestRejectedError unless the redirect carries token."""
+    async def _post_plan_form(self, form: dict[str, str], verdict: tuple[str, str], *, what: str) -> None:
+        """POST the plan settings form; ComexioRequestRejectedError unless the redirect carries verdict."""
         location = await self._request_redirect(
             "POST", _PLAN_SAVE_PATH, what=what, data=form, headers=self._xhr_headers(_FUNCTION_MODULE_PATH)
         )
-        if token not in location:
+        if not _redirect_confirms(location, verdict):
             raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
         _LOGGER.debug("%s confirmed (redirect to %r)", what, location)
 
@@ -1449,6 +1498,34 @@ def _plan_by_name(fubs: Any, name: str, *, what: str) -> CreatedFunctionPlan:
     return CreatedFunctionPlan(plan_id, dict(plan))
 
 
+def _redirect_confirms(location: str, verdict: tuple[str, str]) -> bool:
+    """Whether the redirect's query carries exactly the verdict parameter, e.g. ("added", "1").
+
+    A substring test would also take "?xadded=1" or "?added=10" for "added=1".
+    """
+    return verdict in parse_qsl(urlsplit(location).query, keep_blank_values=True)
+
+
+def _find_by_label(entries: Mapping[str, Any], field: str, label: str) -> str | None:
+    """Id of the Web-IO list entry whose field equals label, or None.
+
+    An exact match wins; otherwise the first match ignoring case, as the lookup always matched
+    the rendered labels case-insensitively. Raises ComexioDataError for an entry without a
+    string field or whose Id differs from its key: None means "absent" to the caller, so a
+    renamed field or a list keyed by position must not read as an empty list.
+    """
+    candidates: list[tuple[str, str]] = []
+    for key, entry in iter_group(entries):
+        value = entry.get(field) if isinstance(entry, Mapping) else None
+        if not isinstance(value, str) or str(entry.get(_WEBIO_LIST_ID_FIELD, key)) != key:
+            raise ComexioDataError(f"Web-IO list entry {key!r} has no {field!r} or a different Id: {_excerpt(entry)}")
+        candidates.append((key, value))
+    exact = [key for key, value in candidates if value == label]
+    folded = [key for key, value in candidates if value.casefold() == label.casefold()]
+    matches = exact or folded
+    return matches[0] if matches else None
+
+
 def _answer_id(result: dict[str, Any], what: str) -> int:
     """The "id" of an add_element / saveconnection answer; an "error" answer is a refusal."""
     if "error" in result:
@@ -1498,6 +1575,24 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
     if not matched:
         raise _missing_data_error(html, f"Web-IO command {command_id} edit form has no min/max fields")
     return values["min"], values["max"]
+
+
+def _plan_running(raw: Any) -> bool | None:
+    """Run state from one fupValueData answer: True for a JSON value set, False for the not-running sentinel.
+
+    None for anything else — only these two shapes were observed, so a PHP warning or an error
+    text must not pass as "stopped", nor a truncated "{..." as "running".
+    """
+    if isinstance(raw, (dict, list)):
+        return True
+    if not isinstance(raw, str):
+        return None
+    if _NOT_RUNNING_SENTINEL_RE.fullmatch(text := raw.strip()):
+        return False
+    try:
+        return True if isinstance(json.loads(text), (dict, list)) else None
+    except ValueError:
+        return None
 
 
 def _connection_values(raw: Any, fub_id: int) -> dict[str, list[Any]]:

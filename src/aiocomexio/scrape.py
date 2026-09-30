@@ -24,6 +24,9 @@ COMEXIO_VERSION_RE = re.compile(
     r'src="/(\d+\.\d+\.\d+)/(?:js/cmb_admin\.js|'
     r'module/admin/function_function_module/js/cmb_function_function_module\.js)"'
 )
+# Web-IO add page: plain assignments (no `var`, no `$`) of the class and device lists.
+_WEBIO_DEVICE_BASE_LIST_RE = re.compile(r"\bDeviceBaseList\s*=\s*")
+_WEBIO_DEVICE_LIST_RE = re.compile(r"\bDeviceList\s*=\s*")
 _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _LITERAL_START_RE = re.compile(r"\s*([{\[])")
 _LITERAL_CLOSERS = {"{": "}", "[": "]"}
@@ -198,3 +201,23 @@ def parse_io_input_types(html: str) -> dict[str, Any]:
     io_input_types = _decode_js_var(html, _IO_INPUT_TYPES_DECL_RE, "$IOInputTypes") or {}
     _LOGGER.debug("Loaded %d IO input types", len(io_input_types))
     return io_input_types
+
+
+def parse_webio_add_page(html: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """(DeviceBaseList, DeviceList) from the Web-IO add page, or None unless the page carries both.
+
+    The add page embeds both as JSON (`DeviceBaseList={id: {Id, Identifier, ...}}` for the
+    classes, `DeviceList={id: {Id, Name, ...}}` for the devices). Unlike the rendered <option>
+    and tab labels they need no HTML unescaping, and their presence proves the page really is
+    the add page: None lets a caller tell "not that page" from "no such class/device".
+    """
+    lists = []
+    for decl_re, var_name in ((_WEBIO_DEVICE_BASE_LIST_RE, "DeviceBaseList"), (_WEBIO_DEVICE_LIST_RE, "DeviceList")):
+        # A second assignment (an empty initializer, a reset) leaves open which one holds the data.
+        if len(decl_re.findall(html)) != 1:
+            _LOGGER.debug("Web-IO add page: %s is not assigned exactly once", var_name)
+            return None
+        if (decoded := _decode_js_var(html, decl_re, var_name)) is None:
+            return None
+        lists.append(decoded)
+    return lists[0], lists[1]

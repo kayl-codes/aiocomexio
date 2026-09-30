@@ -380,6 +380,80 @@ async def test_get_function_plan_connection_values_http_error_raises(
         await logged_in.get_function_plan_connection_values(3)
 
 
+async def test_get_function_plan_run_states(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    """Answers as observed live: running plans send JSON (also "{}"), stopped ones "0:not_found"."""
+    comexio.serve_json(
+        "POST",
+        DASHBOARD_REFRESH_PATH,
+        {
+            "result": {
+                "fup_1": json.dumps({"408": [1]}),
+                "fup_2": "{}",
+                "fup_3": "0:not_found",
+                "fup_4": {"7": [0]},
+                "fup_5": "[]",
+                "fup_6": " 12:not_found ",
+            }
+        },
+    )
+
+    states = await logged_in.get_function_plan_run_states([1, 2, 3, 4, 5, 6, 3])
+
+    assert states == {1: True, 2: True, 3: False, 4: True, 5: True, 6: False}
+    (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
+    assert json.loads(request.form["json"]) == {
+        f"fup_{fub_id}": {"action": "fupValueData", "fupId": fub_id} for fub_id in (1, 2, 3, 4, 5, 6)
+    }
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [None, "", "  ", 0, False, 5, "Warning: x", "<br />", "1:busy", "null", "0", "{broken", "not_found"],
+)
+async def test_get_function_plan_run_states_leaves_out_unknown_answers(
+    logged_in: ComexioClient, comexio: FakeComexio, answer: Any
+) -> None:
+    """Neither JSON nor the sentinel: a caller must keep its last known state, not read "stopped"."""
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"fup_1": answer, "fup_2": "{}"}})
+
+    assert await logged_in.get_function_plan_run_states([1, 2, 3]) == {2: True}
+
+
+async def test_get_function_plan_run_states_without_ids_sends_nothing(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    assert await logged_in.get_function_plan_run_states([]) == {}
+    assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
+
+
+@pytest.mark.parametrize("fub_ids", [["1"], [1.0], [True]])
+async def test_get_function_plan_run_states_rejects_non_int_ids(
+    logged_in: ComexioClient, comexio: FakeComexio, fub_ids: list[Any]
+) -> None:
+    with pytest.raises(TypeError, match="fub_ids"):
+        await logged_in.get_function_plan_run_states(fub_ids)
+    assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
+
+
+@pytest.mark.parametrize("payload", [{"result": []}, {"error": "x"}, ["result"]])
+async def test_get_function_plan_run_states_without_result_object_raises(
+    logged_in: ComexioClient, comexio: FakeComexio, payload: Any
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, payload)
+
+    with pytest.raises(ComexioDataError, match="no result object"):
+        await logged_in.get_function_plan_run_states([1])
+
+
+async def test_get_function_plan_run_states_on_expired_session_raises_authentication_error(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("POST", DASHBOARD_REFRESH_PATH, "<html><form>Anmeldung</form></html>")
+
+    with pytest.raises(ComexioAuthenticationError):
+        await logged_in.get_function_plan_run_states([1])
+
+
 # --- function plans ------------------------------------------------------------------------
 
 

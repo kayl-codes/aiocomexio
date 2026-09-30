@@ -313,6 +313,39 @@ async def test_delete_function_plan_unconfirmed_is_rejected(logged_in: ComexioCl
         await logged_in.delete_function_plan(9)
 
 
+@pytest.mark.parametrize(
+    "query", ["?xdelete=ok", "?delete=okay", "?delete=not_found", "#delete=ok", "?next=delete%3Dok"]
+)
+async def test_delete_function_plan_needs_the_exact_verdict_parameter(
+    logged_in: ComexioClient, comexio: FakeComexio, query: str
+) -> None:
+    """Each of these contains "delete=ok" (or its escape) as text, but none is the verdict parameter."""
+    _serve_redirect(comexio, "GET", PLAN_DELETE_PATH, f"{_HOME}{query}")
+
+    with pytest.raises(ComexioRequestRejectedError):
+        await logged_in.delete_function_plan(9)
+
+
+@pytest.mark.parametrize("query", ["?xsaved=1", "?saved=10"])
+async def test_update_function_plan_needs_the_exact_verdict_parameter(
+    logged_in: ComexioClient, comexio: FakeComexio, query: str
+) -> None:
+    _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}{query}")
+
+    with pytest.raises(ComexioRequestRejectedError):
+        await logged_in.update_function_plan(
+            4, name="P", comment="", position=0, active=False, paper_format="A4", orientation="landscape", dpi=90
+        )
+
+
+async def test_verdict_parameter_among_other_query_parameters_confirms(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    _serve_redirect(comexio, "GET", PLAN_DELETE_PATH, f"{_HOME}?fub=9&delete=ok")
+
+    await logged_in.delete_function_plan(9)
+
+
 # --- run / stop ----------------------------------------------------------------------------------
 
 _PLAN = {
