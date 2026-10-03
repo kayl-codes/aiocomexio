@@ -37,5 +37,7 @@ published on PyPI and consumed by the Home Assistant integration
 
 - Pin actions to full commit SHAs with a `# vX.Y.Z` comment; every workflow has a least-privilege `permissions:`
   block; secrets go through `env:`, never inline in `run:`.
-- PR scans from forks must never see `SONAR_TOKEN` (they run via `workflow_run`); PyPI publishing uses Trusted
-  Publishing restricted to `v*` tags.
+- Fork-controlled code must never run with `SONAR_TOKEN`: the `pull_request` job only builds coverage and PR
+  metadata, and the trusted `workflow_run` scan (`sonar-pr.yml`) uses the token but treats that metadata as
+  untrusted input and never installs or executes code from the fork. PyPI publishing uses Trusted Publishing
+  restricted to `v*` tags.
