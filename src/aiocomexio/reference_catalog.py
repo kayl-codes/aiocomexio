@@ -139,11 +139,23 @@ class ReferenceCheck:
         )
 
     def fingerprint(self) -> tuple[Any, ...]:
-        """Hashable digest — the caller logs at INFO only when this changes, not every poll."""
+        """Hashable digest — the caller logs at INFO only when this changes, not every poll.
+
+        Holds every deviating entry, not just the status counts: one block turning missing while
+        another recovers keeps the counts equal but must still log the new deviation list.
+        """
         return (
             self.comexio_version,
             tuple(
-                (kind, catalog.live_available, tuple(sorted(catalog.counts().items())), catalog.new_keys)
+                (
+                    kind,
+                    catalog.live_available,
+                    tuple(
+                        (entry.key, entry.status, entry.live_id)
+                        for entry in sorted(catalog.deviations(), key=lambda entry: entry.key)
+                    ),
+                    catalog.new_keys,
+                )
                 for kind, catalog in sorted(self.catalogs.items())
             ),
         )

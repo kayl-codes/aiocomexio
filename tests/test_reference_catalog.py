@@ -217,6 +217,13 @@ def test_fingerprint_changes_only_with_the_result(raw: dict[str, Any]) -> None:
     assert reconcile(_references(raw, **{FLANKE_KEY: 1}), raw, "11.1.4").fingerprint() != first
 
 
+def test_fingerprint_tells_apart_deviations_with_equal_counts(raw: dict[str, Any]) -> None:
+    flanke_moved = reconcile(_references(raw, **{FLANKE_KEY: 1}), raw, "11.1.4")
+    or_moved = reconcile(_references(raw, **{"or/dd/d": 1}), raw, "11.1.4")
+    assert flanke_moved.catalogs[KIND_FUB_BASE].counts() == or_moved.catalogs[KIND_FUB_BASE].counts()
+    assert flanke_moved.fingerprint() != or_moved.fingerprint()
+
+
 @pytest.mark.parametrize(
     "data",
     [
