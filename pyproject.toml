@@ -48,6 +48,7 @@ dev = [
 include = [
     "/src",
     "/tests",
+    "/scripts",
     "/README.md",
     "/LICENSE",
 ]
