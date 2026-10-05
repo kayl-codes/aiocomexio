@@ -205,6 +205,39 @@ async def test_plan_settings_form_without_redirect_is_not_success(
         await logged_in.create_function_plan("Neu")
 
 
+async def test_plan_settings_form_error_status_carries_the_error_page(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_json("POST", UNIQUE_CHECK_PATH, {"result": True})
+    comexio.serve_text("POST", PLAN_SAVE_PATH, "Fatal error:\n  fub_name too long", status=500)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await logged_in.create_function_plan("Neu")
+    assert excinfo.value.status == 500
+    assert excinfo.value.body == "Fatal error: fub_name too long"
+
+
+async def test_plan_settings_form_error_page_that_breaks_off_still_reports_the_status(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    async def broken_error_page(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(status=500)
+        resp.content_length = 1000
+        await resp.prepare(request)
+        await resp.write(b"partial")
+        assert request.transport is not None
+        request.transport.close()
+        return resp
+
+    comexio.serve_json("POST", UNIQUE_CHECK_PATH, {"result": True})
+    comexio.serve("POST", PLAN_SAVE_PATH, broken_error_page)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await logged_in.create_function_plan("Neu")
+    assert excinfo.value.status == 500
+    assert excinfo.value.body is None
+
+
 async def test_plan_settings_form_connection_error(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     async def drop(request: web.Request) -> web.StreamResponse:
         assert request.transport is not None

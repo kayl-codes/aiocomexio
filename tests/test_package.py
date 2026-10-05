@@ -18,3 +18,9 @@ def test_version_matches_pyproject() -> None:
 
 def test_package_ships_py_typed_marker() -> None:
     assert files("aiocomexio").joinpath("py.typed").is_file()
+
+
+def test_package_ships_the_reference_catalogs() -> None:
+    reference = files("aiocomexio").joinpath("reference")
+    assert reference.joinpath("fub_base.json").is_file()
+    assert reference.joinpath("fub_types.json").is_file()

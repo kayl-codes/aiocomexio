@@ -20,11 +20,16 @@ class ComexioAuthenticationError(ComexioError):
 
 
 class ComexioResponseError(ComexioError):
-    """The server answered with an HTTP error status."""
+    """The server answered with an HTTP error status.
 
-    def __init__(self, message: str, *, status: int) -> None:
+    body is a whitespace-collapsed, length-capped excerpt of the error page (Comexio's error pages
+    name the failing check), also appended to the message; None when there was none to read.
+    """
+
+    def __init__(self, message: str, *, status: int, body: str | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.body = body
 
 
 class ComexioDataError(ComexioError):

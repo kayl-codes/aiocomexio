@@ -198,6 +198,64 @@ async def test_get_raw_config_http_error_raises_response_error(logged_in: Comexi
     with pytest.raises(ComexioResponseError) as excinfo:
         await logged_in.get_raw_config()
     assert excinfo.value.status == 502
+    assert excinfo.value.body == "Bad Gateway"
+    assert str(excinfo.value).endswith("failed: HTTP 502: Bad Gateway")
+
+
+async def test_response_error_carries_a_capped_one_line_body_excerpt(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    page = "<h1>Error</h1>\n\n  Check failed:   element 5/113\n" + "x" * 1000
+    comexio.serve_text("GET", FUNCTION_MODULE_PATH, page, status=500)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await logged_in.get_raw_config()
+    body = excinfo.value.body
+    assert body is not None
+    assert body.startswith("<h1>Error</h1> Check failed: element 5/113 xxx")
+    assert len(body) == 500 + len("...")
+    assert body.endswith("...")
+
+
+async def test_response_error_body_of_exactly_the_cap_is_not_cut(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("GET", FUNCTION_MODULE_PATH, "y" * 500, status=500)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await logged_in.get_raw_config()
+    assert excinfo.value.body == "y" * 500
+
+
+async def test_error_page_that_breaks_off_still_reports_the_status(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    async def broken_error_page(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(status=500)
+        resp.content_length = 1000
+        await resp.prepare(request)
+        await resp.write(b"partial")
+        assert request.transport is not None
+        request.transport.close()
+        return resp
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, broken_error_page)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await logged_in.get_raw_config()
+    assert excinfo.value.status == 500
+    assert excinfo.value.body is None
+
+
+async def test_response_error_without_body_keeps_the_plain_message(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("GET", FUNCTION_MODULE_PATH, " \n ", status=500)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await logged_in.get_raw_config()
+    assert excinfo.value.body is None
+    assert str(excinfo.value).endswith("failed: HTTP 500")
 
 
 async def test_get_raw_config_on_expired_session_raises_authentication_error(

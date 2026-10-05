@@ -11,8 +11,10 @@ provide the communication layer of the
 > admin login, read access, value writes, the Web-IO lifecycle, marker / KNX object management
 > and function plan editing — plans, elements, wires, run / stop (`ComexioClient`), admin page
 > scraping (`aiocomexio.scrape`), config parsing (`aiocomexio.config`), KNX DPT tables
-> (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`) and function plan rendering
-> and diffing (`aiocomexio.function_plan`). The API may still change.
+> (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`), function plan rendering
+> and diffing (`aiocomexio.function_plan`) and the block-type reference catalog that resolves
+> Comexio catalog ids per server by stable key (`aiocomexio.reference_catalog`). The API may
+> still change.
 
 ## Installation
 

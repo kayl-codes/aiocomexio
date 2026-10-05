@@ -147,6 +147,8 @@ _CONSTANT_REF_ID = "1"
 _COMMENT_WIDTHS = range(1, 6)
 _CONNECTION_VALUE_TYPES = frozenset({"binary", "analog"})
 _ID_KEY = "id"
+# Cap of the error-page excerpt ComexioResponseError carries.
+_ERROR_BODY_MAX_CHARS = 500
 # Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.
 _EMPTY_CONNECTION_VALUES: tuple[Any, ...] = (None, "", [], {})
 
@@ -1296,7 +1298,7 @@ class ComexioClient:
         try:
             async with self._session.request(method, f"{self._base_url}{path}", **kwargs) as resp:
                 if check_status and resp.status != HTTPStatus.OK:
-                    raise ComexioResponseError(f"{what} failed: HTTP {resp.status}", status=resp.status)
+                    raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
                 try:
                     return await resp.text()
                 except UnicodeDecodeError as err:
@@ -1340,13 +1342,13 @@ class ComexioClient:
                         )
                     return location
                 status = resp.status
-                body = await resp.text(errors="replace")
+                body = await (resp.text(errors="replace") if status == HTTPStatus.OK else _error_page_text(resp, what))
         except (aiohttp.ClientError, TimeoutError) as err:
             raise ComexioConnectionError(f"{what} failed: {err!r}") from err
         if _LOGIN_FORM_SUBMIT_MARKER in body:
             raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
         if status != HTTPStatus.OK:
-            raise ComexioResponseError(f"{what} failed: HTTP {status}", status=status)
+            raise _status_error(what, status, _collapse_error_body(body))
         raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(body)}")
 
     async def _request_json(self, method: str, path: str, *, what: str, **kwargs: Any) -> Any:
@@ -1638,6 +1640,29 @@ def _bulk_plan_entry(
     except ComexioDataError as err:
         _LOGGER.warning("Skipping bulk function plan %s: %s", fub_id, err)
         return None
+
+
+async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
+    """Body of an error-status answer; "" if it breaks off mid-read — the status must still be reported."""
+    try:
+        return await resp.text(errors="replace")
+    except (aiohttp.ClientError, TimeoutError) as err:
+        _LOGGER.debug("%s: body of the HTTP %s answer could not be read: %r", what, resp.status, err)
+        return ""
+
+
+def _collapse_error_body(text: str) -> str | None:
+    """Error page text on one line, capped at _ERROR_BODY_MAX_CHARS; None if blank."""
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return None
+    return collapsed if len(collapsed) <= _ERROR_BODY_MAX_CHARS else f"{collapsed[:_ERROR_BODY_MAX_CHARS]}..."
+
+
+def _status_error(what: str, status: int, body: str | None) -> ComexioResponseError:
+    """ComexioResponseError for an HTTP error status, the body excerpt appended to the message."""
+    message = f"{what} failed: HTTP {status}"
+    return ComexioResponseError(f"{message}: {body}" if body else message, status=status, body=body)
 
 
 def _excerpt(value: Any, limit: int = 200) -> str:
