@@ -25,6 +25,8 @@ def main(raw_path: Path, comexio_version: str) -> None:
         raise SystemExit(f"aiocomexio is not installed editable from {ROOT} (REFERENCE_DIR is {REFERENCE_DIR})")
     # Developer tool: raw_path is the maintainer's own CLI argument, read-only, no untrusted input.
     raw_config = json.loads(raw_path.read_text(encoding="utf-8"))  # NOSONAR
+    if not isinstance(raw_config, dict):
+        raise SystemExit(f"{raw_path} must hold a JSON object (RawConfig.variables), got {type(raw_config).__name__}")
     # Build every catalog before writing any, so a refused one leaves the files untouched.
     contents = {kind: build_reference(kind, raw_config, comexio_version) for kind in LIVE_EXTRACTORS}
     for kind, content in contents.items():
