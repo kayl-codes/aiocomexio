@@ -77,9 +77,11 @@ def test_live_entries_without_name_or_integer_id_are_skipped(raw: dict[str, Any]
     group = raw["FubModules"]["5"]
     group["900"] = {**copy.deepcopy(_flanke(raw)), "Id": 900, "Name": ""}
     group["901"] = {**copy.deepcopy(group["5"]), "Id": "x", "Name": "xor"}
+    group["902"] = {**copy.deepcopy(group["5"]), "Id": 1.5, "Name": "nand"}
+    group["903"] = {**copy.deepcopy(group["5"]), "Id": True, "Name": "nor"}
     assert extract_live_fub_base(raw) == expected
     check = reconcile(_references(raw), raw, "11.1.4")
-    assert check.fub_base_ids == frozenset({5, 6, 45, 65, FLANKE_ID, 900})  # 901 has no integer id
+    assert check.fub_base_ids == frozenset({5, 6, 45, 65, FLANKE_ID, 900})  # 901-903 have no integer id
 
 
 def test_key_family() -> None:
@@ -234,6 +236,7 @@ def test_fingerprint_tells_apart_deviations_with_equal_counts(raw: dict[str, Any
         {"format": 1, "kind": KIND_FUB_BASE, "entries": {"a/d/d": 1.5}},
         {"format": 1, "kind": KIND_FUB_BASE, "entries": {"a/d/d": True}},
         {"format": 1, "kind": KIND_FUB_BASE, "entries": {"a/d/d": "12"}},
+        {"format": 1, "kind": KIND_FUB_BASE, "comexio_version": ["11.1.4"], "entries": {"a/d/d": 1}},
         [],
     ],
 )

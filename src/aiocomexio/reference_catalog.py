@@ -188,6 +188,9 @@ def _catalog_summary(catalog: CatalogCheck) -> str:
 
 
 def _as_int(value: Any) -> int | None:
+    """Integer or integer string (PHP sends both) — never a bool or fractional float coerced to a wrong id."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        return None
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -401,7 +404,9 @@ def parse_reference(kind: str, data: Any) -> ReferenceCatalog:
     # build_reference writes JSON integers; anything else (1.5, true, "12") is a broken file, not an id to coerce.
     if bad := [str(key) for key, ref_id in entries.items() if type(ref_id) is not int]:
         raise ValueError(f"reference/{kind}.json: non-integer ids for {bad[:5]}")
-    return ReferenceCatalog(kind, data.get("comexio_version"), {str(key): ref_id for key, ref_id in entries.items()})
+    if not isinstance(version := data.get("comexio_version"), str | None):
+        raise ValueError(f"reference/{kind}.json: comexio_version must be a string or null")
+    return ReferenceCatalog(kind, version, {str(key): ref_id for key, ref_id in entries.items()})
 
 
 def load_reference_catalogs(directory: Path = REFERENCE_DIR) -> dict[str, ReferenceCatalog]:
