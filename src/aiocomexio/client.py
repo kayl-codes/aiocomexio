@@ -1652,11 +1652,11 @@ async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
 
 
 def _collapse_error_body(text: str) -> str | None:
-    """Error page text on one line, capped at _ERROR_BODY_MAX_CHARS; None if blank."""
+    """Error page text on one line, at most _ERROR_BODY_MAX_CHARS long including the "..." mark; None if blank."""
     collapsed = " ".join(text.split())
     if not collapsed:
         return None
-    return collapsed if len(collapsed) <= _ERROR_BODY_MAX_CHARS else f"{collapsed[:_ERROR_BODY_MAX_CHARS]}..."
+    return collapsed if len(collapsed) <= _ERROR_BODY_MAX_CHARS else f"{collapsed[: _ERROR_BODY_MAX_CHARS - 3]}..."
 
 
 def _status_error(what: str, status: int, body: str | None) -> ComexioResponseError:

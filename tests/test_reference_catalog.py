@@ -289,7 +289,8 @@ def test_unknown_plan_refs_are_found() -> None:
         },
         "20": {"elements": []},
         "21": {"elements": [{"reference": {"type": "5", "ref_id": "113"}}]},
-        "22": {"elements": {"1": None, "2": [], "3": {"reference": "5"}}},
+        "22": {"elements": {"1": None, "2": [], "3": {"reference": "5"}, "4": {"reference": {"type": "5"}}}},
+        "25": {"elements": {"8": {"reference": {"type": "5", "ref_id": None}}}},  # no ref_id: malformed
         "23": None,
         "24": {"elements": {"7": {"reference": {"type": 5, "ref_id": 114}}}},  # numbers, not strings
     }

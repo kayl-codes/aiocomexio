@@ -371,7 +371,8 @@ def _fub_base_ref_id(element: Any) -> str | None:
     reference = element.get("reference") if isinstance(element, Mapping) else None
     if not isinstance(reference, Mapping) or str(reference.get("type")) != "5":
         return None
-    return str(reference.get("ref_id"))
+    ref_id = reference.get("ref_id")
+    return None if ref_id is None else str(ref_id)
 
 
 # ---------------------------------------------------------------------------

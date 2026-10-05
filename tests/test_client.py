@@ -213,7 +213,7 @@ async def test_response_error_carries_a_capped_one_line_body_excerpt(
     body = excinfo.value.body
     assert body is not None
     assert body.startswith("<h1>Error</h1> Check failed: element 5/113 xxx")
-    assert len(body) == 500 + len("...")
+    assert len(body) == 500
     assert body.endswith("...")
 
 
@@ -225,6 +225,16 @@ async def test_response_error_body_of_exactly_the_cap_is_not_cut(
     with pytest.raises(ComexioResponseError) as excinfo:
         await logged_in.get_raw_config()
     assert excinfo.value.body == "y" * 500
+
+
+async def test_response_error_body_one_over_the_cap_is_cut_to_the_cap(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("GET", FUNCTION_MODULE_PATH, "y" * 501, status=500)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await logged_in.get_raw_config()
+    assert excinfo.value.body == "y" * 497 + "..."
 
 
 async def test_error_page_that_breaks_off_still_reports_the_status(
