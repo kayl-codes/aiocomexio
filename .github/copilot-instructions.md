@@ -22,6 +22,10 @@ published on PyPI and consumed by the Home Assistant integration
 - **Injected session:** the caller passes an `aiohttp.ClientSession`; the library never creates its own session.
 - **Errors:** failures are raised as typed exceptions from `aiocomexio.exceptions`, not returned as error codes,
   `None` sentinels or empty results that hide the failure.
+- **Strict types for parsed values:** values from JSON files or Comexio/PHP responses are type-checked strictly
+  before use. Never coerce silently with `int()`/`float()`: `int(True)` is `1` and `int(1.5)` is `1`, so a bool
+  or fractional float turns into a wrong id. Accept only the types the source really sends (e.g. `int` or an
+  integer string), reject `bool` explicitly (it is a subclass of `int`), and treat anything else as malformed.
 - **Public API:** fully typed; flag breaking changes to public names or signatures that are not called out in the PR.
 - **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776); no duplicated string literals — extract
   constants (S1192).
@@ -41,3 +45,5 @@ published on PyPI and consumed by the Home Assistant integration
   metadata, and the trusted `workflow_run` scan (`sonar-pr.yml`) uses the token but treats that metadata as
   untrusted input and never installs or executes code from the fork. PyPI publishing uses Trusted Publishing
   restricted to `v*` tags.
+- Checks on the published artifact live in `scripts/check_dist.py` and run in both `ci.yml` and `pypi.yaml` (on the
+  exact `dist/` that gets uploaded) — never only in `ci.yml`, since a release is built anew from its tag.
