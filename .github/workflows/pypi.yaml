@@ -26,10 +26,17 @@ jobs:
           python-version: "3.13"
 
       - name: Install build tooling
-        run: python -m pip install "build==1.5.1"
+        run: python -m pip install "build==1.6.1"
 
       - name: Build sdist and wheel
         run: python -m build
+
+      - name: Check sdist and wheel
+        # Same check as the package job in ci.yml, on exactly the files that get uploaded, plus the
+        # tag/version match. The tag goes through env:, never inline into the script.
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/check_dist.py dist --version "${RELEASE_TAG#v}"
 
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
