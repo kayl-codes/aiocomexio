@@ -89,8 +89,10 @@ def _smoke_test(wheel: Path) -> None:
         venv.create(env_dir, with_pip=True)
         python = env_dir / ("Scripts" if os.name == "nt" else "bin") / "python"
         pip = [str(python), "-m", "pip", "--disable-pip-version-check", "--quiet"]
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit -- argument list, no shell, own build
         subprocess.run([*pip, "install", "--only-binary", ":all:", str(wheel.resolve())], check=True)
         # cwd outside the checkout, so `import aiocomexio` cannot resolve to the source tree.
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit -- argument list, no shell, own build
         subprocess.run([str(python), "-c", SMOKE_TEST, *_module_names()], cwd=tmp, check=True)
 
 
