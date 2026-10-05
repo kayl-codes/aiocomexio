@@ -386,12 +386,10 @@ def parse_reference(kind: str, data: Any) -> ReferenceCatalog:
         raise ValueError(f"reference/{kind}.json: wrong format/kind header")
     if not isinstance(entries := data.get("entries"), dict) or not entries:
         raise ValueError(f"reference/{kind}.json: no entries")
-    parsed = {str(key): _as_int(ref_id) for key, ref_id in entries.items()}
-    if bad := [key for key, ref_id in parsed.items() if ref_id is None]:
+    # build_reference writes JSON integers; anything else (1.5, true, "12") is a broken file, not an id to coerce.
+    if bad := [str(key) for key, ref_id in entries.items() if type(ref_id) is not int]:
         raise ValueError(f"reference/{kind}.json: non-integer ids for {bad[:5]}")
-    return ReferenceCatalog(
-        kind, data.get("comexio_version"), {key: ref_id for key, ref_id in parsed.items() if ref_id is not None}
-    )
+    return ReferenceCatalog(kind, data.get("comexio_version"), {str(key): ref_id for key, ref_id in entries.items()})
 
 
 def load_reference_catalogs(directory: Path = REFERENCE_DIR) -> dict[str, ReferenceCatalog]:

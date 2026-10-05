@@ -224,6 +224,9 @@ def test_fingerprint_changes_only_with_the_result(raw: dict[str, Any]) -> None:
         {"format": 1, "kind": KIND_FUB_TYPES, "entries": {"a/d/d": 1}},
         {"format": 1, "kind": KIND_FUB_BASE, "entries": {}},
         {"format": 1, "kind": KIND_FUB_BASE, "entries": {"a/d/d": "x"}},
+        {"format": 1, "kind": KIND_FUB_BASE, "entries": {"a/d/d": 1.5}},
+        {"format": 1, "kind": KIND_FUB_BASE, "entries": {"a/d/d": True}},
+        {"format": 1, "kind": KIND_FUB_BASE, "entries": {"a/d/d": "12"}},
         [],
     ],
 )
