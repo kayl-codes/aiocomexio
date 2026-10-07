@@ -64,30 +64,35 @@ def _render_block(parts: list[str], geo: dict[str, Any], label: str, orphan: boo
     w = geo["w"] - 2 * _PIN_LEN
     h = geo["h"] - 2 * _BODY_PAD
     body_class = "node-orphan" if orphan else "node"
-    parts.append(
-        f'<rect class="{body_class}" x="{x:.1f}" y="{y:.1f}" width="{w:.0f}" height="{h:.0f}" '
-        f'rx="{_RADIUS:.1f}" stroke-width="1"><title>{escape(label)}</title></rect>'
-    )
-    parts.append(f'<path class="block-head" d="{_block_head_path(x, y, w)}"/>')
-    parts.append(
-        f'<text class="block-head-label" x="{x + w / 2:.1f}" y="{geo["y"] + _ROW_H / 2 + 0.36 * _HEAD_FONT_SIZE:.1f}" '
-        f'text-anchor="middle" font-size="{_HEAD_FONT_SIZE:.1f}" font-weight="bold">'
-        f"{escape(_truncate(label, _fit_chars(w, _HEAD_FONT_SIZE, 0.48)))}</text>"
+    parts.extend(
+        [
+            f'<rect class="{body_class}" x="{x:.1f}" y="{y:.1f}" width="{w:.0f}" height="{h:.0f}" '
+            f'rx="{_RADIUS:.1f}" stroke-width="1"><title>{escape(label)}</title></rect>',
+            f'<path class="block-head" d="{_block_head_path(x, y, w)}"/>',
+            f'<text class="block-head-label" x="{x + w / 2:.1f}" '
+            f'y="{geo["y"] + _ROW_H / 2 + 0.36 * _HEAD_FONT_SIZE:.1f}" '
+            f'text-anchor="middle" font-size="{_HEAD_FONT_SIZE:.1f}" font-weight="bold">'
+            f"{escape(_truncate(label, _fit_chars(w, _HEAD_FONT_SIZE, 0.48)))}</text>",
+        ]
     )
     for row, name in enumerate(geo["in"]):
         row_y = _row_y(geo, "in", row)
-        parts.append(
-            f'<text class="port-label" x="{x + 3:.1f}" y="{row_y + 0.36 * _PORT_FONT_SIZE:.1f}" '
-            f'font-size="{_PORT_FONT_SIZE:.1f}">{escape(name)}</text>'
+        parts.extend(
+            [
+                f'<text class="port-label" x="{x + 3:.1f}" y="{row_y + 0.36 * _PORT_FONT_SIZE:.1f}" '
+                f'font-size="{_PORT_FONT_SIZE:.1f}">{escape(name)}</text>',
+                _pin(geo["x"], row_y, _row_analog(geo, "in", row)),
+            ]
         )
-        parts.append(_pin(geo["x"], row_y, _row_analog(geo, "in", row)))
     for row, name in enumerate(geo["out"]):
         row_y = _row_y(geo, "out", row)
-        parts.append(
-            f'<text class="port-label" x="{x + w - 3:.1f}" y="{row_y + 0.36 * _PORT_FONT_SIZE:.1f}" '
-            f'text-anchor="end" font-size="{_PORT_FONT_SIZE:.1f}">{escape(name)}</text>'
+        parts.extend(
+            [
+                f'<text class="port-label" x="{x + w - 3:.1f}" y="{row_y + 0.36 * _PORT_FONT_SIZE:.1f}" '
+                f'text-anchor="end" font-size="{_PORT_FONT_SIZE:.1f}">{escape(name)}</text>',
+                _pin(geo["x"] + geo["w"] - _PIN_LEN, row_y, _row_analog(geo, "out", row)),
+            ]
         )
-        parts.append(_pin(geo["x"] + geo["w"] - _PIN_LEN, row_y, _row_analog(geo, "out", row)))
 
 
 def _render_comment(parts: list[str], geo: dict[str, Any], text: str) -> None:
