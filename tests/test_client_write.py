@@ -552,6 +552,64 @@ async def test_rename_marker(logged_in: ComexioClient, comexio: FakeComexio) -> 
         "2",
         "0",
     )
+    # Without explicit values the marker gets Comexio's defaults: default value 0, not stored.
+    assert (save.form["default"], save.form["default_default"], save.form["store_memory"]) == ("0", "0", "0")
+
+
+@pytest.mark.parametrize(
+    ("binary", "default", "store_memory", "expected"),
+    [
+        (True, 1, True, ("1", "1", "1", "1")),
+        (False, 20, True, ("2", "20", "20", "1")),
+        (False, 20.0, False, ("2", "20", "20", "0")),
+        (False, 2.5, True, ("2", "2.5", "2.5", "1")),
+        (False, -3, False, ("2", "-3", "-3", "0")),
+        (False, 1e-05, False, ("2", "0.00001", "0.00001", "0")),
+        (False, -0.0, False, ("2", "0", "0", "0")),
+    ],
+)
+async def test_rename_marker_keeps_the_given_default_and_store_flag(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    binary: bool,
+    default: float,
+    store_memory: bool,
+    expected: tuple[str, ...],
+) -> None:
+    """The save takes the whole form: a marker in use keeps its values only if they are sent along."""
+    comexio.serve_json("POST", UNIQUE_CHECK_PATH, {"result": True})
+    comexio.serve_json("POST", MARKER_SAVE_PATH, {"saved": 271})
+
+    await logged_in.rename_marker(271, "Licht", binary=binary, default=default, store_memory=store_memory)
+
+    (save,) = comexio.received_at("POST", MARKER_SAVE_PATH)
+    form = save.form
+    assert (form["type"], form["default"], form["default_default"], form["store_memory"]) == expected
+    # The client always sends value_<id>=0; Comexio ignores it on a save (live-verified 2026-10-10).
+    assert form["value_271"] == "0"
+
+
+@pytest.mark.parametrize(
+    ("default", "store_memory", "error"),
+    [
+        (True, False, TypeError),
+        (None, False, TypeError),
+        ("20", False, TypeError),
+        (float("nan"), False, ValueError),
+        (float("inf"), False, ValueError),
+        (0, 1, TypeError),
+        (0, "0", TypeError),
+        (0, None, TypeError),
+    ],
+)
+async def test_rename_marker_rejects_values_it_cannot_send_faithfully(
+    logged_in: ComexioClient, comexio: FakeComexio, default: Any, store_memory: Any, error: type[Exception]
+) -> None:
+    """A value that would silently overwrite the marker's setting is refused before anything is sent."""
+    with pytest.raises(error):
+        await logged_in.rename_marker(271, "Licht", binary=True, default=default, store_memory=store_memory)
+    assert comexio.received_at("POST", UNIQUE_CHECK_PATH) == []
+    assert comexio.received_at("POST", MARKER_SAVE_PATH) == []
 
 
 async def test_rename_marker_name_taken_is_rejected_before_saving(

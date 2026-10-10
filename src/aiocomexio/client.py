@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from http import HTTPStatus
 from typing import Any, TypeIs
 from urllib.parse import parse_qsl, urlsplit
@@ -832,26 +833,44 @@ class ComexioClient:
         _LOGGER.debug("Created marker M%s (binary=%s)", marker_id, binary)
         return marker_id
 
-    async def rename_marker(self, marker_id: int, name: str, *, binary: bool) -> None:
+    async def rename_marker(
+        self,
+        marker_id: int,
+        name: str,
+        *,
+        binary: bool,
+        default: float = 0,
+        store_memory: bool = False,
+    ) -> None:
         """Set a marker's title (after Comexio's own uniqueness check).
 
-        Comexio's marker save takes the whole form, so this also resets the marker's default
-        value and "store in memory" flag to 0 — only use it on a marker whose state is known,
-        e.g. one just made with create_marker. binary must match the marker's real type.
-        Raises ComexioRequestRejectedError if the name is taken or the save is not confirmed.
+        Comexio's marker save takes the whole form, so it also sets the marker's default value
+        and "store in memory" flag. Leaving them out does not keep them: verified live 2026-10-10,
+        an omitted default became 0 (the flag was kept). To rename a marker in use, pass its
+        current values — the raw config's FubModules["2"] entry carries them as "DefaultValue"
+        and "Store". The defaults (0, off) suit a marker just made with create_marker. binary
+        must match the marker's real type. The marker's live value is not touched (the form's
+        value_<id> field did not change it, verified live 2026-10-10).
+        Raises TypeError/ValueError, before anything is sent, if default is not a finite int or
+        float or store_memory is not a bool — a value sent anyway would silently overwrite the
+        marker's setting. Raises ComexioRequestRejectedError if the name is taken or the save is
+        not confirmed.
         """
+        if not isinstance(store_memory, bool):
+            raise TypeError(f"store_memory must be a bool, not {type(store_memory).__name__}")
+        default_value = _form_number(default)
         what = f"Renaming marker M{marker_id}"
         await self._check_name_unique("memory", marker_id, name, what=what)
         marker_type = _marker_type(binary)
         payload = {
             "id": str(marker_id),
-            "default_default": "0",
+            "default_default": default_value,
             "default_type": marker_type,
             "name": name,
             "type": marker_type,
             f"value_{marker_id}": "0",
-            "default": "0",
-            "store_memory": "0",
+            "default": default_value,
+            "store_memory": "1" if store_memory else "0",
         }
         result = _expect_object(
             await self._request_json(
@@ -1548,6 +1567,22 @@ def _positive_id(value: Any) -> int | None:
 
 def _marker_type(binary: bool) -> str:
     return _MARKER_TYPE_BINARY if binary else _MARKER_TYPE_ANALOG
+
+
+def _form_number(value: float) -> str:
+    """A finite number the way Comexio's forms write it: no ".0", no exponent ("20", "2.5", "0.00001").
+
+    Raises TypeError for a bool or a non-number and ValueError for NaN/infinity.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"expected an int or float, not {type(value).__name__}")
+    if isinstance(value, int):
+        return str(value)
+    if not math.isfinite(value):
+        raise ValueError(f"expected a finite number, not {value}")
+    if value.is_integer():
+        return str(int(value))
+    return format(Decimal(repr(value)), "f")
 
 
 def _js_timestamp() -> str:
