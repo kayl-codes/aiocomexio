@@ -584,7 +584,8 @@ async def test_rename_marker_keeps_the_given_default_and_store_flag(
 
     (save,) = comexio.received_at("POST", MARKER_SAVE_PATH)
     form = save.form
-    assert (form["type"], form["default"], form["default_default"], form["store_memory"]) == expected
+    sent = (form["type"], form["default"], form["default_default"], form["store_memory"])
+    assert sent == expected
     # The client always sends value_<id>=0; Comexio ignores it on a save (live-verified 2026-10-10).
     assert form["value_271"] == "0"
 
