@@ -848,11 +848,13 @@ class ComexioClient:
         and "store in memory" flag. Leaving them out does not keep them: verified live 2026-10-10,
         an omitted default became 0 (the flag was kept). To rename a marker in use, pass its
         current values — the raw config's FubModules["2"] entry carries them as "DefaultValue"
-        and "Store". Comexio has no conditional save, so a change made to either setting between
-        that read and this call is overwritten — read them right before renaming. The defaults
-        (0, off) suit a marker just made with create_marker. binary
-        must match the marker's real type. The marker's live value is not touched (the form's
-        value_<id> field did not change it, verified live 2026-10-10).
+        and "Store" ("Store" is a 0/1 number there: convert it to a bool yourself, a raw number
+        is refused so an unexpected value is never guessed into on/off). Comexio has no
+        conditional save, so a change made to either setting between that read and this call is
+        overwritten — read them right before renaming. The defaults (0, off) suit a marker just
+        made with create_marker. binary must match the marker's real type. The marker's live
+        value is not touched (the form's value_<id> field did not change it, verified live
+        2026-10-10).
         Raises TypeError/ValueError, before anything is sent, if default is not a finite int or
         float or store_memory is not a bool — a value sent anyway would silently overwrite the
         marker's setting. Raises ComexioRequestRejectedError if the name is taken or the save is
