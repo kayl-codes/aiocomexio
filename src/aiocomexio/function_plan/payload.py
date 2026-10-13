@@ -17,6 +17,16 @@ def plan_payload_has_elements(data: Any) -> bool:
     return isinstance(data, dict) and isinstance(data.get("elements"), (dict, list))
 
 
+def plan_payload_has_collections(data: Any) -> bool:
+    """True if a plan payload carries real elements AND connections collections (an object or an array).
+
+    An empty collection passes ("connections": [] is a plan without wiring); an omitted or null one
+    does not, since normalize_plan_payload would turn it into {} and the plan could be backed up
+    without its connections.
+    """
+    return isinstance(data, dict) and all(isinstance(data.get(key), (dict, list)) for key in _PLAN_COLLECTIONS)
+
+
 def normalize_plan_payload(data: dict[str, Any]) -> dict[str, Any]:
     """Copy of data with elements and connections as id-keyed dicts ({} if missing or null).
 

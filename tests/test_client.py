@@ -605,6 +605,29 @@ async def test_load_all_function_plans_filters_and_skips_malformed(
     assert sorted(strict) == [1, 2]
 
 
+async def test_load_all_function_plans_strict_requires_the_connections_collection(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_json(
+        "GET",
+        LOAD_ALL_ELEMENTS_PATH,
+        {
+            "1": {"elements": {"7": _ELEMENT}},
+            "2": {"elements": [], "scenes": [], "connections": []},
+            "3": {"elements": {}, "connections": None},
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        strict = await logged_in.load_all_function_plans(strict=True)
+    lenient = await logged_in.load_all_function_plans()
+
+    assert strict == {2: {"elements": {}, "scenes": [], "connections": {}}}
+    assert "plan 1" in caplog.text
+    assert "plan 3" in caplog.text
+    assert sorted(lenient) == [1, 2, 3]
+
+
 async def test_load_all_function_plans_with_empty_filter_skips_the_request(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:

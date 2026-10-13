@@ -33,7 +33,7 @@ from .exceptions import (
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
-from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_has_elements
+from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_has_collections
 from .scrape import (
     parse_comexio_version,
     parse_io_input_types,
@@ -431,8 +431,8 @@ class ComexioClient:
 
         Comexio serializes requests server-side, so one bulk call beats N per-plan calls. A
         malformed entry is skipped with a warning; strict=True also skips entries without a real
-        elements collection. Unlike load_function_plan(strict=True) it does not check connections,
-        so a result here is no source for run_function_plan. A requested plan the server leaves
+        elements or connections collection (an empty one is real), like load_function_plan(strict=True)
+        does. A requested plan the server leaves
         out is absent from the result.
         """
         wanted = None if fub_ids is None else set(fub_ids)
@@ -1671,8 +1671,8 @@ def _bulk_plan_entry(
     if not isinstance(data, dict):
         _LOGGER.warning("Skipping bulk function plan %s: payload is not an object", fub_id)
         return None
-    if strict and not plan_payload_has_elements(data):
-        _LOGGER.warning("Skipping bulk function plan %s: payload has no elements collection", fub_id)
+    if strict and not plan_payload_has_collections(data):
+        _LOGGER.warning("Skipping bulk function plan %s: payload has no elements or no connections collection", fub_id)
         return None
     try:
         return fub_id, normalize_plan_payload(data)

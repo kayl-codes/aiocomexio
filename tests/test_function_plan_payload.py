@@ -5,7 +5,12 @@ from typing import Any
 import pytest
 
 from aiocomexio import ComexioDataError
-from aiocomexio.function_plan import build_run_payload, normalize_plan_payload, plan_payload_has_elements
+from aiocomexio.function_plan import (
+    build_run_payload,
+    normalize_plan_payload,
+    plan_payload_has_collections,
+    plan_payload_has_elements,
+)
 
 
 @pytest.mark.parametrize(
@@ -125,3 +130,19 @@ def test_build_run_payload_never_turns_a_broken_plan_into_an_empty_one(plan: dic
 def test_build_run_payload_refuses_a_non_mapping(plan: Any) -> None:
     with pytest.raises(TypeError, match="must be a mapping"):
         build_run_payload(plan)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"elements": [], "scenes": [], "connections": []}, True),
+        ({"elements": {}, "connections": {}}, True),
+        ({"elements": {}}, False),
+        ({"elements": {}, "connections": None}, False),
+        ({"connections": []}, False),
+        (["elements", "connections"], False),
+        (None, False),
+    ],
+)
+def test_plan_payload_has_collections(payload: Any, expected: bool) -> None:
+    assert plan_payload_has_collections(payload) is expected
