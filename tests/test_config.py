@@ -97,6 +97,19 @@ def test_io_classification(basic_result: dict[str, Any]) -> None:
     assert (ios["QI1"]["is_input"], ios["QI1"]["offline"]) == (True, True)
 
 
+def test_io_entry_carries_its_extension_id(basic_result: dict[str, Any]) -> None:
+    """get_io_live_states needs the extension group key as ExtId; the IO id alone is not enough."""
+    ios = {io["identifier"]: io for io in basic_result["io_all"]}
+
+    assert {ident: (io["id"], io["ext_id"]) for ident, io in ios.items()} == {
+        "I1": ("11", "1"),
+        "Q1": ("12", "1"),
+        "AI1": ("13", "1"),
+        "Q2": ("14", "1"),
+        "QI1": ("21", "2"),
+    }
+
+
 def test_io_classification_without_type_tables_falls_back_to_identifier() -> None:
     conf = {
         "FubModules": {

@@ -397,6 +397,82 @@ async def test_get_live_states_on_expired_session_raises_authentication_error(
         await logged_in.get_live_states(1)
 
 
+async def test_get_io_live_states_sends_prefixed_io_keys_in_own_request(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """Answers as observed live; IO 1 and marker 1 share a number, so only "io_1" may count."""
+    comexio.serve_json(
+        "POST",
+        DASHBOARD_REFRESH_PATH,
+        {"result": {"io_1": "74", "1": "5", "io_12": "0", "io_13": "9.96078", "io_21": " 21,5 "}},
+    )
+
+    states = await logged_in.get_io_live_states([(1, "1"), (1, "12"), (1, "13"), (2, "21"), (1, "12")])
+
+    assert states == {"1": "74", "12": "0", "13": "9.96078", "21": "21,5"}
+    (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
+    assert json.loads(request.form["json"]) == {
+        "io_1": {"action": "get", "ExtId": 1, "IOId": "1"},
+        "io_12": {"action": "get", "ExtId": 1, "IOId": "12"},
+        "io_13": {"action": "get", "ExtId": 1, "IOId": "13"},
+        "io_21": {"action": "get", "ExtId": 2, "IOId": "21"},
+    }
+
+
+@pytest.mark.parametrize(
+    "answer", [None, "", "  ", "0:not_found", "12:not_found", "Warning: x", "nan", "inf", True, {"value": 1}, []]
+)
+async def test_get_io_live_states_leaves_out_non_numeric_answers(
+    logged_in: ComexioClient, comexio: FakeComexio, answer: Any
+) -> None:
+    """No number is no value — never 0: a caller must keep its last known value."""
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_1": answer, "io_2": 1.5, "io_4": 0}})
+
+    assert await logged_in.get_io_live_states([(1, "1"), (1, "2"), (1, "3"), (1, "4")]) == {"2": "1.5", "4": "0"}
+
+
+async def test_get_io_live_states_without_ios_sends_nothing(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    assert await logged_in.get_io_live_states([]) == {}
+    assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
+
+
+@pytest.mark.parametrize(
+    ("ios", "match"), [([("1", "1")], "integers"), ([(True, "1")], "integers"), ([(1, 1)], "strings")]
+)
+async def test_get_io_live_states_rejects_wrong_id_types(
+    logged_in: ComexioClient, comexio: FakeComexio, ios: list[Any], match: str
+) -> None:
+    with pytest.raises(TypeError, match=match):
+        await logged_in.get_io_live_states(ios)
+    assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
+
+
+@pytest.mark.parametrize("payload", [{"result": []}, {"error": "x"}, ["result"]])
+async def test_get_io_live_states_without_result_object_raises(
+    logged_in: ComexioClient, comexio: FakeComexio, payload: Any
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, payload)
+
+    with pytest.raises(ComexioDataError, match="no result object"):
+        await logged_in.get_io_live_states([(1, "1")])
+
+
+async def test_get_io_live_states_non_json_raises(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("POST", DASHBOARD_REFRESH_PATH, "<html>error</html>")
+
+    with pytest.raises(ComexioDataError, match="not JSON"):
+        await logged_in.get_io_live_states([(1, "1")])
+
+
+async def test_get_io_live_states_on_expired_session_raises_authentication_error(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("POST", DASHBOARD_REFRESH_PATH, "<html><form>Anmeldung</form></html>")
+
+    with pytest.raises(ComexioAuthenticationError):
+        await logged_in.get_io_live_states([(1, "1")])
+
+
 @pytest.mark.parametrize(
     ("connection", "expected"),
     [

@@ -105,6 +105,11 @@ _PKCS1_PADDING_BYTES = 11
 # objects and markers share one plain numeric id space, so the prefix is what splits the
 # response back apart.
 _KNX_LIVE_KEY_PREFIX = "knxIo_11_"
+# Same for physical IOs: an IO id is globally unique across extensions, but shares the numeric id
+# space with markers, so IO keys get their own prefix. They go out in a request of their own.
+_IO_LIVE_KEY_PREFIX = "io_"
+_ACTION_KEY = "action"
+_ACTION_GET = "get"
 _MESSAGES_KEY = "messages"
 _RESULT_KEY = "result"
 
@@ -336,9 +341,11 @@ class ComexioClient:
 
         An id the server leaves out of its answer is absent from the result, not 0.
         """
-        refresh: dict[str, Any] = {str(i): {"action": "get", "MarkerName": f"M{i}"} for i in range(1, marker_count + 1)}
+        refresh: dict[str, Any] = {
+            str(i): {_ACTION_KEY: _ACTION_GET, "MarkerName": f"M{i}"} for i in range(1, marker_count + 1)
+        }
         refresh |= {
-            f"{_KNX_LIVE_KEY_PREFIX}{i}": {"action": "get", "KnxIo": f"K{i}", "Unit": "any"}
+            f"{_KNX_LIVE_KEY_PREFIX}{i}": {_ACTION_KEY: _ACTION_GET, "KnxIo": f"K{i}", "Unit": "any"}
             for i in range(1, knx_max_id + 1)
         }
         refresh[_MESSAGES_KEY] = {"action": "messages"}
@@ -358,6 +365,37 @@ class ComexioClient:
             if key != _MESSAGES_KEY and not key.startswith(_KNX_LIVE_KEY_PREFIX)
         }
         return LiveStates(markers=markers, knx=knx)
+
+    async def get_io_live_states(self, ios: Iterable[tuple[int, str]]) -> dict[str, str]:
+        """Live values of physical IOs, all in one dashboard/refresh request of their own.
+
+        ios are (extension id, IO id) pairs: the extension id is the key of the IO's extension
+        group in $FubModules["1"], the IO id its "Id". Returns {IO id: value as Comexio sent it}
+        (a numeric string such as "74" or "9.96078"). An IO the answer leaves out, or answers
+        with anything that is not a number — "0:not_found" for an inactive IO, a PHP warning —
+        is absent from the result, never 0: a caller keeps its last known value for it.
+        """
+        pairs = {io_id: ext_id for ext_id, io_id in ios}
+        _require_ints(**{f"ext_id[{io_id}]": ext_id for io_id, ext_id in pairs.items()})
+        _require_strs(**{f"io_id[{index}]": io_id for index, io_id in enumerate(pairs)})
+        if not pairs:
+            return {}
+        payload = {
+            f"{_IO_LIVE_KEY_PREFIX}{io_id}": {_ACTION_KEY: _ACTION_GET, "ExtId": ext_id, "IOId": io_id}
+            for io_id, ext_id in pairs.items()
+        }
+        data = await self._dashboard_refresh(payload, what="IO live states")
+        result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
+        if not isinstance(result, dict):
+            raise ComexioDataError(f"IO live states response has no result object: {_excerpt(data)}")
+        values: dict[str, str] = {}
+        for io_id in pairs:
+            raw = result.get(f"{_IO_LIVE_KEY_PREFIX}{io_id}")
+            if (value := _numeric_text(raw)) is None:
+                _LOGGER.debug("No live value for IO %s, dashboard/refresh answered %s", io_id, _excerpt(raw))
+            else:
+                values[io_id] = value
+        return values
 
     async def get_function_plan_connection_values(self, fub_id: int) -> dict[str, list[Any]]:
         """Live output values per source element of one running plan (Studio's fupValueData).
@@ -1616,6 +1654,22 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
     if not matched:
         raise _missing_data_error(html, f"Web-IO command {command_id} edit form has no min/max fields")
     return values["min"], values["max"]
+
+
+def _numeric_text(raw: Any) -> str | None:
+    """raw as text if it is a finite number (a German decimal comma included), else None.
+
+    dashboard/refresh answers a value as a string; an int or float is accepted as well, a bool
+    is not. "0:not_found" (inactive IO), "" or an error text yield None.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+        return None
+    text = str(raw).strip()
+    try:
+        number = float(text.replace(",", "."))
+    except ValueError:
+        return None
+    return text if math.isfinite(number) else None
 
 
 def _plan_running(raw: Any) -> bool | None:

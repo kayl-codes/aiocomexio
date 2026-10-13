@@ -666,6 +666,8 @@ def _process_ios(
                 continue
             entry = _build_io_entry(io_item, ext_name, io_types, io_input_types, options)
             entry["offline"] = ext_offline
+            # The extension group key; ComexioClient.get_io_live_states needs it as "ExtId".
+            entry["ext_id"] = ext_id
             data["io_all"].append(entry)
             if not entry["inactive"]:
                 data["io"].append(entry)
