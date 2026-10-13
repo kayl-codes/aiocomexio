@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from http import HTTPStatus
 from typing import Any, TypeIs
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -1218,9 +1218,11 @@ class ComexioClient:
         if self._api_username:
             self._warn_plain_http()
             headers["Authorization"] = _basic_auth_header(self._api_username, self._api_password)
-        params: dict[str, str | float] = {"action": "set", "value": value, **target}
+        # Comexio's /api/ reads "+" literally, so "LED-Dimmer A3" must go out as "%20"; aiohttp's
+        # params= would send "+". yarl keeps valid %XX escapes, so the path with the query is safe.
+        query = urlencode({"action": "set", "value": value, **target}, quote_via=quote)
         try:
-            body = await self._request_text("GET", _API_PATH, what=what, params=params, headers=headers)
+            body = await self._request_text("GET", f"{_API_PATH}?{query}", what=what, headers=headers)
         except ComexioResponseError as err:
             if err.status != HTTPStatus.UNAUTHORIZED:
                 raise
@@ -1229,7 +1231,9 @@ class ComexioClient:
                     f"Comexio at {self._host} requires API credentials, none are configured (api_username)"
                 ) from err
             raise ComexioAuthenticationError(f"Comexio at {self._host} rejected the API credentials") from err
-        # The answer carries no verdict to check; logged so an ignored write can be traced.
+        # A target Comexio does not know answers "0:not_found" with HTTP 200 — not a stored value.
+        if _NOT_RUNNING_SENTINEL_RE.fullmatch(body.strip()):
+            raise ComexioRequestRejectedError(f"{what} was not accepted: Comexio answered {_excerpt(body)}")
         _LOGGER.debug("%s: %s", what, _excerpt(body))
 
     async def _check_name_unique(self, model: str, object_id: str | int | None, name: str, *, what: str) -> None:

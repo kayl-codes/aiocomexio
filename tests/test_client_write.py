@@ -111,6 +111,45 @@ async def test_set_knx_and_io_values_address_their_target(api_client: ComexioCli
     assert io.query == {"action": "set", "value": "0", "ext": "UD 1", "io": "QD2"}
 
 
+async def test_set_io_value_percent_encodes_spaces_in_the_extension_name(
+    api_client: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+
+    await api_client.set_io_value("LED-Dimmer A3", "Q1", 50)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert "ext=LED-Dimmer%20A3" in request.raw_path
+    assert "+" not in request.raw_path
+    assert request.query["ext"] == "LED-Dimmer A3"
+
+
+@pytest.mark.parametrize(
+    ("call", "target"),
+    [
+        (lambda c: c.set_io_value("LED-Dimmer A3", "Q1", 50), "IO Q1 of LED-Dimmer A3"),
+        (lambda c: c.set_marker_value(5, 1), "marker M5"),
+        (lambda c: c.set_knx_value(3, 1), "KNX object K3"),
+    ],
+)
+async def test_set_value_not_found_answer_raises_naming_the_target(
+    api_client: ComexioClient,
+    comexio: FakeComexio,
+    call: Callable[[ComexioClient], Awaitable[None]],
+    target: str,
+) -> None:
+    comexio.serve_text("GET", API_PATH, "0:not_found")
+
+    with pytest.raises(ComexioRequestRejectedError, match=re.escape(target)):
+        await call(api_client)
+
+
+async def test_set_value_accepted_answer_succeeds(api_client: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+
+    await api_client.set_io_value("LED-Dimmer A3", "Q1", 50)
+
+
 async def test_set_value_without_api_user_sends_no_credentials(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve_text("GET", API_PATH, "")
 

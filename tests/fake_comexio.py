@@ -54,6 +54,7 @@ class Received:
     authorization: str | None
     referer: str | None
     xhr: bool
+    raw_path: str = ""
 
     def to(self, method: str, path: str) -> bool:
         return (self.method, self.path) == (method, path)
@@ -117,6 +118,7 @@ class FakeComexio:
                 request.headers.get("Authorization"),
                 request.headers.get("Referer"),
                 request.headers.get("X-Requested-With") == "XMLHttpRequest",
+                request.raw_path,
             )
         )
         handler = self.routes.get((request.method, request.path))
