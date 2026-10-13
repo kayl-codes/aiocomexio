@@ -220,3 +220,56 @@ def test_element_id_sort_key_orders_numerically_and_never_raises() -> None:
     ids = ["10", "b", "2", "²", "1"]
 
     assert sorted(ids, key=element_id_sort_key) == ["1", "2", "10", "b", "²"]
+
+
+_OR_TITLE = "<title>Oder</title>"
+
+
+def _flow(plan: dict[str, Any], **kwargs: Any) -> str:
+    svg, _skipped = render_flow_svg(
+        plan["elements"],
+        plan["connections"],
+        plan["catalog"],
+        plan["markers_by_id"],
+        plan["webio_by_id"],
+        plan["ios_by_id"],
+        title="Test <Plan>",
+        **kwargs,
+    )
+    return svg
+
+
+def test_block_values_without_values_leave_output_unchanged(plan: dict[str, Any]) -> None:
+    assert _render(plan, block_values=None) == _render(plan)
+    assert _render(plan, block_values={}) == _render(plan)
+    assert _flow(plan, block_values=None) == _flow(plan)
+
+
+def test_block_values_listed_in_block_hover(plan: dict[str, Any]) -> None:
+    values = {"4": {"time_up": "12", "Kühlgrenze": "21.5", "autohide": "1"}}
+    svg = _render(plan, block_values=values)
+    assert "<title>Oder\nKühlgrenze: 21.5\ntime_up: 12</title>" in svg
+    assert "autohide" not in svg
+    # The title bar text and data-label keep the plain label; the other block is untouched.
+    assert 'data-label="Oder"' in svg
+    assert svg.count(_OR_TITLE) == 0
+    assert "<title>Nicht</title>" in svg
+
+
+def test_block_values_listed_in_flow_hover(plan: dict[str, Any]) -> None:
+    svg = _flow(plan, block_values={"4": {"b": "2", "a": "1"}})
+    assert "<title>Oder\na: 1\nb: 2</title>" in svg
+    assert "<title>Nicht</title>" in svg
+
+
+def test_block_values_only_apply_to_blocks(plan: dict[str, Any]) -> None:
+    marker_ids = [k for k, e in plan["elements"].items() if e["reference"]["type"] == 2]
+    svg = _render(plan, block_values={marker_ids[0]: {"x": "1"}})
+    assert svg == _render(plan)
+
+
+def test_block_values_are_escaped(plan: dict[str, Any]) -> None:
+    svg = _render(plan, block_values={"4": {"<b>&": '"x" <y>'}})
+    assert "<b>&:" not in svg
+    assert "&lt;b&gt;&amp;: &quot;x&quot; &lt;y&gt;" in svg
+    assert "&lt;b&gt;&amp;: &quot;x&quot; &lt;y&gt;" in _flow(plan, block_values={"4": {"<b>&": '"x" <y>'}})

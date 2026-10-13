@@ -5,6 +5,7 @@ entry point (used by render.render_plan_svg for title/hover text, and by homeass
 services for backup/search labels) — pure lookup/formatting, no SVG markup, no geometry.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 from .render_values import ItemsById, _fmt_value
@@ -91,6 +92,26 @@ def _calendar_function_tooltip(catalog: dict[str, Any], ref_id: str, sun_times: 
     if sun_times and freq in sun_times:
         lines.append(f"Nächster Zeitpunkt: {sun_times[freq]}")
     return "\n".join(lines)
+
+
+# Block settings ($FubBaseConfig) as {element id: {setting name: value}}.
+BlockValues = Mapping[str, Mapping[str, str]]
+# The extended-view flag lives in the same table but is a display state, not an instance setting.
+_SETTING_AUTOHIDE = "autohide"
+
+
+def with_block_values(label: str, elem_id: str, elem: dict[str, Any], block_values: BlockValues | None) -> str:
+    """Hover text of a fubBase block: the label plus one "Name: Value" line per instance setting.
+
+    The catalog carries no readable names for settings, so the raw name Comexio stores is shown.
+    Sorted by name so the text is stable. Anything but a block, or a block without settings,
+    keeps its label unchanged.
+    """
+    if (elem.get("reference") or {}).get("type") != 5 or not block_values:
+        return label
+    settings = block_values.get(elem_id) or {}
+    lines = [f"{name}: {settings[name]}" for name in sorted(settings, key=str.casefold) if name != _SETTING_AUTOHIDE]
+    return "\n".join([label, *lines])
 
 
 def _block_label(catalog: dict[str, Any], ref_id: str, elem_name: str) -> str:

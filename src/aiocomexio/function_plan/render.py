@@ -51,7 +51,7 @@ from typing import Any
 
 from .render_constants import _FONT_SIZE, _MARGIN, _STYLE
 from .render_geometry import _bounding_box, _build_geometries, _fit_to_bounding_box
-from .render_labels import resolve_element_label
+from .render_labels import BlockValues, resolve_element_label, with_block_values
 from .render_selfreset import detect_self_reset_elements
 from .render_svg import _render_nodes
 from .render_values import ItemsById
@@ -76,6 +76,7 @@ def render_plan_svg(
     connection_values: dict[str, Any] | None = None,
     knx_by_id: ItemsById | None = None,
     plan_id: str | None = None,
+    block_values: BlockValues | None = None,
 ) -> str:
     """Render elements at Comexio's own position_x/position_y with port-accurate wiring.
 
@@ -106,6 +107,10 @@ def render_plan_svg(
     <svg>. The plan card keeps its scroll position across a refresh only while this stays the
     same — the viewBox alone can't tell plans apart, since every plan on the same paper
     renders with the same one; plan names aren't unique either.
+
+    block_values: optional instance settings of the logic blocks, {element id: {setting name:
+    value}} (Comexio's $FubBaseConfig). A block's hover text then lists them as "Name: Value"
+    lines under its label; None (or a block without settings) leaves the output unchanged.
     """
     geos = _build_geometries(elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id)
     if canvas:
@@ -142,7 +147,12 @@ def render_plan_svg(
     ]
     overlays: list[str] = []
     connected = _render_edges(parts, overlays, connections, geos, connection_values)
-    _render_nodes(parts, geos, labels, connected)
+    hovers = {
+        elem_id: hover
+        for elem_id, elem in elements.items()
+        if (hover := with_block_values(labels[elem_id], elem_id, elem, block_values)) != labels[elem_id]
+    }
+    _render_nodes(parts, geos, labels, connected, hovers)
     parts.extend(overlays)
     parts.append("</svg>")
     return "\n".join(parts)

@@ -59,7 +59,7 @@ def _block_head_path(x: float, y: float, w: float) -> str:
     )
 
 
-def _render_block(parts: list[str], geo: dict[str, Any], label: str, orphan: bool) -> None:
+def _render_block(parts: list[str], geo: dict[str, Any], label: str, orphan: bool, hover: str) -> None:
     x, y = geo["x"] + _PIN_LEN, geo["y"] + _BODY_PAD
     w = geo["w"] - 2 * _PIN_LEN
     h = geo["h"] - 2 * _BODY_PAD
@@ -67,7 +67,7 @@ def _render_block(parts: list[str], geo: dict[str, Any], label: str, orphan: boo
     parts.extend(
         [
             f'<rect class="{body_class}" x="{x:.1f}" y="{y:.1f}" width="{w:.0f}" height="{h:.0f}" '
-            f'rx="{_RADIUS:.1f}" stroke-width="1"><title>{escape(label)}</title></rect>',
+            f'rx="{_RADIUS:.1f}" stroke-width="1"><title>{escape(hover)}</title></rect>',
             f'<path class="block-head" d="{_block_head_path(x, y, w)}"/>',
             f'<text class="block-head-label" x="{x + w / 2:.1f}" '
             f'y="{geo["y"] + _ROW_H / 2 + 0.36 * _HEAD_FONT_SIZE:.1f}" '
@@ -184,12 +184,18 @@ def _render_nodes(
     geos: dict[str, dict[str, Any]],
     labels: dict[str, str],
     connected: set[str],
+    hovers: dict[str, str] | None = None,
 ) -> None:
+    """hovers: optional {element id: hover text} for blocks whose hover differs from their label."""
+    hovers = hovers or {}
     for elem_id, geo in geos.items():
-        _render_one_node(parts, elem_id, geo, labels.get(elem_id, "?"), connected)
+        label = labels.get(elem_id, "?")
+        _render_one_node(parts, elem_id, geo, label, connected, hovers.get(elem_id, label))
 
 
-def _render_one_node(parts: list[str], elem_id: str, geo: dict[str, Any], label: str, connected: set[str]) -> None:
+def _render_one_node(
+    parts: list[str], elem_id: str, geo: dict[str, Any], label: str, connected: set[str], hover: str
+) -> None:
     """Render one plan element's <g> wrapper + interior (see _render_nodes)."""
     # Group each element so a frontend card can address it as ONE unit (hover
     # highlight, search); data-label carries the full, untruncated label text.
@@ -219,7 +225,7 @@ def _render_one_node(parts: list[str], elem_id: str, geo: dict[str, Any], label:
     if geo["kind"] == "comment":
         _render_comment(parts, geo, label)
     elif geo["kind"] == "block":
-        _render_block(parts, geo, label, elem_id not in connected)
+        _render_block(parts, geo, label, elem_id not in connected, hover)
     elif geo.get("inactive"):
         _render_pill(parts, geo, label, "node-inactive")
     else:
