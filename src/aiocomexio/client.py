@@ -128,6 +128,8 @@ _RUN_STATE_KEY_PREFIX = "fup_"
 _WEBIO_LIST_ID_FIELD = "Id"
 # fupValueData's answer for a stopped plan, observed live as "0:not_found".
 _NOT_RUNNING_SENTINEL_RE = re.compile(r"\d+:not_found")
+# What /api/?action=set answers on success (observed live); anything else is logged at WARNING.
+_API_SET_OK_ANSWER = "1"
 
 # save_fub form values: paper format ids and orientation ids as Comexio's plan dialog sends them.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
@@ -1234,6 +1236,11 @@ class ComexioClient:
         # A target Comexio does not know answers "0:not_found" with HTTP 200 — not a stored value.
         if _NOT_RUNNING_SENTINEL_RE.fullmatch(body.strip()):
             raise ComexioRequestRejectedError(f"{what} was not accepted: Comexio answered {_excerpt(body)}")
+        # It is not verified that Comexio answers "1" on every success, so any other answer is only
+        # logged (an empty one included), never raised.
+        if body.strip() != _API_SET_OK_ANSWER:
+            _LOGGER.warning("%s: Comexio answered %s instead of %r", what, _excerpt(body), _API_SET_OK_ANSWER)
+            return
         _LOGGER.debug("%s: %s", what, _excerpt(body))
 
     async def _check_name_unique(self, model: str, object_id: str | int | None, name: str, *, what: str) -> None:
