@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from http import HTTPStatus
-from typing import Any, TypeIs
+from typing import Any, NamedTuple, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import aiohttp
@@ -201,6 +201,17 @@ class WebioBaseInfo:
     deletable: bool
 
 
+class IoAddress(NamedTuple):
+    """One physical IO for get_io_live_states: its extension id and IO id, named so a swap stands out.
+
+    ext_id is the key of the IO's extension group in $FubModules["1"] (parse_config's "ext_id"),
+    io_id the IO's "Id" (parse_config's "id").
+    """
+
+    ext_id: int | str
+    io_id: str
+
+
 @dataclass(frozen=True, slots=True)
 class LiveStates:
     """Live values from one dashboard refresh, keyed by plain numeric id per source.
@@ -373,12 +384,13 @@ class ComexioClient:
         }
         return LiveStates(markers=markers, knx=knx)
 
-    async def get_io_live_states(self, ios: Iterable[tuple[int | str, str]]) -> dict[str, str]:
+    async def get_io_live_states(self, ios: Iterable[IoAddress]) -> dict[str, str]:
         """Live values of physical IOs, all in one dashboard/refresh request of their own.
 
-        ios are (extension id, IO id) pairs: the extension id is the key of the IO's extension
+        ios are IoAddress(ext_id, io_id) entries (a plain (ext_id, io_id) tuple works at runtime, but
+        the named form keeps the two ids from being swapped): ext_id is the key of the IO's extension
         group in $FubModules["1"] (a non-negative int or digit string, like parse_config's "ext_id"),
-        the IO id its "Id". An integer string counts by value: "007" is extension 7. One IO id under
+        io_id its "Id". An integer string counts by value: "007" is extension 7. One IO id under
         two different extension ids is a ValueError.
         Returns {IO id: value as Comexio sent it, "," normalized to "."}
         (a numeric string such as "74" or "9.96078"). An IO the answer leaves out, or answers
@@ -1751,11 +1763,16 @@ def _collect_io_values(result: dict[str, Any], io_ids: Iterable[str]) -> tuple[d
 def _io_ext_ids(ios: Iterable[tuple[int | str, str]]) -> dict[str, int]:
     """{IO id: extension id as int} from (extension id, IO id) pairs; identical duplicates collapse.
 
-    TypeError for a bool or non-int/str extension id and a non-str IO id, ValueError for a negative
-    extension id, one that is not a digit string and for one IO id given with two different extension ids.
+    TypeError for an entry that is no 2-tuple, a bool or non-int/str extension id and a non-str IO id,
+    ValueError for a negative extension id, one that is not a digit string and for one IO id given
+    with two different extension ids.
     """
     pairs: dict[str, int] = {}
-    for ext_id, io_id in ios:
+    for entry in ios:
+        # A str entry would unpack too ("12" -> ext "1", IO "2"), so the shape is checked first.
+        if not (isinstance(entry, tuple) and len(entry) == 2):
+            raise TypeError(f"ios entries must be IoAddress(ext_id, io_id) pairs, got {entry!r}")
+        ext_id, io_id = entry
         _require_strs(**{f"io_id[{io_id!r}]": io_id})
         ext = _ext_id_int(ext_id, io_id)
         if pairs.setdefault(io_id, ext) != ext:

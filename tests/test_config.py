@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from syrupy.assertion import SnapshotAssertion
 
-from aiocomexio import ComexioClient
+from aiocomexio import ComexioClient, IoAddress
 from aiocomexio.config import (
     TYPE_DIGITAL,
     ParseOptions,
@@ -431,7 +431,7 @@ async def test_io_ext_ids_from_parse_config_feed_get_io_live_states(
     """parse_config keeps ext_id a str; (ext_id, id) pairs must go into get_io_live_states unchanged."""
     comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_11": "1", "io_21": "2,5"}})
 
-    states = await logged_in.get_io_live_states((io["ext_id"], io["id"]) for io in basic_result["io_all"])
+    states = await logged_in.get_io_live_states(IoAddress(io["ext_id"], io["id"]) for io in basic_result["io_all"])
 
     assert states == {"11": "1", "21": "2.5"}
     (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
