@@ -54,19 +54,27 @@ jobs:
           pr_number=$(get_value PR_NUMBER)
           pr_head_ref=$(get_value PR_HEAD_REF)
           pr_base_ref=$(get_value PR_BASE_REF)
+          pr_merge_sha=$(get_value PR_MERGE_SHA)
 
           [[ "$pr_number" =~ ^[0-9]+$ ]] || { echo "::error::invalid or missing PR_NUMBER in pr.env"; exit 1; }
           [[ "$pr_head_ref" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::invalid or missing PR_HEAD_REF in pr.env"; exit 1; }
           [[ "$pr_base_ref" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::invalid or missing PR_BASE_REF in pr.env"; exit 1; }
+          [[ "$pr_merge_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid or missing PR_MERGE_SHA in pr.env"; exit 1; }
 
           echo "PR_NUMBER=$pr_number" >> "$GITHUB_ENV"
           echo "PR_HEAD_REF=$pr_head_ref" >> "$GITHUB_ENV"
           echo "PR_BASE_REF=$pr_base_ref" >> "$GITHUB_ENV"
+          echo "PR_MERGE_SHA=$pr_merge_sha" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
-          ref: refs/pull/${{ env.PR_NUMBER }}/head
+          # The exact merge commit prepare-pr-analysis ran the tests on, not the
+          # PR head: coverage.xml was built from that commit, and scanning the
+          # head instead shows 0 % coverage on new code as soon as the base
+          # branch has commits the head lacks. A SHA (not refs/pull/N/merge)
+          # because that ref moves whenever the base branch moves.
+          ref: ${{ env.PR_MERGE_SHA }}
           persist-credentials: false
           # checkout refuses fork-PR refs in a workflow_run job by default (the
           # "pwn request" guard - see https://gh.io/securely-using-pull_request_target),
@@ -85,6 +93,22 @@ jobs:
           # request pattern). If you add such a step, re-litigate whether
           # allow-unsafe-pr-checkout is still safe here first.
           allow-unsafe-pr-checkout: true
+
+      - name: Verify the checked-out commit belongs to this PR
+        # PR_MERGE_SHA comes from the untrusted pr.env. Tie it to the trusted
+        # workflow_run event: it must be a merge commit whose second parent is
+        # the PR head that triggered this run and whose first parent is on the
+        # base branch. Fails the job instead of scanning some other commit
+        # under this PR's key.
+        env:
+          PR_BASE_REF: ${{ env.PR_BASE_REF }}
+          PR_MERGE_SHA: ${{ env.PR_MERGE_SHA }}
+          TRIGGER_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$PR_MERGE_SHA" ]] || { echo "::error::checked-out commit is not PR_MERGE_SHA"; exit 1; }
+          [[ "$(git rev-parse HEAD^2)" == "$TRIGGER_HEAD_SHA" ]] || { echo "::error::PR_MERGE_SHA does not merge the PR head of this run"; exit 1; }
+          git merge-base --is-ancestor HEAD^1 "origin/$PR_BASE_REF" || { echo "::error::PR_MERGE_SHA is not based on $PR_BASE_REF"; exit 1; }
 
       - name: Restore coverage report
         run: cp "${{ runner.temp }}/sonar-pr-data/coverage.xml" coverage.xml

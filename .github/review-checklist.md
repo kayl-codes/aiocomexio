@@ -33,6 +33,22 @@ published on PyPI and consumed by the Home Assistant integration
   constants (S1192).
 - **Dependencies:** a dependency change must come with an updated `uv.lock` (OSV-Scanner scans the lock file).
 
+## Parsing Comexio answers, logging and error messages
+
+- **Numbers from outside:** a float from Comexio or the caller is checked with `math.isfinite` before use; `nan`
+  and `inf` pass every `isinstance` check and every `<`/`>` range check (a comparison with `nan` is always false).
+- **Digits in protocol regexes:** write `\d` (SonarQube S6353 wants it instead of `[0-9]`) and compile with
+  `re.ASCII`; without it `\d` also matches non-ASCII digits such as `٣`, which Comexio never sends.
+- **Live readings stay at DEBUG:** a WARNING or higher about an unexpected answer to a *value* request (live states,
+  IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
+  answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes
+  through `_excerpt` in `client.py` (repr + length cap), never unbounded.
+- **Caller values in new messages:** an id, name or value that comes from the caller or from Comexio is written as
+  repr (`%r` in log calls, `!r` in f-strings for exceptions), so a line break in it cannot forge a log line and an
+  empty string stays visible. Older `%s` calls are not a finding unless the diff touches them.
+- **Log tests:** a test of a log line or an exception message asserts the whole message (or `record.getMessage()`
+  against an exact string), not a substring — a substring check misses leaked content and lost repr quoting.
+
 ## Rendering (SVG and other visible output)
 
 - **Text in SVG/XML:** `html.escape` is not enough for text from Comexio or the caller (names, titles, settings).
