@@ -20,6 +20,9 @@
   .block-head-label { fill: #ffffff; }
   .port-label { fill: #333333; }
   .port-glyph { fill: #555555; }
+  /* Texts and the title bar sit on top of the body rect that carries the <title> tooltip;
+     let the pointer through so the tooltip shows over the whole node. */
+  .node-g text, .node-g .block-head { pointer-events: none; }
   .node-comment { fill: #666666; font-style: italic; }
   .edge-line { stroke: #555555; fill: none; }
   .edge-dot { fill: #ffffff; stroke: #555555; }

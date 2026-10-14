@@ -15,6 +15,8 @@ from aiocomexio.function_plan import (
     detect_self_reset_cycles,
     element_id_sort_key,
     element_search_id,
+    render_constants,
+    render_flow,
     render_flow_svg,
     render_plan_svg,
 )
@@ -322,6 +324,22 @@ def test_with_block_values_replaces_every_unicode_line_boundary(sep: str) -> Non
 
     assert text == "Oder\na b: 1 forged: 9"
     assert len(text.splitlines()) == 2
+
+
+class _UnprintableKey:
+    def __str__(self) -> str:
+        raise RuntimeError("no str")
+
+
+def test_with_block_values_never_stringifies_a_setting_name_that_is_not_a_str() -> None:
+    values: Any = {"4": {_UnprintableKey(): "1", "B": "2", "a": "3"}}
+
+    assert with_block_values("Oder", "4", _BLOCK, values) == "Oder\na: 3\nB: 2"
+
+
+def test_block_texts_and_title_bar_let_the_pointer_through_to_the_tooltip() -> None:
+    assert ".node-g text, .node-g .block-head { pointer-events: none; }" in render_constants._STYLE
+    assert "pointer-events: none" in render_flow._STYLE.split(".flow-label", 1)[1].split("}", 1)[0]
 
 
 @pytest.mark.parametrize("block_values", ["x", 5, ["a"], ("a",), True])

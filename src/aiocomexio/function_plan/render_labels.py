@@ -121,10 +121,14 @@ def with_block_values(label: str, elem_id: str, elem: dict[str, Any], block_valu
     settings = block_values.get(elem_id)
     if not isinstance(settings, Mapping):
         return label
-    lines = [
-        f"{_one_line(name)}: {_one_line(value)}"
-        for name, value in sorted(settings.items(), key=lambda item: str(item[0]).casefold())
+    # Filter before sorting: the sort key must only ever see str names.
+    shown = [
+        (name, value)
+        for name, value in settings.items()
         if isinstance(name, str) and name != _SETTING_AUTOHIDE and isinstance(value, str)
+    ]
+    lines = [
+        f"{_one_line(name)}: {_one_line(value)}" for name, value in sorted(shown, key=lambda item: item[0].casefold())
     ]
     return "\n".join([label, *lines])
 
