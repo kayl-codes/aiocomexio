@@ -387,6 +387,13 @@ def test_with_block_values_never_stringifies_a_setting_name_that_is_not_a_str() 
     assert with_block_values("Oder", "4", _BLOCK, values) == "Oder\na: 3\nB: 2"
 
 
+def test_with_block_values_orders_names_that_differ_only_in_case_independent_of_input_order() -> None:
+    expected = "Oder\nA: 2\na: 1"
+
+    assert with_block_values("Oder", "4", _BLOCK, {"4": {"a": "1", "A": "2"}}) == expected
+    assert with_block_values("Oder", "4", _BLOCK, {"4": {"A": "2", "a": "1"}}) == expected
+
+
 _SVG_NS = "{http://www.w3.org/2000/svg}"
 
 
