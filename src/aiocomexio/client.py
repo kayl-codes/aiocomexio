@@ -2,7 +2,9 @@
 
 The client works on an aiohttp.ClientSession the caller creates and owns (see
 session.session_kwargs for the settings it needs). It never closes that session. Every call
-either returns real data or raises a ComexioError subclass.
+either returns real data or raises a ComexioError subclass. The one exception is an invalid
+argument (a non-finite value for a set_*_value call, a non-numeric command_id, ...): that
+raises ValueError or TypeError before anything is sent, as the method's docstring states.
 """
 
 import base64
