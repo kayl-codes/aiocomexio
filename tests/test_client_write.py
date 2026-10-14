@@ -213,6 +213,8 @@ async def test_set_value_accepted_answer_does_not_warn(
         await api_client.set_marker_value(5, 1)
 
     assert not caplog.records
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query == {"action": "set", "value": "1", "marker": "M5"}
 
 
 @pytest.mark.parametrize(("value", "expected"), [(0.5, "0.5"), (-1, "-1"), (50.0, "50.0"), (1, "1")])
