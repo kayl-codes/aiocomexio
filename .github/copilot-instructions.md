@@ -36,10 +36,12 @@ published on PyPI and consumed by the Home Assistant integration
 - **Text in SVG/XML:** `html.escape` is not enough for text from Comexio or the caller (names, titles, settings).
   Characters XML 1.0 forbids (e.g. U+0001) must be removed, or one of them makes the whole SVG unparsable; text
   that must stay on one line (hover lines, labels) needs every Unicode line break neutralized (CR, LF, NEL, U+2028
-  …), not only `\n`, or a value can forge extra lines.
-- **Tooltips:** a node's `<title>` is the first child of the node's `<g>` group, so it covers every part of the node
-  (body, title bar, texts, pin glyphs). No `pointer-events` rules to route the hover; they break other targets such
-  as the comment text.
+  …), not only `\n`, or a value can forge extra lines. Text that is meant to span lines keeps its breaks: a plan
+  comment is split into one `<tspan>` per line, so flattening it first would lose that layout.
+- **Tooltips in the plan preview (`render_plan_svg`):** a node's `<title>` is the first child of the node's `<g>`
+  group, so it covers every part of the node (body, title bar, texts, pin glyphs). No `pointer-events` rules to
+  route that hover; they break other targets such as the comment text. The signal-flow diagram (`render_flow.py`)
+  is a different case: its `.flow-label` keeps `pointer-events: none` so the hover reaches the box's `<title>`.
 - **External values before use:** check the type of a value from outside (a `Mapping` where a mapping is expected,
   a `str` where a name or value is expected) before sorting it, formatting it or passing it to `str()`. A sort key
   that meets a non-`str` raises `TypeError`, and `str()` hides a malformed value instead of rejecting it.
