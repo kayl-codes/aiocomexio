@@ -33,7 +33,7 @@ from .exceptions import (
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
-from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_has_elements
+from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_missing_collections
 from .scrape import (
     parse_comexio_version,
     parse_io_input_types,
@@ -433,9 +433,9 @@ class ComexioClient:
 
         Comexio serializes requests server-side, so one bulk call beats N per-plan calls. A
         malformed entry is skipped with a warning; strict=True also skips entries without a real
-        elements collection. Unlike load_function_plan(strict=True) it does not check connections,
-        so a result here is no source for run_function_plan. A requested plan the server leaves
-        out is absent from the result.
+        elements or connections collection (an empty one is real), like load_function_plan(strict=True)
+        does. A plan skipped by strict mode is absent from the result, just like a plan the server
+        leaves out or one that does not exist, and is logged at WARNING.
         """
         wanted = None if fub_ids is None else set(fub_ids)
         if wanted is not None and not wanted:
@@ -1486,7 +1486,7 @@ def _is_int(value: Any) -> TypeIs[int]:
 def _require_plan_collections(data: dict[str, Any], fub_id: int) -> None:
     """ComexioDataError unless a loadelements answer carries real elements and connections collections."""
     # normalize_plan_payload turns a missing collection into {} — fine to display, fatal to run.
-    missing = [key for key in ("elements", "connections") if not isinstance(data.get(key), (dict, list))]
+    missing = plan_payload_missing_collections(data)
     if missing:
         raise ComexioDataError(f"Function plan {fub_id} payload has no {' / '.join(missing)} collection")
 
@@ -1702,8 +1702,11 @@ def _bulk_plan_entry(
     if not isinstance(data, dict):
         _LOGGER.warning("Skipping bulk function plan %s: payload is not an object", fub_id)
         return None
-    if strict and not plan_payload_has_elements(data):
-        _LOGGER.warning("Skipping bulk function plan %s: payload has no elements collection", fub_id)
+    missing = plan_payload_missing_collections(data) if strict else []
+    if missing:
+        _LOGGER.warning(
+            "Skipping bulk function plan %s: payload has no %s collection", fub_id, " and no ".join(missing)
+        )
         return None
     try:
         return fub_id, normalize_plan_payload(data)

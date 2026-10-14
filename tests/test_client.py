@@ -605,6 +605,98 @@ async def test_load_all_function_plans_filters_and_skips_malformed(
     assert sorted(strict) == [1, 2]
 
 
+async def test_load_all_function_plans_strict_requires_the_connections_collection(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_json(
+        "GET",
+        LOAD_ALL_ELEMENTS_PATH,
+        {
+            "1": {"elements": {"7": _ELEMENT}},
+            "2": {"elements": [], "scenes": [], "connections": []},
+            "3": {"elements": {}, "connections": None},
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        strict = await logged_in.load_all_function_plans(strict=True)
+    lenient = await logged_in.load_all_function_plans()
+
+    assert strict == {2: {"elements": {}, "scenes": [], "connections": {}}}
+    assert "Skipping bulk function plan 1: payload has no connections collection" in caplog.text
+    assert "Skipping bulk function plan 3: payload has no connections collection" in caplog.text
+    assert sorted(lenient) == [1, 2, 3]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"connections": {}}, {"elements": 5, "connections": {}}],
+    ids=["elements-missing", "elements-wrong-type"],
+)
+async def test_load_all_function_plans_strict_skips_a_plan_without_a_real_elements_collection(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, payload: dict[str, Any]
+) -> None:
+    comexio.serve_json("GET", LOAD_ALL_ELEMENTS_PATH, {"1": payload, "2": {"elements": {}, "connections": {}}})
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        strict = await logged_in.load_all_function_plans(strict=True)
+
+    assert sorted(strict) == [2]
+    assert "Skipping bulk function plan 1: payload has no elements collection" in caplog.text
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+
+
+async def test_load_all_function_plans_strict_warning_names_both_missing_collections(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_json("GET", LOAD_ALL_ELEMENTS_PATH, {"1": {"scenes": []}})
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert await logged_in.load_all_function_plans(strict=True) == {}
+
+    assert "Skipping bulk function plan 1: payload has no elements and no connections collection" in (caplog.text)
+
+
+_STRICT_PARITY_CASES = [
+    ({"elements": {}, "connections": {}}, True),
+    ({"elements": [], "scenes": [], "connections": []}, True),
+    ({"elements": {"7": _ELEMENT}, "connections": []}, True),
+    ({"elements": {}}, False),
+    ({"connections": {}}, False),
+    ({"elements": {}, "connections": None}, False),
+    ({"elements": {}, "connections": 5}, False),
+    ({"elements": {}, "connections": "x"}, False),
+    ({"elements": 5, "connections": {}}, False),
+    ({"elements": [1], "connections": {}}, False),
+    ({"error": "no plan"}, False),
+    ({}, False),
+    (["x"], False),
+    ("x", False),
+    (None, False),
+]
+
+
+@pytest.mark.parametrize(
+    ("payload", "accepted"), _STRICT_PARITY_CASES, ids=[repr(p)[:40] for p, _ in _STRICT_PARITY_CASES]
+)
+async def test_strict_single_and_bulk_load_agree_on_accept_and_reject(
+    logged_in: ComexioClient, comexio: FakeComexio, payload: Any, accepted: bool
+) -> None:
+    comexio.serve_json("GET", LOAD_ELEMENTS_PATH, payload)
+    comexio.serve_json("GET", LOAD_ALL_ELEMENTS_PATH, {"4": payload})
+    try:
+        single: dict[str, Any] | None = await logged_in.load_function_plan(4, strict=True)
+    except ComexioDataError:
+        single = None
+
+    bulk = await logged_in.load_all_function_plans(strict=True)
+
+    assert (single is not None) is accepted
+    assert (4 in bulk) is accepted
+    if single is not None:
+        assert bulk[4] == single
+
+
 async def test_load_all_function_plans_with_empty_filter_skips_the_request(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
