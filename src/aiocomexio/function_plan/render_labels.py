@@ -99,7 +99,8 @@ def _calendar_function_tooltip(catalog: dict[str, Any], ref_id: str, sun_times: 
 BlockValues = Mapping[str, Mapping[str, str]]
 # The extended-view flag lives in the same table but is a display state, not an instance setting.
 _SETTING_AUTOHIDE = "autohide"
-_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+# Every line boundary str.splitlines() knows (CRLF counts as one).
+_LINE_BREAK_RE = re.compile("\r\n|[\n\v\f\r\x1c-\x1e\x85  ]")
 
 
 def with_block_values(label: str, elem_id: str, elem: dict[str, Any], block_values: BlockValues | None) -> str:
@@ -110,11 +111,12 @@ def with_block_values(label: str, elem_id: str, elem: dict[str, Any], block_valu
     settings (also one that only has the internal "autohide" flag), keeps its label unchanged.
     Entries for element ids that are not in the plan, for elements that are not blocks, an element
     "reference" or a block_values entry that is not a Mapping, and settings whose name or value is
-    not a str are ignored. A line break (CR, LF, CRLF) inside a name or value becomes a space, so
+    not a str are ignored, as is a block_values that is not a Mapping. A line break (any Unicode line
+    boundary, e.g. CR, LF, NEL, U+2028) inside a name or value becomes a space, so
     a value cannot forge extra hover lines.
     """
     reference = elem.get("reference")
-    if not isinstance(reference, Mapping) or reference.get("type") != 5 or not block_values:
+    if not isinstance(reference, Mapping) or reference.get("type") != 5 or not isinstance(block_values, Mapping):
         return label
     settings = block_values.get(elem_id)
     if not isinstance(settings, Mapping):

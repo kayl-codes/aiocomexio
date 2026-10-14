@@ -314,6 +314,21 @@ def test_with_block_values_keeps_a_value_from_forging_extra_hover_lines() -> Non
     assert len(text.split("\n")) == 5
 
 
+@pytest.mark.parametrize("sep", ["", "", "", "", "", "", " ", " "])
+def test_with_block_values_replaces_every_unicode_line_boundary(sep: str) -> None:
+    values = {"4": {f"a{sep}b": f"1{sep}forged: 9"}}
+
+    text = with_block_values("Oder", "4", _BLOCK, values)
+
+    assert text == "Oder\na b: 1 forged: 9"
+    assert len(text.splitlines()) == 2
+
+
+@pytest.mark.parametrize("block_values", ["x", 5, ["a"], ("a",), True])
+def test_with_block_values_ignores_block_values_that_is_not_a_mapping(block_values: Any) -> None:
+    assert with_block_values("Oder", "4", _BLOCK, block_values) == "Oder"
+
+
 @pytest.mark.parametrize("entry", [None, "x", 5, ["a", "b"], ("a",)])
 def test_with_block_values_ignores_a_block_values_entry_that_is_not_a_mapping(entry: Any) -> None:
     assert with_block_values("Oder", "4", _BLOCK, {"4": entry}) == "Oder"
