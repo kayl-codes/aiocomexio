@@ -262,6 +262,15 @@ async def test_set_value_rejects_non_finite_values_before_sending(
     assert comexio.received_at("GET", API_PATH) == []
 
 
+async def test_set_value_accepts_a_huge_int_without_overflow(api_client: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+
+    await api_client.set_marker_value(5, 10**400)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query["value"] == "1" + "0" * 400
+
+
 async def test_set_value_not_found_with_trailing_text_only_warns(
     api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
 ) -> None:

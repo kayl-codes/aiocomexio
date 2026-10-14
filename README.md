@@ -34,7 +34,8 @@ client. Every call either returns data or raises a `ComexioError` subclass
 (`ComexioAuthenticationError`, `ComexioConnectionError`, `ComexioResponseError`,
 `ComexioDataError`, `ComexioRequestRejectedError` for a write the server refused,
 `ComexioCreatedWithoutIdError` for a create the server confirmed but whose id could not be read
-back — the object exists, do not create it again).
+back — the object exists, do not create it again). The value setters
+also raise `ValueError` for a non-finite float (`nan`, `inf`) before sending anything.
 
 ```python
 import asyncio

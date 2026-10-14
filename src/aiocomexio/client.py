@@ -543,8 +543,9 @@ class ComexioClient:
     async def set_marker_value(self, marker_id: int, value: float) -> None:
         """Write a marker's value through the /api/ interface.
 
-        Success is only confirmed by the answer "1"; any other answer is logged at WARNING, and a
-        "<n>:not_found" answer raises ComexioRequestRejectedError. A non-finite value raises ValueError.
+        Success is only confirmed by the answer "1". A "<n>:not_found" answer raises
+        ComexioRequestRejectedError without a warning; any other unexpected answer is logged at WARNING.
+        A non-finite float (nan, inf) raises ValueError.
         """
 
         await self._api_set({"marker": f"M{marker_id}"}, value, what=f"Writing marker M{marker_id}")
@@ -552,8 +553,9 @@ class ComexioClient:
     async def set_knx_value(self, knx_id: int, value: float) -> None:
         """Write a KNX object's value through the /api/ interface (query parameter knx=K<id>).
 
-        Success is only confirmed by the answer "1"; any other answer is logged at WARNING, and a
-        "<n>:not_found" answer raises ComexioRequestRejectedError. A non-finite value raises ValueError.
+        Success is only confirmed by the answer "1". A "<n>:not_found" answer raises
+        ComexioRequestRejectedError without a warning; any other unexpected answer is logged at WARNING.
+        A non-finite float (nan, inf) raises ValueError.
         """
 
         await self._api_set({"knx": f"K{knx_id}"}, value, what=f"Writing KNX object K{knx_id}")
@@ -561,8 +563,9 @@ class ComexioClient:
     async def set_io_value(self, ext: str, io: str, value: float) -> None:
         """Write an IO's value through the /api/ interface; ext is the extension name, io its identifier.
 
-        Success is only confirmed by the answer "1"; any other answer is logged at WARNING, and a
-        "<n>:not_found" answer raises ComexioRequestRejectedError. A non-finite value raises ValueError.
+        Success is only confirmed by the answer "1". A "<n>:not_found" answer raises
+        ComexioRequestRejectedError without a warning; any other unexpected answer is logged at WARNING.
+        A non-finite float (nan, inf) raises ValueError.
         """
 
         await self._api_set({"ext": ext, "io": io}, value, what=f"Writing IO {io} of {ext}")
@@ -1231,7 +1234,7 @@ class ComexioClient:
 
     async def _api_set(self, target: dict[str, str], value: float, *, what: str) -> None:
         """One /api/?action=set request; HTTP 401 means the API credentials were rejected."""
-        if not math.isfinite(value):
+        if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"{what}: {value!r} is not a finite number")
         headers: dict[str, str] = {}
         if self._api_username:
