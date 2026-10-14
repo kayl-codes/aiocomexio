@@ -59,7 +59,7 @@ def _block_head_path(x: float, y: float, w: float) -> str:
     )
 
 
-def _render_block(parts: list[str], geo: dict[str, Any], label: str, orphan: bool, hover: str) -> None:
+def _render_block(parts: list[str], geo: dict[str, Any], label: str, orphan: bool) -> None:
     x, y = geo["x"] + _PIN_LEN, geo["y"] + _BODY_PAD
     w = geo["w"] - 2 * _PIN_LEN
     h = geo["h"] - 2 * _BODY_PAD
@@ -67,7 +67,7 @@ def _render_block(parts: list[str], geo: dict[str, Any], label: str, orphan: boo
     parts.extend(
         [
             f'<rect class="{body_class}" x="{x:.1f}" y="{y:.1f}" width="{w:.0f}" height="{h:.0f}" '
-            f'rx="{_RADIUS:.1f}" stroke-width="1"><title>{escape(hover)}</title></rect>',
+            f'rx="{_RADIUS:.1f}" stroke-width="1"/>',
             f'<path class="block-head" d="{_block_head_path(x, y, w)}"/>',
             f'<text class="block-head-label" x="{x + w / 2:.1f}" '
             f'y="{geo["y"] + _ROW_H / 2 + 0.36 * _HEAD_FONT_SIZE:.1f}" '
@@ -129,7 +129,7 @@ def _render_pill(parts: list[str], geo: dict[str, Any], label: str, node_class: 
         node_class = "node-webio"
     parts.append(
         f'<rect class="{node_class}" x="{bx:.1f}" y="{by:.1f}" width="{bw:.0f}" height="{bh:.0f}" '
-        f'rx="{_RADIUS:.1f}" stroke-width="1"><title>{escape(label)}</title></rect>'
+        f'rx="{_RADIUS:.1f}" stroke-width="1"/>'
     )
     if geo["kind"] == "const":
         parts.append(
@@ -224,8 +224,13 @@ def _render_one_node(
     parts.append(f'<g class="{g_class}" data-label="{escape(label)}"{attrs}>')
     if geo["kind"] == "comment":
         _render_comment(parts, geo, label)
-    elif geo["kind"] == "block":
-        _render_block(parts, geo, label, elem_id not in connected, hover)
+        parts.append("</g>")
+        return
+    # The tooltip belongs to the whole group, so it shows over every part of the node: body,
+    # title bar, texts and the pin glyphs outside the body.
+    parts.append(f"<title>{escape(hover)}</title>")
+    if geo["kind"] == "block":
+        _render_block(parts, geo, label, elem_id not in connected)
     elif geo.get("inactive"):
         _render_pill(parts, geo, label, "node-inactive")
     else:

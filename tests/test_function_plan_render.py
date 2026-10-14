@@ -387,9 +387,64 @@ def test_with_block_values_never_stringifies_a_setting_name_that_is_not_a_str() 
     assert with_block_values("Oder", "4", _BLOCK, values) == "Oder\na: 3\nB: 2"
 
 
-def test_block_texts_and_title_bar_let_the_pointer_through_to_the_tooltip() -> None:
-    assert ".node-g text, .node-g .block-head { pointer-events: none; }" in render_constants._STYLE
+_SVG_NS = "{http://www.w3.org/2000/svg}"
+
+
+def test_node_tooltip_covers_the_whole_node_group(plan: dict[str, Any]) -> None:
+    # On the group, the tooltip also shows over pins, title bar and texts; nothing needs pointer-events.
+    root = ElementTree.fromstring(_render(plan, block_values={"4": {"a": "1"}}))
+    groups = [
+        g
+        for g in root.iter(f"{_SVG_NS}g")
+        if "node-g" in g.get("class", "").split() and g[0].get("class") != "node-comment"
+    ]
+
+    assert len(groups) > 1
+    for group in groups:
+        assert group[0].tag == f"{_SVG_NS}title", group.get("data-eid")
+        if group.get("data-eid") == "4":
+            assert group[0].text == "Oder\na: 1"
+        else:
+            # An XML parser turns the newline of a multi-line label into a space inside data-label.
+            assert " ".join((group[0].text or "").split()) == group.get("data-label")
+    assert all(rect.find(f"{_SVG_NS}title") is None for rect in root.iter(f"{_SVG_NS}rect"))
+    assert "pointer-events" not in render_constants._STYLE
     assert "pointer-events: none" in render_flow._STYLE.split(".flow-label", 1)[1].split("}", 1)[0]
+
+
+def test_unconnected_pill_and_block_carry_the_tooltip_on_the_group() -> None:
+    elements = {
+        "1": {"reference": {"type": 2, "ref_id": 7}, "name": "", "position_x": 0, "position_y": 0},
+        "2": {"reference": {"type": 5, "ref_id": 1}, "name": "", "position_x": 300, "position_y": 0},
+    }
+    svg = render_plan_svg(elements, {}, {}, {"7": {"name": "M7 Frei"}}, {}, {}, title="T")
+
+    groups = {g.get("data-eid"): g for g in ElementTree.fromstring(svg).iter(f"{_SVG_NS}g") if g.get("data-eid")}
+    for eid in ("1", "2"):
+        assert groups[eid][0].tag == f"{_SVG_NS}title"
+        rect = groups[eid].find(f"{_SVG_NS}rect")
+        assert rect is not None
+        assert rect.get("class") == "node-orphan"
+        assert groups[eid].find(f"{_SVG_NS}rect/{_SVG_NS}title") is None
+    assert groups["1"][0].text == "M7 Frei"
+
+
+def test_strip_xml_forbidden_matches_the_xml_char_production_for_every_bmp_character() -> None:
+    def forbidden(c: int) -> bool:
+        return c <= 0x08 or c in (0x0B, 0x0C, 0xFFFE, 0xFFFF) or 0x0E <= c <= 0x1F or 0xD800 <= c <= 0xDFFF
+
+    text = "".join(map(chr, range(0x10000)))
+
+    assert strip_xml_forbidden(text) == "".join(chr(c) for c in range(0x10000) if not forbidden(c))
+
+
+def test_comment_node_has_no_tooltip_and_keeps_the_pointer() -> None:
+    elements = {"1": {"reference": {"type": 14, "ref_id": 0}, "name": "Hinweis", "position_x": 0, "position_y": 0}}
+    svg = render_plan_svg(elements, {}, {}, {}, {}, {}, title="T")
+
+    group = next(g for g in ElementTree.fromstring(svg).iter(f"{_SVG_NS}g") if g.get("data-eid") == "1")
+    assert group.find(f"{_SVG_NS}title") is None
+    assert group.find(f"{_SVG_NS}text") is not None
 
 
 @pytest.mark.parametrize("block_values", ["x", 5, ["a"], ("a",), True])

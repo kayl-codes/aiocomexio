@@ -101,8 +101,9 @@ BlockValues = Mapping[str, Mapping[str, str]]
 _SETTING_AUTOHIDE = "autohide"
 # Every line boundary str.splitlines() knows (CRLF counts as one).
 _LINE_BREAK_RE = re.compile("\r\n|[\n\v\f\r\x1c-\x1e\x85  ]")
-# Every character XML 1.0 forbids; html.escape keeps them, so a single one makes the SVG unparsable.
-_XML_FORBIDDEN_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+# Every character XML 1.0 forbids, as a str.translate table that deletes them; html.escape keeps
+# them, so a single one makes the SVG unparsable.
+_XML_FORBIDDEN = dict.fromkeys([*range(0x09), 0x0B, 0x0C, *range(0x0E, 0x20), *range(0xD800, 0xE000), 0xFFFE, 0xFFFF])
 
 
 def with_block_values(label: str, elem_id: str, elem: dict[str, Any], block_values: BlockValues | None) -> str:
@@ -146,7 +147,7 @@ def strip_xml_forbidden(svg: str) -> str:
     Applied once to the finished SVG, so no text source (labels, comments, ports, settings, titles)
     can make it unparsable; the markup itself never contains such a character.
     """
-    return _XML_FORBIDDEN_RE.sub("", svg)
+    return svg.translate(_XML_FORBIDDEN)
 
 
 def _block_label(catalog: dict[str, Any], ref_id: str, elem_name: str) -> str:
