@@ -89,6 +89,7 @@ _PLAN_SAVE_CONNECTION_PATH = "/admin/function_function_module/saveconnection/"
 _PLAN_SAVE_POSITIONS_PATH = "/admin/function_function_module/saveelementspos/"
 _PLAN_DELETE_ELEMENTS_PATH = "/admin/function_function_module/deleteelements/"
 _PLAN_SAVE_COMMENT_PATH = "/admin/function_function_module/savefupcommentelement/"
+_PLAN_SAVE_BLOCK_SETTINGS_PATH = "/admin/function_function_module/savefubbaseconfig/"
 
 # The admin page still shows the login form ("Anmeldung") when the session is not logged in.
 _LOGIN_PAGE_MARKER = "Anmeldung"
@@ -1193,6 +1194,32 @@ class ComexioClient:
         form = {"Json": json.dumps(moves, separators=(",", ":")), "timestamp": _js_timestamp()}
         result = await self._plan_json(_PLAN_SAVE_POSITIONS_PATH, form, what=what)
         if str(result.get(_RESULT_KEY)) != "1":
+            raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
+
+    async def save_function_plan_block_settings(self, element_id: int, settings: Mapping[str, str]) -> None:
+        """Save the settings of one logic block ($FubBaseConfig) the way Comexio's editor does.
+
+        settings maps setting names to the string values Comexio stores (shutter travel times,
+        the extended view "autohide", ...); only the named settings are written, others stay.
+        Raises TypeError for settings that are not a mapping of str to str, ValueError for no
+        settings or an empty setting name (nothing is sent), and ComexioRequestRejectedError if
+        Comexio does not confirm the save.
+        """
+        _require_ints(element_id=element_id)
+        if not isinstance(settings, Mapping):
+            raise TypeError(f"settings must be a mapping of names to values, not {type(settings).__name__}")
+        if not settings:
+            raise ValueError("No block settings given")
+        _require_strs(**{f"settings[{name!r}]": value for name, value in settings.items()})
+        _require_strs(**{f"setting name {name!r}": name for name in settings})
+        if "" in settings:
+            raise ValueError("A block setting name must not be empty")
+        what = f"Saving block settings {sorted(settings)} of function plan element {element_id}"
+        form = {"id": str(element_id)} | {f"element_{name}": value for name, value in settings.items()}
+        form["timestamp"] = _js_timestamp()
+        result = await self._plan_json(_PLAN_SAVE_BLOCK_SETTINGS_PATH, form, what=what)
+        saved_key, saved_value = _PLAN_SAVED_CONFIRMATION
+        if str(result.get(saved_key)) != saved_value:
             raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
 
     async def delete_function_plan_elements(self, element_ids: Sequence[int]) -> None:
