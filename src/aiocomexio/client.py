@@ -133,6 +133,8 @@ _RUN_STATE_KEY_PREFIX = "fup_"
 _WEBIO_LIST_ID_FIELD = "Id"
 # fupValueData's answer for a stopped plan, observed live as "0:not_found".
 _NOT_RUNNING_SENTINEL_RE = re.compile(r"\d+:not_found")
+# A plain decimal as dashboard/refresh sends a live value: sign, ASCII digits, optional fraction (comma or dot).
+_PLAIN_DECIMAL_RE = re.compile(r"[+-]?[0-9]+(?:[.,][0-9]+)?")
 
 # save_fub form values: paper format ids and orientation ids as Comexio's plan dialog sends them.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
@@ -366,18 +368,20 @@ class ComexioClient:
         }
         return LiveStates(markers=markers, knx=knx)
 
-    async def get_io_live_states(self, ios: Iterable[tuple[int, str]]) -> dict[str, str]:
+    async def get_io_live_states(self, ios: Iterable[tuple[int | str, str]]) -> dict[str, str]:
         """Live values of physical IOs, all in one dashboard/refresh request of their own.
 
         ios are (extension id, IO id) pairs: the extension id is the key of the IO's extension
-        group in $FubModules["1"], the IO id its "Id". Returns {IO id: value as Comexio sent it}
+        group in $FubModules["1"] (an int or an integer string, like parse_config's "ext_id"),
+        the IO id its "Id". One IO id under two different extension ids is a ValueError.
+        Returns {IO id: value as Comexio sent it, "," normalized to "."}
         (a numeric string such as "74" or "9.96078"). An IO the answer leaves out, or answers
         with anything that is not a number — "0:not_found" for an inactive IO, a PHP warning —
-        is absent from the result, never 0: a caller keeps its last known value for it.
+        is absent from the result, never 0: a caller keeps its last known value for it. Such an
+        answer is logged at DEBUG if it is Comexio's "<n>:not_found" or missing, otherwise at
+        WARNING (one line per call).
         """
-        pairs = {io_id: ext_id for ext_id, io_id in ios}
-        _require_ints(**{f"ext_id[{io_id}]": ext_id for io_id, ext_id in pairs.items()})
-        _require_strs(**{f"io_id[{index}]": io_id for index, io_id in enumerate(pairs)})
+        pairs = _io_ext_ids(ios)
         if not pairs:
             return {}
         payload = {
@@ -389,12 +393,21 @@ class ComexioClient:
         if not isinstance(result, dict):
             raise ComexioDataError(f"IO live states response has no result object: {_excerpt(data)}")
         values: dict[str, str] = {}
+        unexpected: list[str] = []
         for io_id in pairs:
             raw = result.get(f"{_IO_LIVE_KEY_PREFIX}{io_id}")
-            if (value := _numeric_text(raw)) is None:
-                _LOGGER.debug("No live value for IO %s, dashboard/refresh answered %s", io_id, _excerpt(raw))
-            else:
+            if (value := _numeric_text(raw)) is not None:
                 values[io_id] = value
+                continue
+            _LOGGER.debug("No live value for IO %s, dashboard/refresh answered %s", io_id, _excerpt(raw))
+            if raw is not None and not (isinstance(raw, str) and _NOT_RUNNING_SENTINEL_RE.fullmatch(raw.strip())):
+                unexpected.append(f"{io_id}: {_excerpt(raw)}")
+        if unexpected:
+            _LOGGER.warning(
+                "Dropped %d unexpected IO live answers from dashboard/refresh (IO id: answer): %s",
+                len(unexpected),
+                "; ".join(unexpected),
+            )
         return values
 
     async def get_function_plan_connection_values(self, fub_id: int) -> dict[str, list[Any]]:
@@ -1656,20 +1669,48 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
     return values["min"], values["max"]
 
 
+def _io_ext_ids(ios: Iterable[tuple[int | str, str]]) -> dict[str, int]:
+    """{IO id: extension id as int} from (extension id, IO id) pairs; identical duplicates collapse.
+
+    TypeError for a bool or non-int/str extension id and a non-str IO id, ValueError for an extension
+    id that is not an integer string and for one IO id given with two different extension ids.
+    """
+    pairs: dict[str, int] = {}
+    for ext_id, io_id in ios:
+        _require_strs(**{f"io_id[{io_id!r}]": io_id})
+        ext = _ext_id_int(ext_id, io_id)
+        if pairs.setdefault(io_id, ext) != ext:
+            raise ValueError(f"IO {io_id} is given with two different extension ids ({pairs[io_id]} and {ext})")
+    return pairs
+
+
+def _ext_id_int(ext_id: Any, io_id: str) -> int:
+    """The extension id as int: an int or an integer string is accepted, a bool is not."""
+    if _is_int(ext_id):
+        return ext_id
+    if not isinstance(ext_id, str):
+        raise TypeError(f"ext_id[{io_id}] must be integers or integer strings, got {ext_id!r}")
+    if not (ext_id.isascii() and ext_id.isdigit()):
+        raise ValueError(f"ext_id[{io_id}] is not an integer string: {ext_id!r}")
+    return int(ext_id)
+
+
 def _numeric_text(raw: Any) -> str | None:
-    """raw as text if it is a finite number (a German decimal comma included), else None.
+    """raw as a normalized decimal string ("21,5" -> "21.5"), or None if it is no plain decimal number.
 
     dashboard/refresh answers a value as a string; an int or float is accepted as well, a bool
-    is not. "0:not_found" (inactive IO), "" or an error text yield None.
+    is not. Only an optional sign, digits and an optional fraction count: "0:not_found" (inactive
+    IO), "", an error text, "1_0", exponents, "inf" and "nan" yield None.
     """
     if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
         return None
-    text = str(raw).strip()
-    try:
-        number = float(text.replace(",", "."))
-    except ValueError:
-        return None
-    return text if math.isfinite(number) else None
+    if isinstance(raw, float):
+        if not math.isfinite(raw):
+            return None
+        text = format(Decimal(repr(raw)), "f")  # repr never switches to an exponent in "f"
+    else:
+        text = str(raw).strip()
+    return text.replace(",", ".") if _PLAIN_DECIMAL_RE.fullmatch(text) else None
 
 
 def _plan_running(raw: Any) -> bool | None:

@@ -409,7 +409,7 @@ async def test_get_io_live_states_sends_prefixed_io_keys_in_own_request(
 
     states = await logged_in.get_io_live_states([(1, "1"), (1, "12"), (1, "13"), (2, "21"), (1, "12")])
 
-    assert states == {"1": "74", "12": "0", "13": "9.96078", "21": "21,5"}
+    assert states == {"1": "74", "12": "0", "13": "9.96078", "21": "21.5"}
     (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
     assert json.loads(request.form["json"]) == {
         "io_1": {"action": "get", "ExtId": 1, "IOId": "1"},
@@ -420,7 +420,9 @@ async def test_get_io_live_states_sends_prefixed_io_keys_in_own_request(
 
 
 @pytest.mark.parametrize(
-    "answer", [None, "", "  ", "0:not_found", "12:not_found", "Warning: x", "nan", "inf", True, {"value": 1}, []]
+    "answer",
+    [None, "", "  ", "0:not_found", "12:not_found", "Warning: x", "nan", "inf", True, {"value": 1}, []]
+    + ["1_0", "1e3", "1.5E-2", "1 0", "+", "1,", ".5", "1.2.3", "٣", "-inf", float("inf"), float("nan")],
 )
 async def test_get_io_live_states_leaves_out_non_numeric_answers(
     logged_in: ComexioClient, comexio: FakeComexio, answer: Any
@@ -437,7 +439,8 @@ async def test_get_io_live_states_without_ios_sends_nothing(logged_in: ComexioCl
 
 
 @pytest.mark.parametrize(
-    ("ios", "match"), [([("1", "1")], "integers"), ([(True, "1")], "integers"), ([(1, 1)], "strings")]
+    ("ios", "match"),
+    [([(True, "1")], "integers"), ([(1.0, "1")], "integers"), ([(None, "1")], "integers"), ([(1, 1)], "strings")],
 )
 async def test_get_io_live_states_rejects_wrong_id_types(
     logged_in: ComexioClient, comexio: FakeComexio, ios: list[Any], match: str
@@ -445,6 +448,81 @@ async def test_get_io_live_states_rejects_wrong_id_types(
     with pytest.raises(TypeError, match=match):
         await logged_in.get_io_live_states(ios)
     assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
+
+
+@pytest.mark.parametrize("ext_id", ["x", "", "1.5", "-1", " 1", "٣"])
+async def test_get_io_live_states_rejects_non_integer_ext_id_strings(
+    logged_in: ComexioClient, comexio: FakeComexio, ext_id: str
+) -> None:
+    with pytest.raises(ValueError, match="integer string"):
+        await logged_in.get_io_live_states([(ext_id, "1")])
+    assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
+
+
+async def test_get_io_live_states_same_io_with_two_ext_ids_raises_before_any_request(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    with pytest.raises(ValueError, match="two different extension ids"):
+        await logged_in.get_io_live_states([(1, "5"), (2, "5")])
+    assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
+
+
+async def test_get_io_live_states_identical_pairs_collapse_across_int_and_string(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_5": "7"}})
+
+    assert await logged_in.get_io_live_states([(1, "5"), ("1", "5"), (1, "5")]) == {"5": "7"}
+    (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
+    assert json.loads(request.form["json"]) == {"io_5": {"action": "get", "ExtId": 1, "IOId": "5"}}
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [("21,5", "21.5"), (" -3,25 ", "-3.25"), ("+2", "+2"), ("0", "0"), (1.5, "1.5"), (1e-07, "0.0000001"), (3, "3")],
+)
+async def test_get_io_live_states_normalizes_the_decimal_comma(
+    logged_in: ComexioClient, comexio: FakeComexio, answer: Any, expected: str
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_1": answer}})
+
+    assert await logged_in.get_io_live_states([(1, "1")]) == {"1": expected}
+
+
+async def test_get_io_live_states_warns_once_about_unexpected_answers(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_json(
+        "POST",
+        DASHBOARD_REFRESH_PATH,
+        {"result": {"io_1": "Warning: undefined index", "io_2": "0:not_found", "io_3": "", "io_5": "4"}},
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.client"):
+        states = await logged_in.get_io_live_states([(1, "1"), (1, "2"), (1, "3"), (1, "4"), (1, "5")])
+
+    assert states == {"5": "4"}
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    message = warning.getMessage()
+    assert "Dropped 2 unexpected IO live answers" in message
+    assert "1: 'Warning: undefined index'" in message
+    assert "3: ''" in message
+    # The not_found sentinel (IO 2) and the absent answer (IO 4) stay out of the warning.
+    assert "not_found" not in message
+    assert "2: " not in message
+    assert "4: " not in message
+
+
+async def test_get_io_live_states_not_found_and_absent_answers_do_not_warn(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_1": "0:not_found", "io_2": " 7:not_found\n"}})
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.client"):
+        assert await logged_in.get_io_live_states([(1, "1"), (1, "2"), (1, "3")]) == {}
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert "No live value for IO 1" in caplog.text
 
 
 @pytest.mark.parametrize("payload", [{"result": []}, {"error": "x"}, ["result"]])

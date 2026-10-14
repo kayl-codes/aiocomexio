@@ -1,10 +1,12 @@
 """parse_config: scraped Comexio config -> markers / IOs / KNX / Web-IO commands."""
 
+import json
 from typing import Any
 
 import pytest
 from syrupy.assertion import SnapshotAssertion
 
+from aiocomexio import ComexioClient
 from aiocomexio.config import (
     TYPE_DIGITAL,
     ParseOptions,
@@ -17,6 +19,7 @@ from aiocomexio.config import (
 )
 from aiocomexio.const import MarkerKind, WebioClass
 from tests.common import load_json_fixture
+from tests.fake_comexio import DASHBOARD_REFRESH_PATH, FakeComexio
 
 
 def _parse(conf: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -420,3 +423,18 @@ def test_non_mapping_fub_modules_yields_empty_result() -> None:
     result = parse_config({"FubModules": ["garbage"]})
 
     assert (result["markers"], result["io"], result["knx"]) == ([], [], [])
+
+
+async def test_io_ext_ids_from_parse_config_feed_get_io_live_states(
+    basic_result: dict[str, Any], logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """parse_config keeps ext_id a str; (ext_id, id) pairs must go into get_io_live_states unchanged."""
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_11": "1", "io_21": "2,5"}})
+
+    states = await logged_in.get_io_live_states((io["ext_id"], io["id"]) for io in basic_result["io_all"])
+
+    assert states == {"11": "1", "21": "2.5"}
+    (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
+    sent = json.loads(request.form["json"])
+    assert sent["io_11"] == {"action": "get", "ExtId": 1, "IOId": "11"}
+    assert sent["io_21"] == {"action": "get", "ExtId": 2, "IOId": "21"}
