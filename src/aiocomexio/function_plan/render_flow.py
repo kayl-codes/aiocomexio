@@ -17,7 +17,7 @@ from typing import Any
 
 from .analysis import build_wiring
 from .render_geometry import _fit_to_bounding_box
-from .render_labels import resolve_element_label
+from .render_labels import BlockValues, resolve_element_label, strip_xml_forbidden, with_block_values
 from .render_selfreset import detect_self_reset_cycles
 from .render_values import ItemsById, element_id_sort_key
 
@@ -53,7 +53,8 @@ _STYLE = """
   .flow-box-terminal { fill: #e6f4ea; stroke: #2e7d32; }
   .flow-box-decision { fill: #f3e8fd; stroke: #7e57c2; }
   .flow-box-cycle { fill: #fff3e0; stroke: #e69138; }
-  .flow-label { fill: #111111; text-anchor: middle; dominant-baseline: middle; }
+  /* pointer-events: none: the label sits on the box that carries the title tooltip. */
+  .flow-label { fill: #111111; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
   .flow-legend-label { fill: #333333; dominant-baseline: middle; }
   .flow-edge { stroke: #555555; fill: none; }
   .flow-arrow { fill: #555555; }
@@ -272,6 +273,7 @@ def _build_boxes(
     webio_by_id: ItemsById,
     ios_by_id: ItemsById,
     cycle_ids: set[str],
+    block_values: BlockValues | None = None,
 ) -> dict[str, dict[str, Any]]:
     """One box per wired element — just enough shape info for _position_boxes/drawing. No pin/
     port/type detail (that's the whole point of this simplified diagram), but a per-role
@@ -289,6 +291,7 @@ def _build_boxes(
         boxes[eid] = {
             "label": label,
             "full_label": full_label,
+            "hover": with_block_values(full_label, eid, elements[eid], block_values),
             "w": w,
             "h": h,
             "cycle": eid in cycle_ids,
@@ -565,7 +568,7 @@ def _render_boxes_svg(boxes: dict[str, dict[str, Any]]) -> list[str]:
         box = boxes[eid]
         box_class = "flow-box-cycle" if box["cycle"] else _SHAPE_CSS[box["shape"]]
         cx, cy = box["x"] + box["w"] / 2, box["y"] + box["h"] / 2
-        title = f"<title>{escape(box['full_label'])}</title>"
+        title = f"<title>{escape(box['hover'])}</title>"
         if box["shape"] == _SHAPE_DECISION:
             shape_svg = f'<polygon class="{box_class}" points="{_diamond_points(box)}">{title}</polygon>'
         else:
@@ -655,6 +658,7 @@ def render_flow_svg(
     ios_by_id: ItemsById,
     title: str,
     title_suffix: str = "",
+    block_values: BlockValues | None = None,
 ) -> tuple[str, int]:
     """Render a plain box-and-arrow flow chart of the plan's signal order.
 
@@ -662,6 +666,10 @@ def render_flow_svg(
     are left out; a flow diagram only makes sense for actual signal flow. Returns
     (svg, skipped_count); when non-zero, skipped_count is also folded into the returned
     title_suffix so the diagram itself says how many were hidden.
+
+    block_values: optional {element id: {setting name: value}} (see render_plan_svg); a block's
+    hover text lists them as "Name: Value" lines. Like there, block_values must describe the same
+    plan state as elements (a backup snapshot: its own stored settings, never the live ones).
     """
     incoming, outgoing = build_wiring(connections)
     wired_ids = _wired_element_ids(elements, incoming, outgoing)
@@ -678,7 +686,7 @@ def render_flow_svg(
     layer_of = _assign_layers(wired_ids, _predecessors(wired_ids, incoming, back_edges))
     reset_groups = detect_self_reset_cycles(elements, connections, catalog)
     cycle_ids = {eid for group in reset_groups for eid in group if eid in wired_ids}
-    boxes = _build_boxes(wired_ids, elements, catalog, markers_by_id, webio_by_id, ios_by_id, cycle_ids)
+    boxes = _build_boxes(wired_ids, elements, catalog, markers_by_id, webio_by_id, ios_by_id, cycle_ids, block_values)
     edges = _collect_edges(incoming, boxes)
     preds_of, succs_of = _neighbor_maps(edges)
     _push_sinks_to_bottom(layer_of, succs_of)
@@ -701,4 +709,4 @@ def render_flow_svg(
     parts += _render_edges_svg(edges, boxes)
     parts += _render_boxes_svg(boxes)
     parts.append("</svg>")
-    return "\n".join(parts), skipped_count
+    return strip_xml_forbidden("\n".join(parts)), skipped_count
