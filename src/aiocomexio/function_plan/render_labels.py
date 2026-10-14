@@ -5,6 +5,7 @@ entry point (used by render.render_plan_svg for title/hover text, and by homeass
 services for backup/search labels) — pure lookup/formatting, no SVG markup, no geometry.
 """
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -98,6 +99,7 @@ def _calendar_function_tooltip(catalog: dict[str, Any], ref_id: str, sun_times: 
 BlockValues = Mapping[str, Mapping[str, str]]
 # The extended-view flag lives in the same table but is a display state, not an instance setting.
 _SETTING_AUTOHIDE = "autohide"
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
 
 
 def with_block_values(label: str, elem_id: str, elem: dict[str, Any], block_values: BlockValues | None) -> str:
@@ -106,15 +108,28 @@ def with_block_values(label: str, elem_id: str, elem: dict[str, Any], block_valu
     The catalog carries no readable names for settings, so the raw name Comexio stores is shown.
     Sorted case-insensitively by name so the text is stable. Anything but a block, or a block without
     settings (also one that only has the internal "autohide" flag), keeps its label unchanged.
-    Entries for element ids that are not in the plan, for elements that are not blocks, and
-    settings whose name is not a str are ignored.
+    Entries for element ids that are not in the plan, for elements that are not blocks, an element
+    "reference" or a block_values entry that is not a Mapping, and settings whose name or value is
+    not a str are ignored. A line break (CR, LF, CRLF) inside a name or value becomes a space, so
+    a value cannot forge extra hover lines.
     """
-    if (elem.get("reference") or {}).get("type") != 5 or not block_values:
+    reference = elem.get("reference")
+    if not isinstance(reference, Mapping) or reference.get("type") != 5 or not block_values:
         return label
-    settings = block_values.get(elem_id) or {}
-    names = [name for name in settings if isinstance(name, str) and name != _SETTING_AUTOHIDE]
-    lines = [f"{name}: {settings[name]}" for name in sorted(names, key=str.casefold)]
+    settings = block_values.get(elem_id)
+    if not isinstance(settings, Mapping):
+        return label
+    lines = [
+        f"{_one_line(name)}: {_one_line(value)}"
+        for name, value in sorted(settings.items(), key=lambda item: str(item[0]).casefold())
+        if isinstance(name, str) and name != _SETTING_AUTOHIDE and isinstance(value, str)
+    ]
     return "\n".join([label, *lines])
+
+
+def _one_line(text: str) -> str:
+    """text with every line break replaced by a space."""
+    return _LINE_BREAK_RE.sub(" ", text)
 
 
 def _block_label(catalog: dict[str, Any], ref_id: str, elem_name: str) -> str:

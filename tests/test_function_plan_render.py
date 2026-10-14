@@ -297,3 +297,28 @@ def test_with_block_values_ignores_unknown_ids_non_blocks_and_non_str_names() ->
     assert with_block_values("Oder", "4", _BLOCK, values) == "Oder\na: 1"
     assert with_block_values("Oder", "5", _BLOCK, values) == "Oder"
     assert with_block_values("M1", "4", {"reference": {"type": 2}}, values) == "M1"
+
+
+def test_with_block_values_skips_settings_whose_value_is_not_a_str() -> None:
+    values: Any = {"4": {"n": 5, "f": 1.5, "none": None, "flag": True, "ok": "1"}}
+
+    assert with_block_values("Oder", "4", _BLOCK, values) == "Oder\nok: 1"
+
+
+def test_with_block_values_keeps_a_value_from_forging_extra_hover_lines() -> None:
+    values = {"4": {"a": "1\nforged: 9", "b": "x\r\ny", "c": "p\rq", "d\ne": "v"}}
+
+    text = with_block_values("Oder", "4", _BLOCK, values)
+
+    assert text == "Oder\na: 1 forged: 9\nb: x y\nc: p q\nd e: v"
+    assert len(text.split("\n")) == 5
+
+
+@pytest.mark.parametrize("entry", [None, "x", 5, ["a", "b"], ("a",)])
+def test_with_block_values_ignores_a_block_values_entry_that_is_not_a_mapping(entry: Any) -> None:
+    assert with_block_values("Oder", "4", _BLOCK, {"4": entry}) == "Oder"
+
+
+@pytest.mark.parametrize("reference", [None, "x", 5, [5], ["type", 5]])
+def test_with_block_values_ignores_an_element_reference_that_is_not_a_mapping(reference: Any) -> None:
+    assert with_block_values("Oder", "4", {"reference": reference}, {"4": {"a": "1"}}) == "Oder"
