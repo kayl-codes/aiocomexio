@@ -3,6 +3,8 @@
 import base64
 import html
 import json
+import logging
+import math
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -101,7 +103,7 @@ async def test_set_value_with_unencodable_api_password_fails_before_sending(
 
 
 async def test_set_knx_and_io_values_address_their_target(api_client: ComexioClient, comexio: FakeComexio) -> None:
-    comexio.serve_text("GET", API_PATH, "")
+    comexio.serve_text("GET", API_PATH, "1")
 
     await api_client.set_knx_value(3, 1)
     await api_client.set_io_value("UD 1", "QD2", 0)
@@ -111,8 +113,223 @@ async def test_set_knx_and_io_values_address_their_target(api_client: ComexioCli
     assert io.query == {"action": "set", "value": "0", "ext": "UD 1", "io": "QD2"}
 
 
+async def test_set_io_value_percent_encodes_spaces_in_the_extension_name(
+    api_client: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+
+    await api_client.set_io_value("LED-Dimmer A3", "Q1", 50)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert "ext=LED-Dimmer%20A3" in request.raw_path
+    assert "+" not in request.raw_path
+    assert request.query["ext"] == "LED-Dimmer A3"
+
+
+@pytest.mark.parametrize(
+    ("call", "target", "query"),
+    [
+        (
+            lambda c: c.set_io_value("LED-Dimmer A3", "Q1", 50),
+            "IO 'Q1' of 'LED-Dimmer A3'",
+            {"action": "set", "value": "50", "ext": "LED-Dimmer A3", "io": "Q1"},
+        ),
+        (lambda c: c.set_marker_value(5, 1), "marker M5", {"action": "set", "value": "1", "marker": "M5"}),
+        (lambda c: c.set_knx_value(3, 1), "KNX object K3", {"action": "set", "value": "1", "knx": "K3"}),
+    ],
+)
+async def test_set_value_not_found_answer_raises_naming_the_target(
+    api_client: ComexioClient,
+    comexio: FakeComexio,
+    call: Callable[[ComexioClient], Awaitable[None]],
+    target: str,
+    query: dict[str, str],
+) -> None:
+    comexio.serve_text("GET", API_PATH, "0:not_found")
+
+    with pytest.raises(ComexioRequestRejectedError, match=re.escape(target)):
+        await call(api_client)
+
+    # The rejection must come from the server's answer, not from a check before the request went out.
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query == query
+
+
+_AWKWARD_EXT_NAMES = ["A&B", "A#B", "A+B", "A%B", "A%41", "A/B", "A=B", "A?B", "Küche ä", "100% & #1 + a=b/c?d"]
+
+
+@pytest.mark.parametrize("ext", _AWKWARD_EXT_NAMES)
+async def test_set_io_value_round_trips_awkward_extension_names(
+    api_client: ComexioClient, comexio: FakeComexio, ext: str
+) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+
+    await api_client.set_io_value(ext, "Q1", 1)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    # The characters that would split or end the query never go out raw, and "+" is never a space.
+    # yarl may leave "?" and "/" literal (legal in a query), so only the round trip pins those.
+    query_part = request.raw_path.split("?", 1)[1]
+    ext_part = query_part.split("ext=", 1)[1].split("&io=", 1)[0]
+    assert query_part.count("&") == 3
+    assert not set(ext_part) & set("&#+= ")
+    # A raw "%" followed by two hex digits ("A%41") would decode to another name, so every "%" goes out as "%25".
+    assert ext_part.count("%25") == ext.count("%")
+    assert ext_part.isascii()
+    assert request.query == {"action": "set", "value": "1", "ext": ext, "io": "Q1"}
+
+
+async def test_set_io_value_encodes_an_umlaut_as_utf8(api_client: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+
+    await api_client.set_io_value("Küche", "Q1", 1)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert "ext=K%C3%BCche" in request.raw_path
+
+
+@pytest.mark.parametrize("answer", ["0:not_found\n", "  5:not_found ", "5:not_found", "12:not_found\r\n"])
+async def test_set_value_padded_or_numbered_not_found_answer_raises(
+    api_client: ComexioClient, comexio: FakeComexio, answer: str
+) -> None:
+    comexio.serve_text("GET", API_PATH, answer)
+
+    with pytest.raises(ComexioRequestRejectedError, match="marker M5"):
+        await api_client.set_marker_value(5, 1)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query == {"action": "set", "value": "1", "marker": "M5"}
+
+
+@pytest.mark.parametrize("answer", ["error: not_found in table", "", "0", "ok"])
+async def test_set_value_unknown_answer_warns_without_raising(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, answer: str
+) -> None:
+    comexio.serve_text("GET", API_PATH, answer)
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        await api_client.set_marker_value(5, 1)
+
+    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "Writing marker M5" in record.getMessage()
+    assert "instead of '1'" in record.getMessage()
+    assert (answer or "''") in record.getMessage()
+
+
+async def test_set_io_value_warning_quotes_names_so_a_newline_cannot_forge_a_log_line(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_text("GET", API_PATH, "ok")
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        await api_client.set_io_value("UD 1\nWARNING forged", "Q1\r", 1)
+
+    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    message = record.getMessage()
+    assert "\n" not in message
+    assert "\r" not in message
+    assert "Writing IO 'Q1\\r' of 'UD 1\\nWARNING forged'" in message
+
+
+async def test_set_value_accepted_answer_does_not_warn(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_text("GET", API_PATH, " 1\n")
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        await api_client.set_marker_value(5, 1)
+
+    assert not caplog.records
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query == {"action": "set", "value": "1", "marker": "M5"}
+
+
+@pytest.mark.parametrize(("value", "expected"), [(0.5, "0.5"), (-1, "-1"), (50.0, "50.0"), (1, "1")])
+async def test_set_value_formats_the_value_as_str(
+    api_client: ComexioClient, comexio: FakeComexio, value: float, expected: str
+) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+
+    await api_client.set_marker_value(5, value)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query["value"] == expected == str(value)
+
+
+async def test_set_value_accepted_answer_succeeds(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        await api_client.set_io_value("LED-Dimmer A3", "Q1", 50)
+
+    assert not caplog.records
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query == {"action": "set", "value": "50", "ext": "LED-Dimmer A3", "io": "Q1"}
+
+
+@pytest.mark.parametrize(("value", "expected"), [(1e16, "1e+16"), (1e-07, "1e-07")])
+async def test_set_value_exponent_values_round_trip_without_a_raw_plus(
+    api_client: ComexioClient, comexio: FakeComexio, value: float, expected: str
+) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+
+    await api_client.set_marker_value(5, value)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert "+" not in request.raw_path
+    assert request.query["value"] == expected
+    if "+" in expected:
+        assert "value=1e%2B16" in request.raw_path
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+async def test_set_value_rejects_non_finite_values_before_sending(
+    api_client: ComexioClient, comexio: FakeComexio, value: float
+) -> None:
+    with pytest.raises(ValueError, match="not a finite number"):
+        await api_client.set_marker_value(5, value)
+    assert comexio.received_at("GET", API_PATH) == []
+
+
+async def test_set_value_accepts_a_huge_int_without_overflow(api_client: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+
+    await api_client.set_marker_value(5, 10**400)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query["value"] == "1" + "0" * 400
+
+
+async def test_set_value_not_found_with_trailing_text_only_warns(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_text("GET", API_PATH, "0:not_found extra")
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        await api_client.set_marker_value(5, 1)
+
+    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "0:not_found extra" in record.getMessage()
+
+
+async def test_set_value_on_the_manual_query_url_sends_credentials_and_maps_401(
+    api_client: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+    await api_client.set_io_value("LED-Dimmer A3", "Q1", 50)
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.authorization == f"Basic {base64.b64encode(b'api:api-secret').decode()}"
+    assert "ext=LED-Dimmer%20A3" in request.raw_path
+
+    comexio.serve_text("GET", API_PATH, "", status=401)
+    with pytest.raises(ComexioAuthenticationError, match="API credentials"):
+        await api_client.set_io_value("LED-Dimmer A3", "Q1", 50)
+
+
 async def test_set_value_without_api_user_sends_no_credentials(logged_in: ComexioClient, comexio: FakeComexio) -> None:
-    comexio.serve_text("GET", API_PATH, "")
+    comexio.serve_text("GET", API_PATH, "1")
 
     await logged_in.set_marker_value(5, 1)
 
