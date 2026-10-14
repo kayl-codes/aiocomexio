@@ -397,7 +397,7 @@ class ComexioClient:
         with anything that is not a number — "0:not_found" for an inactive IO, a PHP warning —
         is absent from the result, never 0: a caller keeps its last known value for it. Such an
         answer is logged at DEBUG if it is Comexio's "<n>:not_found" or the key is missing, otherwise
-        (an explicit null included) at WARNING (one line per call, IO ids shown as repr).
+        (an explicit null included) at WARNING (one line per call, IO ids as repr, answer types only).
         If the answer holds none of the requested IOs at all (a format change or wrong ids), that is
         one WARNING as well, since DEBUG lines would hide it.
         """
@@ -422,7 +422,7 @@ class ComexioClient:
             )
         if unexpected:
             _LOGGER.warning(
-                "Dropped %d unexpected IO live answers from dashboard/refresh (IO id: answer): %s",
+                "Dropped %d unexpected IO live answers from dashboard/refresh (IO id: answer type): %s",
                 len(unexpected),
                 "; ".join(unexpected),
             )
@@ -1743,7 +1743,10 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
 
 
 def _collect_io_values(result: dict[str, Any], io_ids: Iterable[str]) -> tuple[dict[str, str], list[str]]:
-    """({IO id: numeric text}, ["IO id: answer", ...] for answers that are neither a number nor not_found)."""
+    """({IO id: numeric text}, ["IO id: answer type", ...] for answers that are neither a number nor not_found).
+
+    The type, not the answer: an unexpected format may still wrap an IO reading, which stays at DEBUG.
+    """
     values: dict[str, str] = {}
     unexpected: list[str] = []
     for io_id in io_ids:
@@ -1757,7 +1760,7 @@ def _collect_io_values(result: dict[str, Any], io_ids: Iterable[str]) -> tuple[d
         # An absent key and Comexio's not_found sentinel are expected; a key that is present with
         # JSON null (or anything else that is no number) is not.
         if key in result and not (isinstance(raw, str) and _NOT_RUNNING_SENTINEL_RE.fullmatch(raw.strip())):
-            unexpected.append(f"{io_id!r}: {_excerpt(raw)}")
+            unexpected.append(f"{io_id!r}: {type(raw).__name__}")
     return values, unexpected
 
 

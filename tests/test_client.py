@@ -557,8 +557,11 @@ async def test_get_io_live_states_warns_once_about_unexpected_answers(
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     message = warning.getMessage()
     assert "Dropped 2 unexpected IO live answers" in message
-    assert "'1': 'Warning: undefined index'" in message
-    assert "'3': ''" in message
+    assert "'1': str" in message
+    assert "'3': str" in message
+    # The answer itself could wrap an IO reading: it stays at DEBUG, out of the warning.
+    assert "undefined index" not in message
+    assert "undefined index" in caplog.text
     # The not_found sentinel (IO 2) and the absent answer (IO 4) stay out of the warning.
     assert "not_found" not in message
     assert "'2': " not in message
@@ -578,7 +581,7 @@ async def test_get_io_live_states_explicit_null_warns_but_absent_key_does_not(
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     message = warning.getMessage()
     assert "Dropped 1 unexpected IO live answers" in message
-    assert "'1': None" in message
+    assert "'1': NoneType" in message
     assert "'3'" not in message
 
 
