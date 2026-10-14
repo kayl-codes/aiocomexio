@@ -623,9 +623,29 @@ async def test_load_all_function_plans_strict_requires_the_connections_collectio
     lenient = await logged_in.load_all_function_plans()
 
     assert strict == {2: {"elements": {}, "scenes": [], "connections": {}}}
-    assert "plan 1" in caplog.text
-    assert "plan 3" in caplog.text
+    for fub_id in (1, 3):
+        assert (
+            f"Skipping bulk function plan {fub_id}: payload has no elements or no connections collection" in caplog.text
+        )
     assert sorted(lenient) == [1, 2, 3]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"connections": {}}, {"elements": 5, "connections": {}}],
+    ids=["elements-missing", "elements-wrong-type"],
+)
+async def test_load_all_function_plans_strict_skips_a_plan_without_a_real_elements_collection(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, payload: dict[str, Any]
+) -> None:
+    comexio.serve_json("GET", LOAD_ALL_ELEMENTS_PATH, {"1": payload, "2": {"elements": {}, "connections": {}}})
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        strict = await logged_in.load_all_function_plans(strict=True)
+
+    assert sorted(strict) == [2]
+    assert "Skipping bulk function plan 1: payload has no elements or no connections collection" in caplog.text
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
 
 async def test_load_all_function_plans_with_empty_filter_skips_the_request(

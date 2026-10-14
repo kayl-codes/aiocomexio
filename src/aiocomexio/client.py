@@ -432,8 +432,8 @@ class ComexioClient:
         Comexio serializes requests server-side, so one bulk call beats N per-plan calls. A
         malformed entry is skipped with a warning; strict=True also skips entries without a real
         elements or connections collection (an empty one is real), like load_function_plan(strict=True)
-        does. A requested plan the server leaves
-        out is absent from the result.
+        does. A plan skipped by strict mode is absent from the result, just like a plan the server
+        leaves out or one that does not exist, and is logged at WARNING.
         """
         wanted = None if fub_ids is None else set(fub_ids)
         if wanted is not None and not wanted:
