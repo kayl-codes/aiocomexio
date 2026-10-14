@@ -1180,13 +1180,19 @@ class ComexioClient:
 
         settings maps setting names to the string values Comexio stores (shutter travel times,
         the extended view "autohide", ...); only the named settings are written, others stay.
-        Raises ComexioRequestRejectedError if Comexio does not confirm the save.
+        Raises TypeError for settings that are not a mapping of str to str, ValueError for no
+        settings or an empty setting name (nothing is sent), and ComexioRequestRejectedError if
+        Comexio does not confirm the save.
         """
         _require_ints(element_id=element_id)
-        if not isinstance(settings, Mapping) or not settings:
+        if not isinstance(settings, Mapping):
+            raise TypeError(f"settings must be a mapping of names to values, not {type(settings).__name__}")
+        if not settings:
             raise ValueError("No block settings given")
         _require_strs(**{f"settings[{name!r}]": value for name, value in settings.items()})
         _require_strs(**{f"setting name {name!r}": name for name in settings})
+        if "" in settings:
+            raise ValueError("A block setting name must not be empty")
         what = f"Saving block settings {sorted(settings)} of function plan element {element_id}"
         form = {"id": str(element_id)} | {f"element_{name}": value for name, value in settings.items()}
         form["timestamp"] = _js_timestamp()

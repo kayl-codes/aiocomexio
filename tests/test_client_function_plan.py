@@ -608,7 +608,7 @@ async def test_save_function_plan_block_settings(logged_in: ComexioClient, comex
     assert request.form == {"id": "58", "element_autohide": "1", "element_runtime": "12.5"}
 
 
-@pytest.mark.parametrize("answer", [{"saved": 0}, {"saved": False}, {"error": "denied"}, {}])
+@pytest.mark.parametrize("answer", [{"saved": 0}, {"saved": False}, {"saved": True}, {"error": "denied"}, {}])
 async def test_save_function_plan_block_settings_unconfirmed_is_rejected(
     logged_in: ComexioClient, comexio: FakeComexio, answer: dict[str, Any]
 ) -> None:
@@ -631,6 +631,10 @@ async def test_save_function_plan_block_settings_accepts_string_or_int_flag(
     ("element_id", "settings", "error"),
     [
         (58, {}, ValueError),
+        (58, {"": "1"}, ValueError),
+        (58, "abc", TypeError),
+        (58, ["autohide"], TypeError),
+        (58, None, TypeError),
         (58, {"autohide": 1}, TypeError),
         (58, {1: "1"}, TypeError),
         ("58", {"autohide": "1"}, TypeError),
