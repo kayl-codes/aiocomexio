@@ -445,6 +445,8 @@ def test_comment_node_has_no_tooltip_and_keeps_the_pointer() -> None:
     group = next(g for g in ElementTree.fromstring(svg).iter(f"{_SVG_NS}g") if g.get("data-eid") == "1")
     assert group.find(f"{_SVG_NS}title") is None
     assert group.find(f"{_SVG_NS}text") is not None
+    # Neither the style block nor an inline attribute may take the pointer from the comment text.
+    assert "pointer-events" not in svg
 
 
 @pytest.mark.parametrize("block_values", ["x", 5, ["a"], ("a",), True])
