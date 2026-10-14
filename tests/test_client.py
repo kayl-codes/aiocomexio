@@ -475,6 +475,13 @@ async def test_get_io_live_states_rejects_non_integer_ext_id_strings(
     assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
 
 
+async def test_get_io_live_states_rejects_negative_int_ext_id(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    # The int must not get further than its string form "-1", which is refused as no integer string.
+    with pytest.raises(ValueError, match="must not be negative"):
+        await logged_in.get_io_live_states([(-1, "1")])
+    assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
+
+
 async def test_get_io_live_states_same_io_with_two_ext_ids_raises_before_any_request(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:

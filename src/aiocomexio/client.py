@@ -377,7 +377,7 @@ class ComexioClient:
         """Live values of physical IOs, all in one dashboard/refresh request of their own.
 
         ios are (extension id, IO id) pairs: the extension id is the key of the IO's extension
-        group in $FubModules["1"] (an int or an integer string, like parse_config's "ext_id"),
+        group in $FubModules["1"] (a non-negative int or digit string, like parse_config's "ext_id"),
         the IO id its "Id". An integer string counts by value: "007" is extension 7. One IO id under
         two different extension ids is a ValueError.
         Returns {IO id: value as Comexio sent it, "," normalized to "."}
@@ -1751,8 +1751,8 @@ def _collect_io_values(result: dict[str, Any], io_ids: Iterable[str]) -> tuple[d
 def _io_ext_ids(ios: Iterable[tuple[int | str, str]]) -> dict[str, int]:
     """{IO id: extension id as int} from (extension id, IO id) pairs; identical duplicates collapse.
 
-    TypeError for a bool or non-int/str extension id and a non-str IO id, ValueError for an extension
-    id that is not an integer string and for one IO id given with two different extension ids.
+    TypeError for a bool or non-int/str extension id and a non-str IO id, ValueError for a negative
+    extension id, one that is not a digit string and for one IO id given with two different extension ids.
     """
     pairs: dict[str, int] = {}
     for ext_id, io_id in ios:
@@ -1764,8 +1764,10 @@ def _io_ext_ids(ios: Iterable[tuple[int | str, str]]) -> dict[str, int]:
 
 
 def _ext_id_int(ext_id: Any, io_id: str) -> int:
-    """The extension id as int: an int or an integer string is accepted, a bool is not."""
+    """The extension id as int: a non-negative int or digit string is accepted, a bool is not."""
     if _is_int(ext_id):
+        if ext_id < 0:
+            raise ValueError(f"ext_id[{io_id}] must not be negative, got {ext_id!r}")
         return ext_id
     if not isinstance(ext_id, str):
         raise TypeError(f"ext_id[{io_id}] must be integers or integer strings, got {ext_id!r}")
