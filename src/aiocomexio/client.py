@@ -108,7 +108,6 @@ _PKCS1_PADDING_BYTES = 11
 _KNX_LIVE_KEY_PREFIX = "knxIo_11_"
 _MESSAGES_KEY = "messages"
 _RESULT_KEY = "result"
-_SAVED_KEY = "saved"
 
 # $FubModules type of markers; delete_element needs it to know which object list the id is in.
 _MARKER_FUB_MODULE_TYPE = "2"
@@ -1197,7 +1196,8 @@ class ComexioClient:
         form = {"id": str(element_id)} | {f"element_{name}": value for name, value in settings.items()}
         form["timestamp"] = _js_timestamp()
         result = await self._plan_json(_PLAN_SAVE_BLOCK_SETTINGS_PATH, form, what=what)
-        if str(result.get(_SAVED_KEY)) != "1":
+        saved_key, saved_value = _PLAN_SAVED_CONFIRMATION
+        if str(result.get(saved_key)) != saved_value:
             raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
 
     async def delete_function_plan_elements(self, element_ids: Sequence[int]) -> None:

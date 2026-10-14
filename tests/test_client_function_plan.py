@@ -604,18 +604,33 @@ async def test_save_function_plan_block_settings(logged_in: ComexioClient, comex
     await logged_in.save_function_plan_block_settings(58, {"autohide": "1", "runtime": "12.5"})
 
     (request,) = comexio.received_at("POST", SAVE_BLOCK_SETTINGS_PATH)
-    assert request.form.pop("timestamp")
+    assert re.fullmatch(_TIMESTAMP_RE, request.form.pop("timestamp"))
     assert request.form == {"id": "58", "element_autohide": "1", "element_runtime": "12.5"}
 
 
-@pytest.mark.parametrize("answer", [{"saved": 0}, {"saved": False}, {"saved": True}, {"error": "denied"}, {}])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"saved": 0},
+        {"saved": False},
+        {"saved": True},
+        {"saved": 1.0},
+        {"saved": "true"},
+        {"saved": [1]},
+        {"error": "denied"},
+        {},
+    ],
+)
 async def test_save_function_plan_block_settings_unconfirmed_is_rejected(
     logged_in: ComexioClient, comexio: FakeComexio, answer: dict[str, Any]
 ) -> None:
     comexio.serve_json("POST", SAVE_BLOCK_SETTINGS_PATH, answer)
 
-    with pytest.raises(ComexioRequestRejectedError, match="not confirmed"):
-        await logged_in.save_function_plan_block_settings(58, {"autohide": "1"})
+    with pytest.raises(ComexioRequestRejectedError, match="not confirmed") as excinfo:
+        await logged_in.save_function_plan_block_settings(58, {"autohide": "1", "runtime": "2"})
+
+    assert "element 58" in str(excinfo.value)
+    assert "['autohide', 'runtime']" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("saved", ["1", 1])
