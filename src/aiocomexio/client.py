@@ -2,7 +2,9 @@
 
 The client works on an aiohttp.ClientSession the caller creates and owns (see
 session.session_kwargs for the settings it needs). It never closes that session. Every call
-either returns real data or raises a ComexioError subclass.
+either returns real data or raises a ComexioError subclass. The one exception is an invalid
+argument (a non-finite value for a set_*_value call, a non-numeric command_id, ...): that
+raises ValueError or TypeError before anything is sent, as the method's docstring states.
 """
 
 import base64
@@ -18,7 +20,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from http import HTTPStatus
 from typing import Any, TypeIs
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -87,6 +89,7 @@ _PLAN_SAVE_CONNECTION_PATH = "/admin/function_function_module/saveconnection/"
 _PLAN_SAVE_POSITIONS_PATH = "/admin/function_function_module/saveelementspos/"
 _PLAN_DELETE_ELEMENTS_PATH = "/admin/function_function_module/deleteelements/"
 _PLAN_SAVE_COMMENT_PATH = "/admin/function_function_module/savefupcommentelement/"
+_PLAN_SAVE_BLOCK_SETTINGS_PATH = "/admin/function_function_module/savefubbaseconfig/"
 
 # The admin page still shows the login form ("Anmeldung") when the session is not logged in.
 _LOGIN_PAGE_MARKER = "Anmeldung"
@@ -128,6 +131,8 @@ _RUN_STATE_KEY_PREFIX = "fup_"
 _WEBIO_LIST_ID_FIELD = "Id"
 # fupValueData's answer for a stopped plan, observed live as "0:not_found".
 _NOT_RUNNING_SENTINEL_RE = re.compile(r"\d+:not_found")
+# What /api/?action=set answers on success (observed live); anything else is logged at WARNING.
+_API_SET_OK_ANSWER = "1"
 
 # save_fub form values: paper format ids and orientation ids as Comexio's plan dialog sends them.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
@@ -539,16 +544,34 @@ class ComexioClient:
     # --- value writes (/api/, Basic Auth) ---
 
     async def set_marker_value(self, marker_id: int, value: float) -> None:
-        """Write a marker's value through the /api/ interface."""
+        """Write a marker's value through the /api/ interface.
+
+        Success is only confirmed by the answer "1". A "<n>:not_found" answer raises
+        ComexioRequestRejectedError without a warning; any other unexpected answer is logged at WARNING.
+        A non-finite float (nan, inf) raises ValueError.
+        """
+
         await self._api_set({"marker": f"M{marker_id}"}, value, what=f"Writing marker M{marker_id}")
 
     async def set_knx_value(self, knx_id: int, value: float) -> None:
-        """Write a KNX object's value through the /api/ interface (query parameter knx=K<id>)."""
+        """Write a KNX object's value through the /api/ interface (query parameter knx=K<id>).
+
+        Success is only confirmed by the answer "1". A "<n>:not_found" answer raises
+        ComexioRequestRejectedError without a warning; any other unexpected answer is logged at WARNING.
+        A non-finite float (nan, inf) raises ValueError.
+        """
+
         await self._api_set({"knx": f"K{knx_id}"}, value, what=f"Writing KNX object K{knx_id}")
 
     async def set_io_value(self, ext: str, io: str, value: float) -> None:
-        """Write an IO's value through the /api/ interface; ext is the extension name, io its identifier."""
-        await self._api_set({"ext": ext, "io": io}, value, what=f"Writing IO {io} of {ext}")
+        """Write an IO's value through the /api/ interface; ext is the extension name, io its identifier.
+
+        Success is only confirmed by the answer "1". A "<n>:not_found" answer raises
+        ComexioRequestRejectedError without a warning; any other unexpected answer is logged at WARNING.
+        A non-finite float (nan, inf) raises ValueError.
+        """
+
+        await self._api_set({"ext": ext, "io": io}, value, what=f"Writing IO {io!r} of {ext!r}")
 
     # --- Web-IO lifecycle (admin session) ---
 
@@ -1173,6 +1196,32 @@ class ComexioClient:
         if str(result.get(_RESULT_KEY)) != "1":
             raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
 
+    async def save_function_plan_block_settings(self, element_id: int, settings: Mapping[str, str]) -> None:
+        """Save the settings of one logic block ($FubBaseConfig) the way Comexio's editor does.
+
+        settings maps setting names to the string values Comexio stores (shutter travel times,
+        the extended view "autohide", ...); only the named settings are written, others stay.
+        Raises TypeError for settings that are not a mapping of str to str, ValueError for no
+        settings or an empty setting name (nothing is sent), and ComexioRequestRejectedError if
+        Comexio does not confirm the save.
+        """
+        _require_ints(element_id=element_id)
+        if not isinstance(settings, Mapping):
+            raise TypeError(f"settings must be a mapping of names to values, not {type(settings).__name__}")
+        if not settings:
+            raise ValueError("No block settings given")
+        _require_strs(**{f"settings[{name!r}]": value for name, value in settings.items()})
+        _require_strs(**{f"setting name {name!r}": name for name in settings})
+        if "" in settings:
+            raise ValueError("A block setting name must not be empty")
+        what = f"Saving block settings {sorted(settings)} of function plan element {element_id}"
+        form = {"id": str(element_id)} | {f"element_{name}": value for name, value in settings.items()}
+        form["timestamp"] = _js_timestamp()
+        result = await self._plan_json(_PLAN_SAVE_BLOCK_SETTINGS_PATH, form, what=what)
+        saved_key, saved_value = _PLAN_SAVED_CONFIRMATION
+        if str(result.get(saved_key)) != saved_value:
+            raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
+
     async def delete_function_plan_elements(self, element_ids: Sequence[int]) -> None:
         """Remove elements, and every connection touching them, from their function plan.
 
@@ -1214,13 +1263,17 @@ class ComexioClient:
 
     async def _api_set(self, target: dict[str, str], value: float, *, what: str) -> None:
         """One /api/?action=set request; HTTP 401 means the API credentials were rejected."""
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{what}: {value!r} is not a finite number")
         headers: dict[str, str] = {}
         if self._api_username:
             self._warn_plain_http()
             headers["Authorization"] = _basic_auth_header(self._api_username, self._api_password)
-        params: dict[str, str | float] = {"action": "set", "value": value, **target}
+        # Comexio's /api/ reads "+" literally, so "LED-Dimmer A3" must go out as "%20"; aiohttp's
+        # params= would send "+". yarl keeps valid %XX escapes, so the path with the query is safe.
+        query = urlencode({"action": "set", "value": value, **target}, quote_via=quote)
         try:
-            body = await self._request_text("GET", _API_PATH, what=what, params=params, headers=headers)
+            body = await self._request_text("GET", f"{_API_PATH}?{query}", what=what, headers=headers)
         except ComexioResponseError as err:
             if err.status != HTTPStatus.UNAUTHORIZED:
                 raise
@@ -1229,7 +1282,14 @@ class ComexioClient:
                     f"Comexio at {self._host} requires API credentials, none are configured (api_username)"
                 ) from err
             raise ComexioAuthenticationError(f"Comexio at {self._host} rejected the API credentials") from err
-        # The answer carries no verdict to check; logged so an ignored write can be traced.
+        # A target Comexio does not know answers "0:not_found" with HTTP 200 — not a stored value.
+        if _NOT_RUNNING_SENTINEL_RE.fullmatch(body.strip()):
+            raise ComexioRequestRejectedError(f"{what} was not accepted: Comexio answered {_excerpt(body)}")
+        # It is not verified that Comexio answers "1" on every success, so any other answer is only
+        # logged (an empty one included), never raised.
+        if body.strip() != _API_SET_OK_ANSWER:
+            _LOGGER.warning("%s: Comexio answered %s instead of %r", what, _excerpt(body), _API_SET_OK_ANSWER)
+            return
         _LOGGER.debug("%s: %s", what, _excerpt(body))
 
     async def _check_name_unique(self, model: str, object_id: str | int | None, name: str, *, what: str) -> None:

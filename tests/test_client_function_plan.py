@@ -31,6 +31,7 @@ SAVE_CONNECTION_PATH = "/admin/function_function_module/saveconnection/"
 SAVE_POSITIONS_PATH = "/admin/function_function_module/saveelementspos/"
 DELETE_ELEMENTS_PATH = "/admin/function_function_module/deleteelements/"
 SAVE_COMMENT_PATH = "/admin/function_function_module/savefupcommentelement/"
+SAVE_BLOCK_SETTINGS_PATH = "/admin/function_function_module/savefubbaseconfig/"
 
 _HOME = "/admin/function_function_module/home"
 _TIMESTAMP_RE = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z"
@@ -597,6 +598,72 @@ async def test_save_function_plan_comment_unconfirmed_is_rejected(
         await logged_in.save_function_plan_comment(58, "x", width=3)
 
 
+async def test_save_function_plan_block_settings(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_json("POST", SAVE_BLOCK_SETTINGS_PATH, {"saved": 1})
+
+    await logged_in.save_function_plan_block_settings(58, {"autohide": "1", "runtime": "12.5"})
+
+    (request,) = comexio.received_at("POST", SAVE_BLOCK_SETTINGS_PATH)
+    assert re.fullmatch(_TIMESTAMP_RE, request.form.pop("timestamp"))
+    assert request.form == {"id": "58", "element_autohide": "1", "element_runtime": "12.5"}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"saved": 0},
+        {"saved": False},
+        {"saved": True},
+        {"saved": 1.0},
+        {"saved": "true"},
+        {"saved": [1]},
+        {"error": "denied"},
+        {},
+    ],
+)
+async def test_save_function_plan_block_settings_unconfirmed_is_rejected(
+    logged_in: ComexioClient, comexio: FakeComexio, answer: dict[str, Any]
+) -> None:
+    comexio.serve_json("POST", SAVE_BLOCK_SETTINGS_PATH, answer)
+
+    with pytest.raises(ComexioRequestRejectedError, match="not confirmed") as excinfo:
+        await logged_in.save_function_plan_block_settings(58, {"autohide": "1", "runtime": "2"})
+
+    assert "element 58" in str(excinfo.value)
+    assert "['autohide', 'runtime']" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("saved", ["1", 1])
+async def test_save_function_plan_block_settings_accepts_string_or_int_flag(
+    logged_in: ComexioClient, comexio: FakeComexio, saved: Any
+) -> None:
+    comexio.serve_json("POST", SAVE_BLOCK_SETTINGS_PATH, {"saved": saved})
+
+    await logged_in.save_function_plan_block_settings(58, {"autohide": "0"})
+
+
+@pytest.mark.parametrize(
+    ("element_id", "settings", "error"),
+    [
+        (58, {}, ValueError),
+        (58, {"": "1"}, ValueError),
+        (58, "abc", TypeError),
+        (58, ["autohide"], TypeError),
+        (58, None, TypeError),
+        (58, {"autohide": 1}, TypeError),
+        (58, {1: "1"}, TypeError),
+        ("58", {"autohide": "1"}, TypeError),
+        (True, {"autohide": "1"}, TypeError),
+    ],
+)
+async def test_save_function_plan_block_settings_refuses_bad_arguments_before_sending(
+    logged_in: ComexioClient, comexio: FakeComexio, element_id: Any, settings: Any, error: type[Exception]
+) -> None:
+    with pytest.raises(error):
+        await logged_in.save_function_plan_block_settings(element_id, settings)
+    assert comexio.received_at("POST", SAVE_BLOCK_SETTINGS_PATH) == []
+
+
 async def test_save_function_plan_connection(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve_json("POST", SAVE_CONNECTION_PATH, {"id": "31"})
 
@@ -795,6 +862,7 @@ _PLAN_JSON_CALLS: list[tuple[str, PlanCall]] = [
     (ADD_ELEMENT_PATH, lambda client: client.add_function_plan_constant(4, "1", x=0, y=0)),
     (ADD_ELEMENT_PATH, lambda client: client.add_function_plan_comment(4, "x", x=0, y=0)),
     (SAVE_COMMENT_PATH, lambda client: client.save_function_plan_comment(5, "x", width=5)),
+    (SAVE_BLOCK_SETTINGS_PATH, lambda client: client.save_function_plan_block_settings(5, {"autohide": "1"})),
     (
         SAVE_CONNECTION_PATH,
         lambda client: client.save_function_plan_connection(4, 5, [(6, 0, False)], value_type="binary"),
