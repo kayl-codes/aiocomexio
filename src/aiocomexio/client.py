@@ -135,7 +135,7 @@ _RUN_STATE_KEY_PREFIX = "fup_"
 # Each entry of the Web-IO add page's DeviceBaseList / DeviceList carries its key as "Id".
 _WEBIO_LIST_ID_FIELD = "Id"
 # fupValueData's answer for a stopped plan, observed live as "0:not_found".
-_NOT_RUNNING_SENTINEL_RE = re.compile(r"[0-9]+:not_found")  # ASCII only, like Comexio's ids
+_NOT_RUNNING_SENTINEL_RE = re.compile(r"\d+:not_found", re.ASCII)  # ASCII digits only, like Comexio's ids
 # A plain decimal as dashboard/refresh sends a live value: sign, ASCII digits, optional fraction (comma or dot).
 _PLAIN_DECIMAL_RE = re.compile(r"[+-]?\d+(?:[.,]\d+)?", re.ASCII)
 # What /api/?action=set answers on success (observed live); anything else is logged at WARNING.
