@@ -17,7 +17,7 @@ from typing import Any
 
 from .analysis import build_wiring
 from .render_geometry import _fit_to_bounding_box
-from .render_labels import BlockValues, resolve_element_label, with_block_values
+from .render_labels import BlockValues, resolve_element_label, strip_xml_forbidden, with_block_values
 from .render_selfreset import detect_self_reset_cycles
 from .render_values import ItemsById, element_id_sort_key
 
@@ -53,7 +53,7 @@ _STYLE = """
   .flow-box-terminal { fill: #e6f4ea; stroke: #2e7d32; }
   .flow-box-decision { fill: #f3e8fd; stroke: #7e57c2; }
   .flow-box-cycle { fill: #fff3e0; stroke: #e69138; }
-  /* pointer-events: none: the label sits on the box that carries the <title> tooltip. */
+  /* pointer-events: none: the label sits on the box that carries the title tooltip. */
   .flow-label { fill: #111111; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
   .flow-legend-label { fill: #333333; dominant-baseline: middle; }
   .flow-edge { stroke: #555555; fill: none; }
@@ -668,7 +668,8 @@ def render_flow_svg(
     title_suffix so the diagram itself says how many were hidden.
 
     block_values: optional {element id: {setting name: value}} (see render_plan_svg); a block's
-    hover text lists them as "Name: Value" lines.
+    hover text lists them as "Name: Value" lines. Live renders only: a backup snapshot must pass
+    None, its element ids may no longer match the live settings.
     """
     incoming, outgoing = build_wiring(connections)
     wired_ids = _wired_element_ids(elements, incoming, outgoing)
@@ -708,4 +709,4 @@ def render_flow_svg(
     parts += _render_edges_svg(edges, boxes)
     parts += _render_boxes_svg(boxes)
     parts.append("</svg>")
-    return "\n".join(parts), skipped_count
+    return strip_xml_forbidden("\n".join(parts)), skipped_count

@@ -5,6 +5,7 @@ import subprocess
 import sys
 from types import MappingProxyType
 from typing import Any
+from xml.etree import ElementTree
 
 import pytest
 from syrupy.assertion import SnapshotAssertion
@@ -20,7 +21,7 @@ from aiocomexio.function_plan import (
     render_flow_svg,
     render_plan_svg,
 )
-from aiocomexio.function_plan.render_labels import with_block_values
+from aiocomexio.function_plan.render_labels import strip_xml_forbidden, with_block_values
 from tests.common import FIXTURES_DIR, load_json_fixture
 
 
@@ -276,6 +277,55 @@ def test_block_values_are_escaped(plan: dict[str, Any]) -> None:
     assert "<b>&:" not in svg
     assert "&lt;b&gt;&amp;: &quot;x&quot; &lt;y&gt;" in svg
     assert "&lt;b&gt;&amp;: &quot;x&quot; &lt;y&gt;" in _flow(plan, block_values={"4": {"<b>&": '"x" <y>'}})
+
+
+@pytest.mark.parametrize(
+    "render",
+    [_render, lambda plan: _render(plan, canvas=(870.0, 720.0)), _flow],
+    ids=["fit", "paper", "flow"],
+)
+def test_rendered_svg_is_well_formed_xml(plan: dict[str, Any], render: Any) -> None:
+    # A standalone .svg goes through an XML parser: e.g. a literal "<title>" in a CSS comment breaks it.
+    ElementTree.fromstring(render(plan))
+
+
+# Every XML 1.0-forbidden range, with both ends of each range.
+_XML_FORBIDDEN = [
+    "\x00",
+    "\x01",
+    "\x08",
+    "\x0b",
+    "\x0c",
+    "\x0e",
+    "\x1b",
+    "\x1f",
+    "\ud800",
+    "\udfff",
+    "\ufffe",
+    "\uffff",
+]
+
+
+@pytest.mark.parametrize("char", _XML_FORBIDDEN)
+def test_xml_forbidden_characters_in_any_text_keep_the_svg_parsable(plan: dict[str, Any], char: str) -> None:
+    # html.escape keeps U+0001 & co.; an XML parser rejects the whole SVG for one of them.
+    for marker in plan["markers_by_id"].values():
+        marker["name"] = f"{marker['name']}{char}x"
+    values = {"4": {f"a{char}b": f"1{char}2"}}
+
+    for svg in (
+        _render(plan, title_suffix=f"s{char}t", block_values=values),
+        _flow(plan, title_suffix=f"s{char}t", block_values=values),
+    ):
+        ElementTree.fromstring(svg)
+        assert char not in svg
+
+
+def test_strip_xml_forbidden_keeps_every_allowed_character() -> None:
+    allowed = "\t\n\r \x7f\x85\ud7ff\ue000\ufffd\U00010000\U0001f600\U0010ffff"
+
+    assert strip_xml_forbidden(allowed) == allowed
+    assert strip_xml_forbidden("".join(_XML_FORBIDDEN)) == ""
 
 
 _BLOCK = {"reference": {"type": 5, "ref_id": 1}}

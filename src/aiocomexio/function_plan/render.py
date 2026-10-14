@@ -51,7 +51,7 @@ from typing import Any
 
 from .render_constants import _FONT_SIZE, _MARGIN, _STYLE
 from .render_geometry import _bounding_box, _build_geometries, _fit_to_bounding_box
-from .render_labels import BlockValues, resolve_element_label, with_block_values
+from .render_labels import BlockValues, resolve_element_label, strip_xml_forbidden, with_block_values
 from .render_selfreset import detect_self_reset_elements
 from .render_svg import _render_nodes
 from .render_values import ItemsById
@@ -111,6 +111,9 @@ def render_plan_svg(
     block_values: optional instance settings of the logic blocks, {element id: {setting name:
     value}} (Comexio's $FubBaseConfig). A block's hover text then lists them as "Name: Value"
     lines under its label; None (or a block without settings) leaves the output unchanged.
+    The lookup goes by element id, so like connection_values this is only meaningful for a LIVE
+    render of the plan it was fetched for; a caller rendering a backup snapshot must leave it None,
+    since Comexio may have renumbered the blocks and the hover would show unrelated settings.
     """
     geos = _build_geometries(elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id)
     if canvas:
@@ -155,4 +158,4 @@ def render_plan_svg(
     _render_nodes(parts, geos, labels, connected, hovers)
     parts.extend(overlays)
     parts.append("</svg>")
-    return "\n".join(parts)
+    return strip_xml_forbidden("\n".join(parts))
