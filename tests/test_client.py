@@ -483,23 +483,26 @@ async def test_get_io_live_states_rejects_wrong_id_types(
 async def test_get_io_live_states_rejects_non_integer_ext_id_strings(
     logged_in: ComexioClient, comexio: FakeComexio, ext_id: str
 ) -> None:
+    ios = [IoAddress(ext_id, "1")]
     with pytest.raises(ValueError, match="integer string"):
-        await logged_in.get_io_live_states([IoAddress(ext_id, "1")])
+        await logged_in.get_io_live_states(ios)
     assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
 
 
 async def test_get_io_live_states_rejects_negative_int_ext_id(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     # The int must not get further than its string form "-1", which is refused as no integer string.
+    ios = [IoAddress(-1, "1")]
     with pytest.raises(ValueError, match="must not be negative"):
-        await logged_in.get_io_live_states([IoAddress(-1, "1")])
+        await logged_in.get_io_live_states(ios)
     assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
 
 
 async def test_get_io_live_states_same_io_with_two_ext_ids_raises_before_any_request(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
+    ios = [IoAddress(1, "5"), IoAddress(2, "5")]
     with pytest.raises(ValueError, match="two different extension ids"):
-        await logged_in.get_io_live_states([IoAddress(1, "5"), IoAddress(2, "5")])
+        await logged_in.get_io_live_states(ios)
     assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
 
 
@@ -625,15 +628,17 @@ async def test_get_io_live_states_without_result_object_raises(
 ) -> None:
     comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, payload)
 
+    ios = [IoAddress(1, "1")]
     with pytest.raises(ComexioDataError, match="no result object"):
-        await logged_in.get_io_live_states([IoAddress(1, "1")])
+        await logged_in.get_io_live_states(ios)
 
 
 async def test_get_io_live_states_non_json_raises(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve_text("POST", DASHBOARD_REFRESH_PATH, "<html>error</html>")
 
+    ios = [IoAddress(1, "1")]
     with pytest.raises(ComexioDataError, match="not JSON"):
-        await logged_in.get_io_live_states([IoAddress(1, "1")])
+        await logged_in.get_io_live_states(ios)
 
 
 async def test_get_io_live_states_on_expired_session_raises_authentication_error(
@@ -641,8 +646,9 @@ async def test_get_io_live_states_on_expired_session_raises_authentication_error
 ) -> None:
     comexio.serve_text("POST", DASHBOARD_REFRESH_PATH, "<html><form>Anmeldung</form></html>")
 
+    ios = [IoAddress(1, "1")]
     with pytest.raises(ComexioAuthenticationError):
-        await logged_in.get_io_live_states([IoAddress(1, "1")])
+        await logged_in.get_io_live_states(ios)
 
 
 async def test_get_io_live_states_warns_when_the_answer_holds_none_of_the_requested_ios(

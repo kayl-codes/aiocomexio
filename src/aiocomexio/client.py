@@ -46,7 +46,7 @@ from .scrape import (
 from .session import is_local_address
 from .webio import CONTENT_TYPE_JSON
 
-__all__ = ["ComexioClient", "CreatedFunctionPlan", "LiveStates", "RawConfig", "WebioBaseInfo"]
+__all__ = ["ComexioClient", "CreatedFunctionPlan", "IoAddress", "LiveStates", "RawConfig", "WebioBaseInfo"]
 
 _LOGGER = logging.getLogger(__name__)
 

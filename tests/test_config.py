@@ -113,6 +113,14 @@ def test_io_entry_carries_its_extension_id(basic_result: dict[str, Any]) -> None
     }
 
 
+def test_io_live_states_override_the_config_value() -> None:
+    """An IO in io_live_states gets that value; an IO missing from it keeps the config's "Value"."""
+    result = _parse(load_json_fixture("config_basic.json"), io_live_states={"11": "0", "13": "9,96078"})
+    values = {io["identifier"]: io["value"] for io in result["io_all"]}
+
+    assert values == {"I1": 0.0, "Q1": 0.0, "AI1": 9.96078, "Q2": 0.0, "QI1": 55.0}
+
+
 def test_io_classification_without_type_tables_falls_back_to_identifier() -> None:
     conf = {
         "FubModules": {
@@ -438,3 +446,6 @@ async def test_io_ext_ids_from_parse_config_feed_get_io_live_states(
     sent = json.loads(request.form["json"])
     assert sent["io_11"] == {"action": "get", "ExtId": 1, "IOId": "11"}
     assert sent["io_21"] == {"action": "get", "ExtId": 2, "IOId": "21"}
+    # The answer's keys are what parse_config's io_live_states expects.
+    reparsed = _parse(load_json_fixture("config_basic.json"), io_live_states=states)
+    assert {io["identifier"]: io["value"] for io in reparsed["io_all"]}["QI1"] == 2.5
