@@ -104,13 +104,16 @@ def with_block_values(label: str, elem_id: str, elem: dict[str, Any], block_valu
     """Hover text of a fubBase block: the label plus one "Name: Value" line per instance setting.
 
     The catalog carries no readable names for settings, so the raw name Comexio stores is shown.
-    Sorted by name so the text is stable. Anything but a block, or a block without settings,
-    keeps its label unchanged.
+    Sorted case-insensitively by name so the text is stable. Anything but a block, or a block without
+    settings (also one that only has the internal "autohide" flag), keeps its label unchanged.
+    Entries for element ids that are not in the plan, for elements that are not blocks, and
+    settings whose name is not a str are ignored.
     """
     if (elem.get("reference") or {}).get("type") != 5 or not block_values:
         return label
     settings = block_values.get(elem_id) or {}
-    lines = [f"{name}: {settings[name]}" for name in sorted(settings, key=str.casefold) if name != _SETTING_AUTOHIDE]
+    names = [name for name in settings if isinstance(name, str) and name != _SETTING_AUTOHIDE]
+    lines = [f"{name}: {settings[name]}" for name in sorted(names, key=str.casefold)]
     return "\n".join([label, *lines])
 
 

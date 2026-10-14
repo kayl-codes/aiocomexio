@@ -18,6 +18,7 @@ from aiocomexio.function_plan import (
     render_flow_svg,
     render_plan_svg,
 )
+from aiocomexio.function_plan.render_labels import with_block_values
 from tests.common import FIXTURES_DIR, load_json_fixture
 
 
@@ -273,3 +274,26 @@ def test_block_values_are_escaped(plan: dict[str, Any]) -> None:
     assert "<b>&:" not in svg
     assert "&lt;b&gt;&amp;: &quot;x&quot; &lt;y&gt;" in svg
     assert "&lt;b&gt;&amp;: &quot;x&quot; &lt;y&gt;" in _flow(plan, block_values={"4": {"<b>&": '"x" <y>'}})
+
+
+_BLOCK = {"reference": {"type": 5, "ref_id": 1}}
+
+
+def test_with_block_values_sorts_setting_names_case_insensitively() -> None:
+    # A plain sorted() puts "Zeta" before "alpha".
+    assert with_block_values("Oder", "4", _BLOCK, {"4": {"Zeta": "1", "alpha": "2"}}) == "Oder\nalpha: 2\nZeta: 1"
+
+
+def test_with_block_values_only_autohide_keeps_the_plain_label() -> None:
+    label = with_block_values("Oder", "4", _BLOCK, {"4": {"autohide": "1"}})
+
+    assert label == "Oder"
+    assert not label.endswith("\n")
+
+
+def test_with_block_values_ignores_unknown_ids_non_blocks_and_non_str_names() -> None:
+    values: Any = {"99": {"x": "1"}, "4": {7: "bad", "a": "1"}}
+
+    assert with_block_values("Oder", "4", _BLOCK, values) == "Oder\na: 1"
+    assert with_block_values("Oder", "5", _BLOCK, values) == "Oder"
+    assert with_block_values("M1", "4", {"reference": {"type": 2}}, values) == "M1"
