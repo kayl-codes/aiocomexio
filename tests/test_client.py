@@ -551,6 +551,60 @@ async def test_get_io_live_states_on_expired_session_raises_authentication_error
         await logged_in.get_io_live_states([(1, "1")])
 
 
+async def test_get_io_live_states_warns_when_the_answer_holds_none_of_the_requested_ios(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"1": "5", "knxIo_11_3": "7"}})
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.client"):
+        assert await logged_in.get_io_live_states([(1, "1"), (1, "2")]) == {}
+
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "none of the 2 requested IOs" in warning.getMessage()
+
+
+async def test_get_io_live_states_warns_when_the_result_is_empty(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {}})
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert await logged_in.get_io_live_states([(1, "1")]) == {}
+
+    assert "none of the 1 requested IOs" in caplog.text
+
+
+async def test_get_io_live_states_some_answered_does_not_warn_about_none_answered(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    # io_1 answered (even with the not_found sentinel), io_2 absent: some IOs answered, so no such warning.
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_1": "0:not_found"}})
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert await logged_in.get_io_live_states([(1, "1"), (1, "2")]) == {}
+
+    assert not caplog.records
+
+
+@pytest.mark.parametrize(("answer", "expected"), [(1e22, "10000000000000000000000"), (-1e-07, "-0.0000001")])
+async def test_get_io_live_states_formats_float_answers_without_exponent(
+    logged_in: ComexioClient, comexio: FakeComexio, answer: float, expected: str
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_1": answer}})
+
+    assert await logged_in.get_io_live_states([(1, "1")]) == {"1": expected}
+
+
+async def test_get_io_live_states_accepts_a_zero_padded_ext_id_as_its_integer_value(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_5": "7"}})
+
+    assert await logged_in.get_io_live_states([("007", "5")]) == {"5": "7"}
+    (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
+    assert json.loads(request.form["json"]) == {"io_5": {"action": "get", "ExtId": 7, "IOId": "5"}}
+
+
 @pytest.mark.parametrize(
     ("connection", "expected"),
     [

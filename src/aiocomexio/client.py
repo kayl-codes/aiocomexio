@@ -350,7 +350,7 @@ class ComexioClient:
             f"{_KNX_LIVE_KEY_PREFIX}{i}": {_ACTION_KEY: _ACTION_GET, "KnxIo": f"K{i}", "Unit": "any"}
             for i in range(1, knx_max_id + 1)
         }
-        refresh[_MESSAGES_KEY] = {"action": "messages"}
+        refresh[_MESSAGES_KEY] = {_ACTION_KEY: "messages"}
 
         data = await self._dashboard_refresh(refresh, what="Live states")
         result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
@@ -373,13 +373,15 @@ class ComexioClient:
 
         ios are (extension id, IO id) pairs: the extension id is the key of the IO's extension
         group in $FubModules["1"] (an int or an integer string, like parse_config's "ext_id"),
-        the IO id its "Id". One IO id under two different extension ids is a ValueError.
+        the IO id its "Id". An integer string counts by value: "007" is extension 7. One IO id under
+        two different extension ids is a ValueError.
         Returns {IO id: value as Comexio sent it, "," normalized to "."}
         (a numeric string such as "74" or "9.96078"). An IO the answer leaves out, or answers
         with anything that is not a number — "0:not_found" for an inactive IO, a PHP warning —
         is absent from the result, never 0: a caller keeps its last known value for it. Such an
         answer is logged at DEBUG if it is Comexio's "<n>:not_found" or missing, otherwise at
-        WARNING (one line per call).
+        WARNING (one line per call). If the answer holds none of the requested IOs at all (a format
+        change or wrong ids), that is one WARNING as well, since DEBUG lines would hide it.
         """
         pairs = _io_ext_ids(ios)
         if not pairs:
@@ -392,16 +394,13 @@ class ComexioClient:
         result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
         if not isinstance(result, dict):
             raise ComexioDataError(f"IO live states response has no result object: {_excerpt(data)}")
-        values: dict[str, str] = {}
-        unexpected: list[str] = []
-        for io_id in pairs:
-            raw = result.get(f"{_IO_LIVE_KEY_PREFIX}{io_id}")
-            if (value := _numeric_text(raw)) is not None:
-                values[io_id] = value
-                continue
-            _LOGGER.debug("No live value for IO %s, dashboard/refresh answered %s", io_id, _excerpt(raw))
-            if raw is not None and not (isinstance(raw, str) and _NOT_RUNNING_SENTINEL_RE.fullmatch(raw.strip())):
-                unexpected.append(f"{io_id}: {_excerpt(raw)}")
+        values, unexpected = _collect_io_values(result, pairs)
+        if not any(f"{_IO_LIVE_KEY_PREFIX}{io_id}" in result for io_id in pairs):
+            _LOGGER.warning(
+                "dashboard/refresh answered none of the %d requested IOs (format change or wrong ids?): %s",
+                len(pairs),
+                _excerpt(result),
+            )
         if unexpected:
             _LOGGER.warning(
                 "Dropped %d unexpected IO live answers from dashboard/refresh (IO id: answer): %s",
@@ -418,7 +417,7 @@ class ComexioClient:
         running (Comexio then answers with a plain-text sentinel such as "0:not_found") or reports
         an empty value set. Raises ComexioDataError if the answer carries no connection entry.
         """
-        payload = {"connection": {"action": "fupValueData", "fupId": fub_id}}
+        payload = {"connection": {_ACTION_KEY: "fupValueData", "fupId": fub_id}}
         data = await self._dashboard_refresh(payload, what=f"Connection values of plan {fub_id}")
         result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
         if not isinstance(result, dict) or "connection" not in result:
@@ -442,7 +441,7 @@ class ComexioClient:
         _require_ints(**{f"fub_ids[{index}]": fub_id for index, fub_id in enumerate(ids)})
         if not ids:
             return {}
-        payload = {f"{_RUN_STATE_KEY_PREFIX}{fub_id}": {"action": "fupValueData", "fupId": fub_id} for fub_id in ids}
+        payload = {f"{_RUN_STATE_KEY_PREFIX}{fub_id}": {_ACTION_KEY: "fupValueData", "fupId": fub_id} for fub_id in ids}
         data = await self._dashboard_refresh(payload, what="Function plan run states")
         result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
         if not isinstance(result, dict):
@@ -1269,7 +1268,7 @@ class ComexioClient:
         if self._api_username:
             self._warn_plain_http()
             headers["Authorization"] = _basic_auth_header(self._api_username, self._api_password)
-        params: dict[str, str | float] = {"action": "set", "value": value, **target}
+        params: dict[str, str | float] = {_ACTION_KEY: "set", "value": value, **target}
         try:
             body = await self._request_text("GET", _API_PATH, what=what, params=params, headers=headers)
         except ComexioResponseError as err:
@@ -1667,6 +1666,21 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
     if not matched:
         raise _missing_data_error(html, f"Web-IO command {command_id} edit form has no min/max fields")
     return values["min"], values["max"]
+
+
+def _collect_io_values(result: dict[str, Any], io_ids: Iterable[str]) -> tuple[dict[str, str], list[str]]:
+    """({IO id: numeric text}, ["IO id: answer", ...] for answers that are neither a number nor not_found)."""
+    values: dict[str, str] = {}
+    unexpected: list[str] = []
+    for io_id in io_ids:
+        raw = result.get(f"{_IO_LIVE_KEY_PREFIX}{io_id}")
+        if (value := _numeric_text(raw)) is not None:
+            values[io_id] = value
+            continue
+        _LOGGER.debug("No live value for IO %s, dashboard/refresh answered %s", io_id, _excerpt(raw))
+        if raw is not None and not (isinstance(raw, str) and _NOT_RUNNING_SENTINEL_RE.fullmatch(raw.strip())):
+            unexpected.append(f"{io_id}: {_excerpt(raw)}")
+    return values, unexpected
 
 
 def _io_ext_ids(ios: Iterable[tuple[int | str, str]]) -> dict[str, int]:
