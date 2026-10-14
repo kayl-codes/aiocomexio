@@ -146,7 +146,7 @@ async def test_set_value_not_found_answer_raises_naming_the_target(
         await call(api_client)
 
 
-_AWKWARD_EXT_NAMES = ["A&B", "A#B", "A+B", "A%B", "A/B", "A=B", "A?B", "Küche ä", "100% & #1 + a=b/c?d"]
+_AWKWARD_EXT_NAMES = ["A&B", "A#B", "A+B", "A%B", "A%41", "A/B", "A=B", "A?B", "Küche ä", "100% & #1 + a=b/c?d"]
 
 
 @pytest.mark.parametrize("ext", _AWKWARD_EXT_NAMES)
@@ -164,6 +164,8 @@ async def test_set_io_value_round_trips_awkward_extension_names(
     ext_part = query_part.split("ext=", 1)[1].split("&io=", 1)[0]
     assert query_part.count("&") == 3
     assert not set(ext_part) & set("&#+= ")
+    # A raw "%" followed by two hex digits ("A%41") would decode to another name, so every "%" goes out as "%25".
+    assert ext_part.count("%25") == ext.count("%")
     assert ext_part.isascii()
     assert request.query == {"action": "set", "value": "1", "ext": ext, "io": "Q1"}
 
