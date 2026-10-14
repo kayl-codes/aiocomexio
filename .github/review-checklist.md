@@ -1,4 +1,6 @@
-# Copilot instructions — aiocomexio
+# Review checklist — aiocomexio
+
+The local review agents check every diff against these rules before a push.
 
 Standalone, asyncio-native Python client library for the Comexio IO-Server (local building-automation controller),
 published on PyPI and consumed by the Home Assistant integration

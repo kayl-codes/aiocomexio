@@ -67,8 +67,8 @@ pre-commit run --all-files
 - Public API is typed (`py.typed`); failures are raised as typed exceptions, not returned as error
   codes.
 - The review checklist with the detailed rules (strict types for parsed values, rendering of SVG text
-  and tooltips, stable sort order, tests, GitHub Actions) is `.github/copilot-instructions.md`; check
-  every change against it, not only Copilot reviews.
+  and tooltips, stable sort order, tests, GitHub Actions) is `.github/review-checklist.md`; check
+  every change against it.
 
 ## CI / quality gates
 
