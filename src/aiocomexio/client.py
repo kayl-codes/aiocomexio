@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from http import HTTPStatus
-from typing import Any, TypeIs
+from typing import Any, NamedTuple, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import aiohttp
@@ -46,7 +46,7 @@ from .scrape import (
 from .session import is_local_address
 from .webio import CONTENT_TYPE_JSON
 
-__all__ = ["ComexioClient", "CreatedFunctionPlan", "LiveStates", "RawConfig", "WebioBaseInfo"]
+__all__ = ["ComexioClient", "CreatedFunctionPlan", "IoAddress", "LiveStates", "RawConfig", "WebioBaseInfo"]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -108,6 +108,11 @@ _PKCS1_PADDING_BYTES = 11
 # objects and markers share one plain numeric id space, so the prefix is what splits the
 # response back apart.
 _KNX_LIVE_KEY_PREFIX = "knxIo_11_"
+# Same for physical IOs: an IO id is globally unique across extensions, but shares the numeric id
+# space with markers, so IO keys get their own prefix. They go out in a request of their own.
+_IO_LIVE_KEY_PREFIX = "io_"
+_ACTION_KEY = "action"
+_ACTION_GET = "get"
 _MESSAGES_KEY = "messages"
 _RESULT_KEY = "result"
 
@@ -130,7 +135,9 @@ _RUN_STATE_KEY_PREFIX = "fup_"
 # Each entry of the Web-IO add page's DeviceBaseList / DeviceList carries its key as "Id".
 _WEBIO_LIST_ID_FIELD = "Id"
 # fupValueData's answer for a stopped plan, observed live as "0:not_found".
-_NOT_RUNNING_SENTINEL_RE = re.compile(r"\d+:not_found")
+_NOT_RUNNING_SENTINEL_RE = re.compile(r"\d+:not_found", re.ASCII)  # ASCII digits only, like Comexio's ids
+# A plain decimal as dashboard/refresh sends a live value: sign, ASCII digits, optional fraction (comma or dot).
+_PLAIN_DECIMAL_RE = re.compile(r"[+-]?\d+(?:[.,]\d+)?", re.ASCII)
 # What /api/?action=set answers on success (observed live); anything else is logged at WARNING.
 _API_SET_OK_ANSWER = "1"
 
@@ -192,6 +199,17 @@ class WebioBaseInfo:
 
     base_id: str
     deletable: bool
+
+
+class IoAddress(NamedTuple):
+    """One physical IO for get_io_live_states: its extension id and IO id, named so a swap stands out.
+
+    ext_id is the key of the IO's extension group in $FubModules["1"] (parse_config's "ext_id"),
+    io_id the IO's "Id" (parse_config's "id").
+    """
+
+    ext_id: int | str
+    io_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,12 +359,14 @@ class ComexioClient:
 
         An id the server leaves out of its answer is absent from the result, not 0.
         """
-        refresh: dict[str, Any] = {str(i): {"action": "get", "MarkerName": f"M{i}"} for i in range(1, marker_count + 1)}
+        refresh: dict[str, Any] = {
+            str(i): {_ACTION_KEY: _ACTION_GET, "MarkerName": f"M{i}"} for i in range(1, marker_count + 1)
+        }
         refresh |= {
-            f"{_KNX_LIVE_KEY_PREFIX}{i}": {"action": "get", "KnxIo": f"K{i}", "Unit": "any"}
+            f"{_KNX_LIVE_KEY_PREFIX}{i}": {_ACTION_KEY: _ACTION_GET, "KnxIo": f"K{i}", "Unit": "any"}
             for i in range(1, knx_max_id + 1)
         }
-        refresh[_MESSAGES_KEY] = {"action": "messages"}
+        refresh[_MESSAGES_KEY] = {_ACTION_KEY: "messages"}
 
         data = await self._dashboard_refresh(refresh, what="Live states")
         result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
@@ -364,6 +384,50 @@ class ComexioClient:
         }
         return LiveStates(markers=markers, knx=knx)
 
+    async def get_io_live_states(self, ios: Iterable[IoAddress]) -> dict[str, str]:
+        """Live values of physical IOs, all in one dashboard/refresh request of their own.
+
+        ios are IoAddress(ext_id, io_id) entries (a plain (ext_id, io_id) tuple works at runtime, but
+        the named form keeps the two ids from being swapped): ext_id is the key of the IO's extension
+        group in $FubModules["1"] (a non-negative int or digit string, like parse_config's "ext_id"),
+        io_id its "Id". An integer string counts by value: "007" is extension 7. One IO id under
+        two different extension ids is a ValueError.
+        Returns {IO id: value as Comexio sent it, "," normalized to "."}
+        (a numeric string such as "74" or "9.96078"). An IO the answer leaves out, or answers
+        with anything that is not a number — "0:not_found" for an inactive IO, a PHP warning —
+        is absent from the result, never 0: a caller keeps its last known value for it. Such an
+        answer is logged at DEBUG if it is Comexio's "<n>:not_found" or the key is missing, otherwise
+        (an explicit null included) at WARNING (one line per call, IO ids as repr, answer types only).
+        If the answer holds none of the requested IOs at all (a format change or wrong ids), that is
+        one WARNING as well, since DEBUG lines would hide it.
+        """
+        pairs = _io_ext_ids(ios)
+        if not pairs:
+            return {}
+        payload = {
+            f"{_IO_LIVE_KEY_PREFIX}{io_id}": {_ACTION_KEY: _ACTION_GET, "ExtId": ext_id, "IOId": io_id}
+            for io_id, ext_id in pairs.items()
+        }
+        data = await self._dashboard_refresh(payload, what="IO live states")
+        result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
+        if not isinstance(result, dict):
+            raise ComexioDataError(f"IO live states response has no result object: {_excerpt(data)}")
+        values, unexpected = _collect_io_values(result, pairs)
+        if not any(f"{_IO_LIVE_KEY_PREFIX}{io_id}" in result for io_id in pairs):
+            # Keys only: they show a format change or wrong ids, the values would put IO readings in the log.
+            _LOGGER.warning(
+                "dashboard/refresh answered none of the %d requested IOs (format change or wrong ids?), keys: %s",
+                len(pairs),
+                _excerpt(sorted(result)),
+            )
+        if unexpected:
+            _LOGGER.warning(
+                "Dropped %d unexpected IO live answers from dashboard/refresh (IO id: answer type): %s",
+                len(unexpected),
+                "; ".join(unexpected),
+            )
+        return values
+
     async def get_function_plan_connection_values(self, fub_id: int) -> dict[str, list[Any]]:
         """Live output values per source element of one running plan (Studio's fupValueData).
 
@@ -372,7 +436,7 @@ class ComexioClient:
         running (Comexio then answers with a plain-text sentinel such as "0:not_found") or reports
         an empty value set. Raises ComexioDataError if the answer carries no connection entry.
         """
-        payload = {"connection": {"action": "fupValueData", "fupId": fub_id}}
+        payload = {"connection": {_ACTION_KEY: "fupValueData", "fupId": fub_id}}
         data = await self._dashboard_refresh(payload, what=f"Connection values of plan {fub_id}")
         result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
         if not isinstance(result, dict) or "connection" not in result:
@@ -396,7 +460,7 @@ class ComexioClient:
         _require_ints(**{f"fub_ids[{index}]": fub_id for index, fub_id in enumerate(ids)})
         if not ids:
             return {}
-        payload = {f"{_RUN_STATE_KEY_PREFIX}{fub_id}": {"action": "fupValueData", "fupId": fub_id} for fub_id in ids}
+        payload = {f"{_RUN_STATE_KEY_PREFIX}{fub_id}": {_ACTION_KEY: "fupValueData", "fupId": fub_id} for fub_id in ids}
         data = await self._dashboard_refresh(payload, what="Function plan run states")
         result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
         if not isinstance(result, dict):
@@ -1271,7 +1335,7 @@ class ComexioClient:
             headers["Authorization"] = _basic_auth_header(self._api_username, self._api_password)
         # Comexio's /api/ reads "+" literally, so "LED-Dimmer A3" must go out as "%20"; aiohttp's
         # params= would send "+". yarl keeps valid %XX escapes, so the path with the query is safe.
-        query = urlencode({"action": "set", "value": value, **target}, quote_via=quote)
+        query = urlencode({_ACTION_KEY: "set", "value": value, **target}, quote_via=quote)
         try:
             body = await self._request_text("GET", f"{_API_PATH}?{query}", what=what, headers=headers)
         except ComexioResponseError as err:
@@ -1676,6 +1740,79 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
     if not matched:
         raise _missing_data_error(html, f"Web-IO command {command_id} edit form has no min/max fields")
     return values["min"], values["max"]
+
+
+def _collect_io_values(result: dict[str, Any], io_ids: Iterable[str]) -> tuple[dict[str, str], list[str]]:
+    """({IO id: numeric text}, ["IO id: answer type", ...] for answers that are neither a number nor not_found).
+
+    The type, not the answer: an unexpected format may still wrap an IO reading, which stays at DEBUG.
+    """
+    values: dict[str, str] = {}
+    unexpected: list[str] = []
+    for io_id in io_ids:
+        key = f"{_IO_LIVE_KEY_PREFIX}{io_id}"
+        raw = result.get(key)
+        if (value := _numeric_text(raw)) is not None:
+            values[io_id] = value
+            continue
+        # %r / repr: an IO id is caller input and must not put raw line breaks into a log line.
+        _LOGGER.debug("No live value for IO %r, dashboard/refresh answered %s", io_id, _excerpt(raw))
+        # An absent key and Comexio's not_found sentinel are expected; a key that is present with
+        # JSON null (or anything else that is no number) is not.
+        if key in result and not (isinstance(raw, str) and _NOT_RUNNING_SENTINEL_RE.fullmatch(raw.strip())):
+            unexpected.append(f"{io_id!r}: {type(raw).__name__}")
+    return values, unexpected
+
+
+def _io_ext_ids(ios: Iterable[tuple[int | str, str]]) -> dict[str, int]:
+    """{IO id: extension id as int} from (extension id, IO id) pairs; identical duplicates collapse.
+
+    TypeError for an entry that is no 2-tuple, a bool or non-int/str extension id and a non-str IO id,
+    ValueError for a negative extension id, one that is not a digit string and for one IO id given
+    with two different extension ids.
+    """
+    pairs: dict[str, int] = {}
+    for entry in ios:
+        # A str entry would unpack too ("12" -> ext "1", IO "2"), so the shape is checked first.
+        if not (isinstance(entry, tuple) and len(entry) == 2):
+            raise TypeError(f"ios entries must be IoAddress(ext_id, io_id) pairs, got {entry!r}")
+        ext_id, io_id = entry
+        _require_strs(**{f"io_id[{io_id!r}]": io_id})
+        ext = _ext_id_int(ext_id, io_id)
+        if pairs.setdefault(io_id, ext) != ext:
+            raise ValueError(f"IO {io_id!r} is given with two different extension ids ({pairs[io_id]} and {ext})")
+    return pairs
+
+
+def _ext_id_int(ext_id: Any, io_id: str) -> int:
+    """The extension id as int: a non-negative int or digit string is accepted, a bool is not."""
+    if _is_int(ext_id):
+        if ext_id < 0:
+            raise ValueError(f"ext_id[{io_id!r}] must not be negative, got {ext_id!r}")
+        return ext_id
+    if not isinstance(ext_id, str):
+        raise TypeError(f"ext_id[{io_id!r}] must be integers or integer strings, got {ext_id!r}")
+    if not (ext_id.isascii() and ext_id.isdigit()):
+        raise ValueError(f"ext_id[{io_id!r}] is not an integer string: {ext_id!r}")
+    return int(ext_id)
+
+
+def _numeric_text(raw: Any) -> str | None:
+    """raw as a normalized decimal string ("21,5" -> "21.5"), or None if it is no plain decimal number.
+
+    dashboard/refresh answers a value as a string; an int or float is accepted as well, a bool
+    is not. Only an optional sign, digits and an optional fraction count: "0:not_found" (inactive
+    IO), "", an error text, "1_0", exponents, "inf" and "nan" yield None.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+        return None
+    if isinstance(raw, float):
+        if not math.isfinite(raw):
+            return None
+        text = format(Decimal(repr(raw)), "f")  # repr never switches to an exponent in "f"
+    else:
+        text = str(raw).strip()
+    return text.replace(",", ".") if _PLAIN_DECIMAL_RE.fullmatch(text) else None
 
 
 def _plan_running(raw: Any) -> bool | None:

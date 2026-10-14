@@ -2,7 +2,7 @@
 
 from importlib.metadata import version
 
-from .client import ComexioClient, CreatedFunctionPlan, LiveStates, RawConfig, WebioBaseInfo
+from .client import ComexioClient, CreatedFunctionPlan, IoAddress, LiveStates, RawConfig, WebioBaseInfo
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioConnectionError,
@@ -26,6 +26,7 @@ __all__ = [
     "ComexioRequestRejectedError",
     "ComexioResponseError",
     "CreatedFunctionPlan",
+    "IoAddress",
     "LiveStates",
     "RawConfig",
     "WebioBaseInfo",

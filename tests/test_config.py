@@ -1,10 +1,13 @@
 """parse_config: scraped Comexio config -> markers / IOs / KNX / Web-IO commands."""
 
+import json
+import logging
 from typing import Any
 
 import pytest
 from syrupy.assertion import SnapshotAssertion
 
+from aiocomexio import ComexioClient, IoAddress
 from aiocomexio.config import (
     TYPE_DIGITAL,
     ParseOptions,
@@ -17,6 +20,7 @@ from aiocomexio.config import (
 )
 from aiocomexio.const import MarkerKind, WebioClass
 from tests.common import load_json_fixture
+from tests.fake_comexio import DASHBOARD_REFRESH_PATH, FakeComexio
 
 
 def _parse(conf: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -95,6 +99,27 @@ def test_io_classification(basic_result: dict[str, Any]) -> None:
     assert (ios["AI1"]["is_binary"], ios["AI1"]["unit"], ios["AI1"]["value"]) == (False, "°C", 21.5)
     assert ios["AI1"]["name"] == "BASE AI1"
     assert (ios["QI1"]["is_input"], ios["QI1"]["offline"]) == (True, True)
+
+
+def test_io_entry_carries_its_extension_id(basic_result: dict[str, Any]) -> None:
+    """get_io_live_states needs the extension group key as ExtId; the IO id alone is not enough."""
+    ios = {io["identifier"]: io for io in basic_result["io_all"]}
+
+    assert {ident: (io["id"], io["ext_id"]) for ident, io in ios.items()} == {
+        "I1": ("11", "1"),
+        "Q1": ("12", "1"),
+        "AI1": ("13", "1"),
+        "Q2": ("14", "1"),
+        "QI1": ("21", "2"),
+    }
+
+
+def test_io_live_states_override_the_config_value() -> None:
+    """An IO in io_live_states gets that value; an IO missing from it or mapped to None keeps the config's "Value"."""
+    result = _parse(load_json_fixture("config_basic.json"), io_live_states={"11": "0", "13": "9,96078", "21": None})
+    values = {io["identifier"]: io["value"] for io in result["io_all"]}
+
+    assert values == {"I1": 0.0, "Q1": 0.0, "AI1": 9.96078, "Q2": 0.0, "QI1": 55.0}
 
 
 def test_io_classification_without_type_tables_falls_back_to_identifier() -> None:
@@ -273,6 +298,14 @@ def test_clean_value(raw: Any, expected: float) -> None:
     assert clean_value(raw) == expected
 
 
+@pytest.mark.parametrize("raw", ["nan", "inf", "-Infinity", float("nan"), float("-inf")])
+def test_clean_value_reads_non_finite_as_zero_with_a_warning(raw: Any, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.config"):
+        assert clean_value(raw) == 0.0
+
+    assert "Failed to clean value" in caplog.text
+
+
 def test_iter_group_accepts_object_array_and_none() -> None:
     assert list(iter_group({"3": "a"})) == [("3", "a")]
     assert list(iter_group(["a", "b"])) == [("0", "a"), ("1", "b")]
@@ -407,3 +440,21 @@ def test_non_mapping_fub_modules_yields_empty_result() -> None:
     result = parse_config({"FubModules": ["garbage"]})
 
     assert (result["markers"], result["io"], result["knx"]) == ([], [], [])
+
+
+async def test_io_ext_ids_from_parse_config_feed_get_io_live_states(
+    basic_result: dict[str, Any], logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """parse_config keeps ext_id a str; (ext_id, id) pairs must go into get_io_live_states unchanged."""
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_11": "1", "io_21": "2,5"}})
+
+    states = await logged_in.get_io_live_states(IoAddress(io["ext_id"], io["id"]) for io in basic_result["io_all"])
+
+    assert states == {"11": "1", "21": "2.5"}
+    (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
+    sent = json.loads(request.form["json"])
+    assert sent["io_11"] == {"action": "get", "ExtId": 1, "IOId": "11"}
+    assert sent["io_21"] == {"action": "get", "ExtId": 2, "IOId": "21"}
+    # The answer's keys are what parse_config's io_live_states expects.
+    reparsed = _parse(load_json_fixture("config_basic.json"), io_live_states=states)
+    assert {io["identifier"]: io["value"] for io in reparsed["io_all"]}["QI1"] == 2.5

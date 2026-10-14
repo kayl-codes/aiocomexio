@@ -6,6 +6,7 @@ catalog) plus optional live values. Nothing here touches the network.
 """
 
 import logging
+import math
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
@@ -124,16 +125,22 @@ class SafeDict(dict[str, Any]):
 
 
 def clean_value(val: Any) -> float:
-    """Convert a Comexio value to float, accepting a German decimal comma; 0.0 if not numeric."""
+    """Convert a Comexio value to float, accepting a German decimal comma; 0.0 if not numeric.
+
+    "nan" / "inf" count as not numeric: float() accepts them, but no Comexio reading is one.
+    """
     if val is None:
         return 0.0
     if isinstance(val, str):
         val = val.replace(",", ".")
     try:
-        return float(val)
+        result = float(val)
     except (ValueError, TypeError):
+        result = math.nan
+    if not math.isfinite(result):
         _LOGGER.warning("Failed to clean value: %s", val)
         return 0.0
+    return result
 
 
 def is_extension_offline(identifier: str | None) -> bool:
@@ -235,6 +242,7 @@ def parse_config(
     referenced_markers: set[str] | None = None,
     knx_live_states: Mapping[str, Any] | None = None,
     knx_dpt_catalog: Mapping[str, Any] | None = None,
+    io_live_states: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Parse the scraped function module page config into markers, IOs, KNX objects and Web-IO commands.
 
@@ -243,6 +251,10 @@ def parse_config(
     parse_io_input_types); without io_types, IOs are classified by their identifier.
     live_states / knx_live_states: id-keyed live values of markers and KNX objects. Kept as two
     separate mappings because markers and KNX objects share the same plain numeric id space.
+    io_live_states: live values of physical IOs keyed by IO "Id", as ComexioClient.get_io_live_states
+    returns them. An IO missing from it or mapped to None keeps the config's "Value"; a value present but not numeric
+    reads as 0 (with a warning), like a marker's. Parsing keeps no memory of earlier polls: a caller
+    polling between config fetches merges each result into its last known values before passing them.
     referenced_markers: ids of unnamed markers wired into a function plan — imported anyway
     with a "#nn" title.
     knx_dpt_catalog: the scraped KNX admin page; attaches DPT range/unit/device class metadata
@@ -293,7 +305,7 @@ def parse_config(
             referenced_ids=referenced_markers,
         )
     )
-    _process_ios(data, fub_modules, io_types, io_input_types or {}, options)
+    _process_ios(data, fub_modules, io_types, io_input_types or {}, options, io_live_states or {})
     # No "wired but unnamed" import for KNX: marker and KNX ids share a numeric space, so the
     # marker reference set cannot be reused here. A KNX object is imported only when named.
     data["knx"].extend(_process_knx(fub_modules, io_types, options, knx_live_states or {}, knx_dpt_catalog))
@@ -646,6 +658,7 @@ def _process_ios(
     io_types: Mapping[str, Any],
     io_input_types: Mapping[str, Any],
     options: ParseOptions,
+    io_live_states: Mapping[str, Any],
 ) -> None:
     """Physical IOs from $FubModules["1"] (one group per extension).
 
@@ -664,8 +677,10 @@ def _process_ios(
             if not isinstance(io_item, Mapping) or not io_item:
                 _LOGGER.debug("Skipping empty/non-dict IO entry %s of extension %s: %r", io_id, ext_name, io_item)
                 continue
-            entry = _build_io_entry(io_item, ext_name, io_types, io_input_types, options)
+            entry = _build_io_entry(io_item, ext_name, io_types, io_input_types, options, io_live_states)
             entry["offline"] = ext_offline
+            # The extension group key; ComexioClient.get_io_live_states needs it as "ExtId".
+            entry["ext_id"] = ext_id
             data["io_all"].append(entry)
             if not entry["inactive"]:
                 data["io"].append(entry)
@@ -693,6 +708,7 @@ def _build_io_entry(
     io_types: Mapping[str, Any],
     io_input_types: Mapping[str, Any],
     options: ParseOptions,
+    io_live_states: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Build one IO entry (without the extension's offline flag)."""
     # A numeric identifier is stringified, not replaced — it feeds unique_id/entity_id.
@@ -729,8 +745,9 @@ def _build_io_entry(
     ha_name = options.schema_io.format_map(
         SafeDict(ServerAlias=options.server_alias, ExtName=ext_name, IoId=ident, IoTitle=description or NO_NAME_TITLE)
     )
+    io_id = str(io_item.get("Id"))
     return {
-        "id": str(io_item.get("Id")),
+        "id": io_id,
         "ext_name": ext_name,
         "identifier": ident,
         "ha_name": " ".join(ha_name.split()),
@@ -741,7 +758,8 @@ def _build_io_entry(
         "min": type_info.get("min", 0),
         "max": v_max,
         "type_id_raw": type_id_raw,
-        "value": clean_value(io_item.get("Value", 0)),
+        # None is "no reading" (like an absent IO), not a non-numeric one: the config's "Value" stays.
+        "value": clean_value(live if (live := io_live_states.get(io_id)) is not None else io_item.get("Value", 0)),
         # Inactive IOs carry this flag so a plan renderer can grey the pill.
         "inactive": not io_item.get("Active"),
     }
