@@ -14,7 +14,7 @@ from .backup_diff import (
     snapshot_label_maps,
 )
 from .canvas import plan_active, plan_canvas_bounds, plan_dpi, plan_orientation, plan_paper_format
-from .payload import build_run_payload, normalize_plan_payload, plan_payload_has_elements
+from .payload import build_run_payload, normalize_plan_payload, plan_payload_has_collections, plan_payload_has_elements
 from .render import render_plan_svg
 from .render_flow import render_flow_svg
 from .render_labels import resolve_element_label
@@ -36,6 +36,7 @@ __all__ = [
     "plan_hash",
     "plan_orientation",
     "plan_paper_format",
+    "plan_payload_has_collections",
     "plan_payload_has_elements",
     "referenced_label_metadata",
     "render_flow_svg",
