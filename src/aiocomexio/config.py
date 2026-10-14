@@ -6,6 +6,7 @@ catalog) plus optional live values. Nothing here touches the network.
 """
 
 import logging
+import math
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
@@ -124,16 +125,22 @@ class SafeDict(dict[str, Any]):
 
 
 def clean_value(val: Any) -> float:
-    """Convert a Comexio value to float, accepting a German decimal comma; 0.0 if not numeric."""
+    """Convert a Comexio value to float, accepting a German decimal comma; 0.0 if not numeric.
+
+    "nan" / "inf" count as not numeric: float() accepts them, but no Comexio reading is one.
+    """
     if val is None:
         return 0.0
     if isinstance(val, str):
         val = val.replace(",", ".")
     try:
-        return float(val)
+        result = float(val)
     except (ValueError, TypeError):
+        result = math.nan
+    if not math.isfinite(result):
         _LOGGER.warning("Failed to clean value: %s", val)
         return 0.0
+    return result
 
 
 def is_extension_offline(identifier: str | None) -> bool:

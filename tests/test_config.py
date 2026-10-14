@@ -1,6 +1,7 @@
 """parse_config: scraped Comexio config -> markers / IOs / KNX / Web-IO commands."""
 
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -295,6 +296,14 @@ def test_io_schema_title(desc: str, ident: str, expected: str) -> None:
 )
 def test_clean_value(raw: Any, expected: float) -> None:
     assert clean_value(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-Infinity", float("nan"), float("-inf")])
+def test_clean_value_reads_non_finite_as_zero_with_a_warning(raw: Any, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.config"):
+        assert clean_value(raw) == 0.0
+
+    assert "Failed to clean value" in caplog.text
 
 
 def test_iter_group_accepts_object_array_and_none() -> None:
