@@ -568,7 +568,7 @@ class ComexioClient:
         A non-finite float (nan, inf) raises ValueError.
         """
 
-        await self._api_set({"ext": ext, "io": io}, value, what=f"Writing IO {io} of {ext}")
+        await self._api_set({"ext": ext, "io": io}, value, what=f"Writing IO {io!r} of {ext!r}")
 
     # --- Web-IO lifecycle (admin session) ---
 

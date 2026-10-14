@@ -129,7 +129,7 @@ async def test_set_io_value_percent_encodes_spaces_in_the_extension_name(
 @pytest.mark.parametrize(
     ("call", "target"),
     [
-        (lambda c: c.set_io_value("LED-Dimmer A3", "Q1", 50), "IO Q1 of LED-Dimmer A3"),
+        (lambda c: c.set_io_value("LED-Dimmer A3", "Q1", 50), "IO 'Q1' of 'LED-Dimmer A3'"),
         (lambda c: c.set_marker_value(5, 1), "marker M5"),
         (lambda c: c.set_knx_value(3, 1), "KNX object K3"),
     ],
@@ -202,6 +202,21 @@ async def test_set_value_unknown_answer_warns_without_raising(
     assert "Writing marker M5" in record.getMessage()
     assert "instead of '1'" in record.getMessage()
     assert (answer or "''") in record.getMessage()
+
+
+async def test_set_io_value_warning_quotes_names_so_a_newline_cannot_forge_a_log_line(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_text("GET", API_PATH, "ok")
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        await api_client.set_io_value("UD 1\nWARNING forged", "Q1\r", 1)
+
+    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    message = record.getMessage()
+    assert "\n" not in message
+    assert "\r" not in message
+    assert "Writing IO 'Q1\\r' of 'UD 1\\nWARNING forged'" in message
 
 
 async def test_set_value_accepted_answer_does_not_warn(
