@@ -11,6 +11,7 @@ from aiocomexio.function_plan import (
     plan_payload_has_collections,
     plan_payload_has_elements,
 )
+from aiocomexio.function_plan.payload import plan_payload_missing_collections
 
 
 @pytest.mark.parametrize(
@@ -140,9 +141,26 @@ def test_build_run_payload_refuses_a_non_mapping(plan: Any) -> None:
         ({"elements": {}}, False),
         ({"elements": {}, "connections": None}, False),
         ({"connections": []}, False),
+        ({"elements": {}, "connections": 5}, False),
+        ({"elements": {}, "connections": "x"}, False),
+        ({"elements": 5, "connections": {}}, False),
         (["elements", "connections"], False),
         (None, False),
     ],
 )
 def test_plan_payload_has_collections(payload: Any, expected: bool) -> None:
     assert plan_payload_has_collections(payload) is expected
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"elements": {}, "connections": []}, []),
+        ({"elements": {}}, ["connections"]),
+        ({"connections": {}, "elements": None}, ["elements"]),
+        ({"elements": 5, "connections": "x"}, ["elements", "connections"]),
+        (["x"], ["elements", "connections"]),
+    ],
+)
+def test_plan_payload_missing_collections_names_what_is_absent(payload: Any, expected: list[str]) -> None:
+    assert plan_payload_missing_collections(payload) == expected
