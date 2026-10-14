@@ -25,13 +25,6 @@ jobs:
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    # One scan per PR branch at a time: a newer run waits for the older one
-    # and then submits last; the older one, if it starts later, sees the
-    # moved PR head below and skips. No cancel-in-progress, so a running
-    # scan is never cut off. The branch name is fork-controlled, but here it
-    # only decides which runs queue behind each other.
-    concurrency:
-      group: sonar-pr-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
     permissions:
       contents: read
       actions: read
@@ -95,7 +88,10 @@ jobs:
             echo "current=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          [[ "$head_ref" == "$PR_HEAD_REF" ]] || { echo "::error::pr.env head ref does not match PR #$PR_NUMBER"; exit 1; }
+          # The head SHA ties the run to this PR, so the branch name comes from
+          # the API too: a branch renamed after the Build still gets its scan.
+          [[ "$head_ref" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::unexpected head ref of PR #$PR_NUMBER"; exit 1; }
+          echo "PR_HEAD_REF=$head_ref" >> "$GITHUB_ENV"
           if [[ "$base_ref" != "$PR_BASE_REF" ]]; then
             # Retargeting starts no new Build, so this run's coverage belongs to
             # the old base; a new push to the PR brings a fresh scan.
