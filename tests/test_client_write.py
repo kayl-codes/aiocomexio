@@ -127,11 +127,15 @@ async def test_set_io_value_percent_encodes_spaces_in_the_extension_name(
 
 
 @pytest.mark.parametrize(
-    ("call", "target"),
+    ("call", "target", "query"),
     [
-        (lambda c: c.set_io_value("LED-Dimmer A3", "Q1", 50), "IO 'Q1' of 'LED-Dimmer A3'"),
-        (lambda c: c.set_marker_value(5, 1), "marker M5"),
-        (lambda c: c.set_knx_value(3, 1), "KNX object K3"),
+        (
+            lambda c: c.set_io_value("LED-Dimmer A3", "Q1", 50),
+            "IO 'Q1' of 'LED-Dimmer A3'",
+            {"action": "set", "value": "50", "ext": "LED-Dimmer A3", "io": "Q1"},
+        ),
+        (lambda c: c.set_marker_value(5, 1), "marker M5", {"action": "set", "value": "1", "marker": "M5"}),
+        (lambda c: c.set_knx_value(3, 1), "KNX object K3", {"action": "set", "value": "1", "knx": "K3"}),
     ],
 )
 async def test_set_value_not_found_answer_raises_naming_the_target(
@@ -139,11 +143,16 @@ async def test_set_value_not_found_answer_raises_naming_the_target(
     comexio: FakeComexio,
     call: Callable[[ComexioClient], Awaitable[None]],
     target: str,
+    query: dict[str, str],
 ) -> None:
     comexio.serve_text("GET", API_PATH, "0:not_found")
 
     with pytest.raises(ComexioRequestRejectedError, match=re.escape(target)):
         await call(api_client)
+
+    # The rejection must come from the server's answer, not from a check before the request went out.
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query == query
 
 
 _AWKWARD_EXT_NAMES = ["A&B", "A#B", "A+B", "A%B", "A%41", "A/B", "A=B", "A?B", "Küche ä", "100% & #1 + a=b/c?d"]
@@ -187,6 +196,9 @@ async def test_set_value_padded_or_numbered_not_found_answer_raises(
 
     with pytest.raises(ComexioRequestRejectedError, match="marker M5"):
         await api_client.set_marker_value(5, 1)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query == {"action": "set", "value": "1", "marker": "M5"}
 
 
 @pytest.mark.parametrize("answer", ["error: not_found in table", "", "0", "ok"])
