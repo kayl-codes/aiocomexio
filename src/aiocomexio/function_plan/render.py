@@ -113,7 +113,9 @@ def render_plan_svg(
     lines under its label; None (or a block without settings) leaves the output unchanged.
     The lookup goes by element id, so like connection_values this is only meaningful for a LIVE
     render of the plan it was fetched for; a caller rendering a backup snapshot must leave it None,
-    since Comexio may have renumbered the blocks and the hover would show unrelated settings.
+    since Comexio may have renumbered the blocks and the hover would show unrelated settings. For
+    the same reason elements and block_values must come from the same fetch: the renderer has no
+    plan revision to match them by, so settings fetched across a plan edit can land on a reused id.
     """
     geos = _build_geometries(elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id)
     if canvas:

@@ -669,7 +669,8 @@ def render_flow_svg(
 
     block_values: optional {element id: {setting name: value}} (see render_plan_svg); a block's
     hover text lists them as "Name: Value" lines. Live renders only: a backup snapshot must pass
-    None, its element ids may no longer match the live settings.
+    None, its element ids may no longer match the live settings; elements and block_values must
+    come from the same fetch.
     """
     incoming, outgoing = build_wiring(connections)
     wired_ids = _wired_element_ids(elements, incoming, outgoing)
