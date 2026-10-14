@@ -134,7 +134,7 @@ _WEBIO_LIST_ID_FIELD = "Id"
 # fupValueData's answer for a stopped plan, observed live as "0:not_found".
 _NOT_RUNNING_SENTINEL_RE = re.compile(r"\d+:not_found")
 # A plain decimal as dashboard/refresh sends a live value: sign, ASCII digits, optional fraction (comma or dot).
-_PLAIN_DECIMAL_RE = re.compile(r"[+-]?[0-9]+(?:[.,][0-9]+)?")
+_PLAIN_DECIMAL_RE = re.compile(r"[+-]?\d+(?:[.,]\d+)?", re.ASCII)
 
 # save_fub form values: paper format ids and orientation ids as Comexio's plan dialog sends them.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
@@ -379,9 +379,10 @@ class ComexioClient:
         (a numeric string such as "74" or "9.96078"). An IO the answer leaves out, or answers
         with anything that is not a number — "0:not_found" for an inactive IO, a PHP warning —
         is absent from the result, never 0: a caller keeps its last known value for it. Such an
-        answer is logged at DEBUG if it is Comexio's "<n>:not_found" or missing, otherwise at
-        WARNING (one line per call). If the answer holds none of the requested IOs at all (a format
-        change or wrong ids), that is one WARNING as well, since DEBUG lines would hide it.
+        answer is logged at DEBUG if it is Comexio's "<n>:not_found" or the key is missing, otherwise
+        (an explicit null included) at WARNING (one line per call, IO ids shown as repr).
+        If the answer holds none of the requested IOs at all (a format change or wrong ids), that is
+        one WARNING as well, since DEBUG lines would hide it.
         """
         pairs = _io_ext_ids(ios)
         if not pairs:
@@ -1673,13 +1674,17 @@ def _collect_io_values(result: dict[str, Any], io_ids: Iterable[str]) -> tuple[d
     values: dict[str, str] = {}
     unexpected: list[str] = []
     for io_id in io_ids:
-        raw = result.get(f"{_IO_LIVE_KEY_PREFIX}{io_id}")
+        key = f"{_IO_LIVE_KEY_PREFIX}{io_id}"
+        raw = result.get(key)
         if (value := _numeric_text(raw)) is not None:
             values[io_id] = value
             continue
-        _LOGGER.debug("No live value for IO %s, dashboard/refresh answered %s", io_id, _excerpt(raw))
-        if raw is not None and not (isinstance(raw, str) and _NOT_RUNNING_SENTINEL_RE.fullmatch(raw.strip())):
-            unexpected.append(f"{io_id}: {_excerpt(raw)}")
+        # %r / repr: an IO id is caller input and must not put raw line breaks into a log line.
+        _LOGGER.debug("No live value for IO %r, dashboard/refresh answered %s", io_id, _excerpt(raw))
+        # An absent key and Comexio's not_found sentinel are expected; a key that is present with
+        # JSON null (or anything else that is no number) is not.
+        if key in result and not (isinstance(raw, str) and _NOT_RUNNING_SENTINEL_RE.fullmatch(raw.strip())):
+            unexpected.append(f"{io_id!r}: {_excerpt(raw)}")
     return values, unexpected
 
 

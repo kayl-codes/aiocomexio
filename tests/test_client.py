@@ -422,7 +422,23 @@ async def test_get_io_live_states_sends_prefixed_io_keys_in_own_request(
 @pytest.mark.parametrize(
     "answer",
     [None, "", "  ", "0:not_found", "12:not_found", "Warning: x", "nan", "inf", True, {"value": 1}, []]
-    + ["1_0", "1e3", "1.5E-2", "1 0", "+", "1,", ".5", "1.2.3", "٣", "-inf", float("inf"), float("nan")],
+    + [
+        "1_0",
+        "1e3",
+        "1.5E-2",
+        "1 0",
+        "+",
+        "1,",
+        ".5",
+        "1.2.3",
+        "٣",
+        "1٣",
+        "٣,٥",
+        "２１",
+        "-inf",
+        float("inf"),
+        float("nan"),
+    ],
 )
 async def test_get_io_live_states_leaves_out_non_numeric_answers(
     logged_in: ComexioClient, comexio: FakeComexio, answer: Any
@@ -505,12 +521,55 @@ async def test_get_io_live_states_warns_once_about_unexpected_answers(
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     message = warning.getMessage()
     assert "Dropped 2 unexpected IO live answers" in message
-    assert "1: 'Warning: undefined index'" in message
-    assert "3: ''" in message
+    assert "'1': 'Warning: undefined index'" in message
+    assert "'3': ''" in message
     # The not_found sentinel (IO 2) and the absent answer (IO 4) stay out of the warning.
     assert "not_found" not in message
-    assert "2: " not in message
-    assert "4: " not in message
+    assert "'2': " not in message
+    assert "'4': " not in message
+
+
+async def test_get_io_live_states_explicit_null_warns_but_absent_key_does_not(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_1": None, "io_2": "5"}})
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.client"):
+        assert await logged_in.get_io_live_states([(1, "1"), (1, "2"), (1, "3")]) == {"2": "5"}
+
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    message = warning.getMessage()
+    assert "Dropped 1 unexpected IO live answers" in message
+    assert "'1': None" in message
+    assert "'3'" not in message
+
+
+async def test_get_io_live_states_only_null_answers_is_not_reported_as_none_answered(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_1": None}})
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert await logged_in.get_io_live_states([(1, "1")]) == {}
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1
+    assert "Dropped 1 unexpected IO live answers" in messages[0]
+
+
+async def test_get_io_live_states_keeps_raw_line_breaks_out_of_the_logs(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_a\nforged": "oops\nline", "io_b\rx": None}})
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.client"):
+        assert await logged_in.get_io_live_states([(1, "a\nforged"), (1, "b\rx")]) == {}
+
+    assert caplog.records
+    for record in caplog.records:
+        assert "\n" not in record.getMessage()
+        assert "\r" not in record.getMessage()
+    assert r"'a\nforged'" in caplog.text
 
 
 async def test_get_io_live_states_not_found_and_absent_answers_do_not_warn(
@@ -522,7 +581,7 @@ async def test_get_io_live_states_not_found_and_absent_answers_do_not_warn(
         assert await logged_in.get_io_live_states([(1, "1"), (1, "2"), (1, "3")]) == {}
 
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert "No live value for IO 1" in caplog.text
+    assert "No live value for IO '1'" in caplog.text
 
 
 @pytest.mark.parametrize("payload", [{"result": []}, {"error": "x"}, ["result"]])
