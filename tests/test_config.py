@@ -115,8 +115,8 @@ def test_io_entry_carries_its_extension_id(basic_result: dict[str, Any]) -> None
 
 
 def test_io_live_states_override_the_config_value() -> None:
-    """An IO in io_live_states gets that value; an IO missing from it keeps the config's "Value"."""
-    result = _parse(load_json_fixture("config_basic.json"), io_live_states={"11": "0", "13": "9,96078"})
+    """An IO in io_live_states gets that value; an IO missing from it or mapped to None keeps the config's "Value"."""
+    result = _parse(load_json_fixture("config_basic.json"), io_live_states={"11": "0", "13": "9,96078", "21": None})
     values = {io["identifier"]: io["value"] for io in result["io_all"]}
 
     assert values == {"I1": 0.0, "Q1": 0.0, "AI1": 9.96078, "Q2": 0.0, "QI1": 55.0}

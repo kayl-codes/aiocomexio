@@ -501,9 +501,33 @@ async def test_get_io_live_states_same_io_with_two_ext_ids_raises_before_any_req
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
     ios = [IoAddress(1, "5"), IoAddress(2, "5")]
-    with pytest.raises(ValueError, match="two different extension ids"):
+    with pytest.raises(ValueError, match=r"IO '5' is given with two different extension ids"):
         await logged_in.get_io_live_states(ios)
     assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
+
+
+async def test_get_io_live_states_validation_errors_escape_the_io_id(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # A caller-supplied IO id must not put a raw line break into a logged exception.
+    ios = [IoAddress("x", "a\nforged")]
+    with pytest.raises(ValueError) as excinfo:
+        await logged_in.get_io_live_states(ios)
+    assert "\n" not in str(excinfo.value)
+    assert r"ext_id['a\nforged']" in str(excinfo.value)
+
+
+async def test_get_io_live_states_non_ascii_digit_sentinel_is_unexpected(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Comexio's sentinel carries ASCII digits; "٣:not_found" (Arabic-Indic 3) is no sentinel.
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"io_1": "٣:not_found"}})
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert await logged_in.get_io_live_states([IoAddress(1, "1")]) == {}
+
+    (warning,) = caplog.records
+    assert "Dropped 1 unexpected IO live answers" in warning.getMessage()
 
 
 async def test_get_io_live_states_accepts_a_plain_tuple_at_runtime(

@@ -135,7 +135,7 @@ _RUN_STATE_KEY_PREFIX = "fup_"
 # Each entry of the Web-IO add page's DeviceBaseList / DeviceList carries its key as "Id".
 _WEBIO_LIST_ID_FIELD = "Id"
 # fupValueData's answer for a stopped plan, observed live as "0:not_found".
-_NOT_RUNNING_SENTINEL_RE = re.compile(r"\d+:not_found")
+_NOT_RUNNING_SENTINEL_RE = re.compile(r"[0-9]+:not_found")  # ASCII only, like Comexio's ids
 # A plain decimal as dashboard/refresh sends a live value: sign, ASCII digits, optional fraction (comma or dot).
 _PLAIN_DECIMAL_RE = re.compile(r"[+-]?\d+(?:[.,]\d+)?", re.ASCII)
 # What /api/?action=set answers on success (observed live); anything else is logged at WARNING.
@@ -1780,7 +1780,7 @@ def _io_ext_ids(ios: Iterable[tuple[int | str, str]]) -> dict[str, int]:
         _require_strs(**{f"io_id[{io_id!r}]": io_id})
         ext = _ext_id_int(ext_id, io_id)
         if pairs.setdefault(io_id, ext) != ext:
-            raise ValueError(f"IO {io_id} is given with two different extension ids ({pairs[io_id]} and {ext})")
+            raise ValueError(f"IO {io_id!r} is given with two different extension ids ({pairs[io_id]} and {ext})")
     return pairs
 
 
@@ -1788,12 +1788,12 @@ def _ext_id_int(ext_id: Any, io_id: str) -> int:
     """The extension id as int: a non-negative int or digit string is accepted, a bool is not."""
     if _is_int(ext_id):
         if ext_id < 0:
-            raise ValueError(f"ext_id[{io_id}] must not be negative, got {ext_id!r}")
+            raise ValueError(f"ext_id[{io_id!r}] must not be negative, got {ext_id!r}")
         return ext_id
     if not isinstance(ext_id, str):
-        raise TypeError(f"ext_id[{io_id}] must be integers or integer strings, got {ext_id!r}")
+        raise TypeError(f"ext_id[{io_id!r}] must be integers or integer strings, got {ext_id!r}")
     if not (ext_id.isascii() and ext_id.isdigit()):
-        raise ValueError(f"ext_id[{io_id}] is not an integer string: {ext_id!r}")
+        raise ValueError(f"ext_id[{io_id!r}] is not an integer string: {ext_id!r}")
     return int(ext_id)
 
 

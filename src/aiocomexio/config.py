@@ -252,7 +252,7 @@ def parse_config(
     live_states / knx_live_states: id-keyed live values of markers and KNX objects. Kept as two
     separate mappings because markers and KNX objects share the same plain numeric id space.
     io_live_states: live values of physical IOs keyed by IO "Id", as ComexioClient.get_io_live_states
-    returns them. An IO missing from it keeps the config's "Value"; a value present but not numeric
+    returns them. An IO missing from it or mapped to None keeps the config's "Value"; a value present but not numeric
     reads as 0 (with a warning), like a marker's. Parsing keeps no memory of earlier polls: a caller
     polling between config fetches merges each result into its last known values before passing them.
     referenced_markers: ids of unnamed markers wired into a function plan — imported anyway
@@ -758,7 +758,8 @@ def _build_io_entry(
         "min": type_info.get("min", 0),
         "max": v_max,
         "type_id_raw": type_id_raw,
-        "value": clean_value(io_live_states.get(io_id, io_item.get("Value", 0))),
+        # None is "no reading" (like an absent IO), not a non-numeric one: the config's "Value" stays.
+        "value": clean_value(live if (live := io_live_states.get(io_id)) is not None else io_item.get("Value", 0)),
         # Inactive IOs carry this flag so a plan renderer can grey the pill.
         "inactive": not io_item.get("Active"),
     }
