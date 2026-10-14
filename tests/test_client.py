@@ -661,6 +661,8 @@ async def test_get_io_live_states_warns_when_the_answer_holds_none_of_the_reques
 
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert "none of the 2 requested IOs" in warning.getMessage()
+    # Only the answer's keys are logged, never its values (IO readings).
+    assert warning.getMessage().endswith("keys: ['1', 'knxIo_11_3']")
 
 
 async def test_get_io_live_states_warns_when_the_result_is_empty(

@@ -414,10 +414,11 @@ class ComexioClient:
             raise ComexioDataError(f"IO live states response has no result object: {_excerpt(data)}")
         values, unexpected = _collect_io_values(result, pairs)
         if not any(f"{_IO_LIVE_KEY_PREFIX}{io_id}" in result for io_id in pairs):
+            # Keys only: they show a format change or wrong ids, the values would put IO readings in the log.
             _LOGGER.warning(
-                "dashboard/refresh answered none of the %d requested IOs (format change or wrong ids?): %s",
+                "dashboard/refresh answered none of the %d requested IOs (format change or wrong ids?), keys: %s",
                 len(pairs),
-                _excerpt(result),
+                _excerpt(sorted(result)),
             )
         if unexpected:
             _LOGGER.warning(
