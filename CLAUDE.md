@@ -66,6 +66,10 @@ pre-commit run --all-files
 - Test data must be synthetic, never real installation data.
 - Public API is typed (`py.typed`); failures are raised as typed exceptions, not returned as error
   codes.
+- The review checklist with the detailed rules (strict types for parsed values, rendering of SVG text
+  and tooltips, stable sort order, tests, GitHub Actions) is `.github/review-checklist.md`; check
+  every change against it. This file owns the project rules; if the checklist contradicts it, this
+  file wins and the checklist is fixed.
 
 ## CI / quality gates
 
