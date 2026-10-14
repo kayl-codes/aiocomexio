@@ -556,16 +556,12 @@ async def test_get_io_live_states_warns_once_about_unexpected_answers(
     assert states == {"5": "4"}
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     message = warning.getMessage()
-    assert "Dropped 2 unexpected IO live answers" in message
-    assert "'1': str" in message
-    assert "'3': str" in message
-    # The answer itself could wrap an IO reading: it stays at DEBUG, out of the warning.
-    assert "undefined index" not in message
+    # The whole message is pinned: no answer content (it could wrap an IO reading, it stays at DEBUG),
+    # and neither the not_found sentinel (IO 2) nor the absent answer (IO 4).
+    assert message == (
+        "Dropped 2 unexpected IO live answers from dashboard/refresh (IO id: answer type): '1': str; '3': str"
+    )
     assert "undefined index" in caplog.text
-    # The not_found sentinel (IO 2) and the absent answer (IO 4) stay out of the warning.
-    assert "not_found" not in message
-    assert "'2': " not in message
-    assert "'4': " not in message
 
 
 async def test_get_io_live_states_explicit_null_warns_but_absent_key_does_not(
@@ -663,9 +659,11 @@ async def test_get_io_live_states_warns_when_the_answer_holds_none_of_the_reques
         assert await logged_in.get_io_live_states([IoAddress(1, "1"), IoAddress(1, "2")]) == {}
 
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert "none of the 2 requested IOs" in warning.getMessage()
-    # Only the answer's keys are logged, never its values (IO readings).
-    assert warning.getMessage().endswith("keys: ['1', 'knxIo_11_3']")
+    # Only the answer's keys are logged, never its values (IO readings): the whole message is pinned.
+    assert warning.getMessage() == (
+        "dashboard/refresh answered none of the 2 requested IOs (format change or wrong ids?), "
+        "keys: ['1', 'knxIo_11_3']"
+    )
 
 
 async def test_get_io_live_states_warns_when_the_result_is_empty(

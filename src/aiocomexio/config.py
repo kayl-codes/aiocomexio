@@ -253,7 +253,8 @@ def parse_config(
     separate mappings because markers and KNX objects share the same plain numeric id space.
     io_live_states: live values of physical IOs keyed by IO "Id", as ComexioClient.get_io_live_states
     returns them. An IO missing from it keeps the config's "Value"; a value present but not numeric
-    reads as 0 (with a warning), like a marker's.
+    reads as 0 (with a warning), like a marker's. Parsing keeps no memory of earlier polls: a caller
+    polling between config fetches merges each result into its last known values before passing them.
     referenced_markers: ids of unnamed markers wired into a function plan — imported anyway
     with a "#nn" title.
     knx_dpt_catalog: the scraped KNX admin page; attaches DPT range/unit/device class metadata
