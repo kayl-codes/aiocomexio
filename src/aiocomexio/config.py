@@ -62,6 +62,7 @@ TYPE_DIGITAL = "digital"
 # parse_config result/item keys used more than once here.
 _KEY_MARKERS = "markers"
 _KEY_WEBIO_COMMANDS = "webio_commands"
+_KEY_WEBIO_DUPLICATES = "webio_command_duplicates"
 _KEY_DPT_AMBIGUOUS = "dpt_ambiguous"
 _KEY_QUICKBUS_DEVICES = "quickbus_devices"
 
@@ -169,8 +170,16 @@ def is_extension_offline(identifier: str | None) -> bool:
 
 
 def _label(value: Any) -> str:
-    """A scraped label as str: a number is stringified, anything else non-string (or empty) is ""."""
-    return str(value) if value and isinstance(value, (str, int, float)) else ""
+    """A scraped label as str: a number is stringified, anything else non-string (or empty) is "".
+
+    So is an int beyond Python's int-to-str digit limit — str() refuses it.
+    """
+    if not value or not isinstance(value, (str, int, float)):
+        return ""
+    try:
+        return str(value)
+    except ValueError:
+        return ""
 
 
 def _table_entry(table: Mapping[str, Any], key: Any) -> Mapping[str, Any]:
@@ -278,7 +287,10 @@ def parse_config(
     keep passing its last good catalog when a catalog fetch fails, or the pairs fall apart.
 
     Returns a dict with the keys markers, io (active IOs), io_all (every IO, for labels), knx,
-    webio_commands (the consumer's own classes, keyed by command name), webio_names (label
+    webio_commands (the consumer's own classes, keyed by command name), webio_command_duplicates
+    (the further stored commands of a name webio_commands already holds, same fields plus "name";
+    the first one of a name wins, in WebioClass order — a consumer can delete the others by
+    webIoId, its audit recreates a command that turns out missing), webio_names (label
     lexicon over ALL Web-IO devices), webio_devices (one entry per WebioClass), extensions and
     quickbus_devices (Quickbus devices keyed by device id; an IO of one carries
     "quickbus": {"device_id", "name"}, every other IO "quickbus": None). A Quickbus IO is
@@ -297,6 +309,7 @@ def parse_config(
         "io_all": [],
         "knx": [],
         _KEY_WEBIO_COMMANDS: {},
+        _KEY_WEBIO_DUPLICATES: [],
         "webio_names": {},
         "webio_devices": {cls: {"device_id": None, "device_ip": None, "base_id": None} for cls in WEBIO_CLASSES},
         # Per-extension identity (name + stable serial), lets a consumer detect a Comexio-side rename.
@@ -372,6 +385,13 @@ def _process_device_info(
                 continue
             _add_webhook_command(data, w_id, w_obj, webio_class)
 
+    if duplicates := data[_KEY_WEBIO_DUPLICATES]:
+        _LOGGER.warning(
+            "%d stored Web-IO commands repeat the name of another command, only the first one of each name "
+            "is in webio_commands: %s",
+            len(duplicates),
+            log_excerpt([f"{d['name']} (webIoId {d['webIoId']}, {d['webioClass']})" for d in duplicates]),
+        )
     missing_classes = [c for c in missing_classes if c != WebioClass.QUICKBUS]
     if missing_classes and any(d.get("Name") == webio_name for d in web_devices.values()):
         # Pre-split installs have a single Web-IO device named exactly `webio_name`; it won't
@@ -446,14 +466,18 @@ def _add_webhook_command(data: dict[str, Any], w_id: str, w_obj: dict[str, Any],
         _LOGGER.warning("Skipping Web-IO command %s (webio_class=%s) with non-string name %r", w_id, webio_class, name)
         return
 
-    # webIoId (w_id) is a global counter across ALL Web-IO devices on the server — safe to key
-    # this single flat dict by command name regardless of webio_class.
-    data[_KEY_WEBIO_COMMANDS][name] = {
+    entry = {
         "webIoId": w_id,
         "cmdId": w_obj.get("WebCommandId"),
         "typeId": val_type,
         "webioClass": webio_class,
     }
+    # The consumer keys its commands by name across all classes; a second command of a name
+    # must not overwrite the first one, or it vanishes from the audit and is never cleaned up.
+    if name in data[_KEY_WEBIO_COMMANDS]:
+        data[_KEY_WEBIO_DUPLICATES].append({"name": name, **entry})
+        return
+    data[_KEY_WEBIO_COMMANDS][name] = entry
 
 
 def _process_source_items(
@@ -867,7 +891,8 @@ def _quickbus_io_map(
     mapping = ext_content.get("mapping")
     raw_map = mapping.get(_QUICKBUS_KEY) if isinstance(mapping, Mapping) else None
     result, unresolved = _resolve_quickbus_mapping(raw_map, devices, dropped)
-    if result:
+    if devices and (result or unresolved):
+        # Also when no entry resolves: the unresolved warning does not name the devices left without an IO.
         _report_quickbus_coverage(ext_id, ext_content, devices, result)
     if unresolved:
         _LOGGER.warning(
@@ -981,9 +1006,14 @@ def _process_extension_ios(
     ext_offline = is_extension_offline(ext_serial)
 
     entries: list[dict[str, Any]] = []
+    bad_ids: list[str] = []
     for io_id, io_item in iter_group(ext_content.get("inoutput")):
         if not isinstance(io_item, Mapping) or not io_item:
             _LOGGER.debug("Skipping empty/non-dict IO entry %s of extension %s: %r", io_id, ext_name, io_item)
+            continue
+        if _strict_id(io_item.get("Id")) is None:
+            # The Id feeds unique_id/entity_id and the Quickbus payload; str() of a huge int even raises.
+            bad_ids.append(f"{io_id}: {_short_repr(io_item.get('Id'))}")
             continue
         qb_device, is_input = qb.resolve(io_item)
         entry = builder.build(io_item, ext_name, qb_device, is_input)
@@ -991,6 +1021,10 @@ def _process_extension_ios(
         # The extension group key; ComexioClient.get_io_live_states needs it as "ExtId".
         entry["ext_id"] = ext_id
         entries.append(entry)
+    if bad_ids:
+        _LOGGER.warning(
+            "Skipping %d IO entries of extension %s without a valid Id: %s", len(bad_ids), ext_id, log_excerpt(bad_ids)
+        )
     qb.report()
     ambiguous = _ambiguous_ios(ext_id, entries)
     data["io_all"].extend(entries)

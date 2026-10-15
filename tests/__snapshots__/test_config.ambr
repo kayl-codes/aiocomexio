@@ -313,6 +313,8 @@
     ]),
     'quickbus_devices': dict({
     }),
+    'webio_command_duplicates': list([
+    ]),
     'webio_commands': dict({
       'HA IO BASE Q1': dict({
         'cmdId': 7,

@@ -203,7 +203,13 @@ def _io_command_range(io_item: Mapping[str, Any]) -> tuple[bool, float, float]:
 
 
 def build_io_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dict[str, Any]:
-    """Build the Web-IO command dict for a single physical IO (min/max: see _io_command_range)."""
+    """Build the Web-IO command dict for a single physical IO (min/max: see _io_command_range).
+
+    An IO of a Quickbus device gets its own command (build_quickbus_webio_command): ext +
+    identifier would not tell it apart from the same identifier on another device.
+    """
+    if io_item.get("quickbus"):
+        return build_quickbus_webio_command(io_item, webhook_path)
     is_ana, v_min, v_max = _io_command_range(io_item)
     safe_ext = lua_escape(io_item["ext_name"])
     safe_io_id = lua_escape(io_item["identifier"])
