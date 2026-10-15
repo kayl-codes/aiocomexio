@@ -549,7 +549,16 @@ def test_missing_type_table_keeps_quickbus_ios(io_types: Any, caplog: pytest.Log
     with caplog.at_level(logging.WARNING):
         result = parse_config(load_json_fixture("config_quickbus.json"), io_types=io_types)
 
-    assert {"201", "202", "203", "204", "211", "213"} <= {io["id"] for io in result["io"]}
+    assert {io["id"] for io in result["io"] if io["quickbus"]} == {
+        "201",
+        "202",
+        "203",
+        "204",
+        "211",
+        "213",
+        "301",
+        "302",
+    }
     assert "no row in the IO type table" not in caplog.text
 
 
@@ -624,11 +633,15 @@ def test_extensions_with_a_malformed_id_are_skipped(caplog: pytest.LogCaptureFix
     conf = load_json_fixture("config_quickbus.json")
     io_module = conf["FubModules"]["1"]
     io_module["1" + chr(10) + "ERROR forged"] = io_module.pop("2")
+    skipped_ios = set(io_module["1" + chr(10) + "ERROR forged"]["inoutput"])
 
     with caplog.at_level(logging.WARNING):
         result = _parse(conf)
 
     assert set(result["extensions"]) == {"1"}
+    assert skipped_ios == {"301", "302"}
+    assert skipped_ios.isdisjoint(_io_all(result))
+    assert skipped_ios.isdisjoint(io["id"] for io in result["io"])
     assert set(result["quickbus_devices"]) == {"1", "2"}
     assert not any(chr(10) in r.getMessage() for r in caplog.records)
     assert "Skipping 1 extensions with a malformed id or content: id '1" in caplog.text
@@ -644,6 +657,9 @@ def test_extensions_with_a_non_canonical_id_or_no_dict_content_are_skipped(caplo
         result = _parse(conf)
 
     assert set(result["extensions"]) == {"1"}
+    assert {io["ext_id"] for io in result["io"]} == {"1"}
+    assert {"301", "302"}.isdisjoint(_io_all(result))
+    assert set(result["quickbus_devices"]) == {"1", "2"}
     assert "Skipping 2 extensions with a malformed id or content: id '01', 3: " in caplog.text
 
 
