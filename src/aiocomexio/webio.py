@@ -7,10 +7,11 @@ change; each K-element wired to a bridge marker additionally gets an API-loopbac
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Collection, Mapping
 from typing import Any
 
-from .config import TYPE_ANALOG
+from .config import TYPE_ANALOG, log_excerpt
 from .const import (
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_INT16_DANGER_ZONE,
@@ -26,12 +27,14 @@ __all__ = [
     "build_io_webio_command",
     "build_knx_loopback_webio_command",
     "build_marker_webio_command",
+    "build_quickbus_webio_command",
     "build_webio_commands",
     "generate_webio_json",
     "knx_loopback_class_json",
     "knx_loopback_range",
     "knx_webio_range",
     "lua_escape",
+    "quickbus_command_name",
     "safe_webio_range",
 ]
 
@@ -182,8 +185,8 @@ def build_marker_webio_command(
     )
 
 
-def build_io_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dict[str, Any]:
-    """Build the Web-IO command dict for a single physical IO.
+def _io_command_range(io_item: Mapping[str, Any]) -> tuple[bool, float, float]:
+    """(is_analog, Min, Max) of an IO's Web-IO command.
 
     Uses the authentic min/max from the Comexio IO type definition, unless it lands in the
     int16 danger zone (see safe_webio_range). io_item["min"/"max"] can be present but None
@@ -196,11 +199,53 @@ def build_io_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dic
     default_max = 100 if is_ana else 1
     v_max = default_max if raw_max is None else raw_max
     v_min, v_max = safe_webio_range(v_min, v_max)
+    return is_ana, v_min, v_max
+
+
+def build_io_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dict[str, Any]:
+    """Build the Web-IO command dict for a single physical IO (min/max: see _io_command_range).
+
+    An IO of a Quickbus device gets its own command (build_quickbus_webio_command): ext +
+    identifier would not tell it apart from the same identifier on another device.
+    """
+    if io_item.get("quickbus"):
+        return build_quickbus_webio_command(io_item, webhook_path)
+    is_ana, v_min, v_max = _io_command_range(io_item)
     safe_ext = lua_escape(io_item["ext_name"])
     safe_io_id = lua_escape(io_item["identifier"])
     lua = _webio_data_lua(f'ext="{safe_ext}", io="{safe_io_id}", value=a, type="io"')
     return _webio_command(
         name=f"HA IO {io_item['ext_name']} {io_item['identifier']}",
+        type_id=2 if is_ana else 1,
+        min_v=v_min,
+        max_v=v_max,
+        data=lua,
+        webhook_path=webhook_path,
+    )
+
+
+def quickbus_command_name(io_item: Mapping[str, Any]) -> str:
+    """Web-IO command name of a Quickbus IO, e.g. "HA QB1 MT1 G18".
+
+    The device id keeps names unique even when two Quickbus devices share a name; the device
+    name keeps them readable in Comexio Studio.
+    """
+    qb = io_item["quickbus"]
+    return f"HA QB{qb['device_id']} {qb['name']} {io_item['identifier']}"
+
+
+def build_quickbus_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dict[str, Any]:
+    """Build the Web-IO command dict for a single IO of a Quickbus device.
+
+    Its identifier (G1, TL1, ...) repeats on every device of the same kind, so the payload
+    carries the IO's unique "Id" instead of ext + identifier (type "quickbus"). Min/max: see
+    _io_command_range.
+    """
+    is_ana, v_min, v_max = _io_command_range(io_item)
+    safe_id = lua_escape(io_item["id"])
+    lua = _webio_data_lua(f'id="{safe_id}", value=a, type="{WebioClass.QUICKBUS}"')
+    return _webio_command(
+        name=quickbus_command_name(io_item),
         type_id=2 if is_ana else 1,
         min_v=v_min,
         max_v=v_max,
@@ -276,24 +321,42 @@ def build_webio_commands(
     ignored_marker_ids / ignored_knx_ids exclude items the consumer does not expose — they
     need no command pushing their values.
     """
-    commands: list[dict[str, Any]] = []
+    commands: list[tuple[WebioClass, dict[str, Any]]] = []
+    for m in parsed_data.get("markers", []):
+        if not (ignored_marker_ids and int(m["id"]) in ignored_marker_ids):
+            commands.append((WebioClass.MARKER, build_marker_webio_command(m, webhook_path)))
+    for io in parsed_data.get("io", []):
+        if io.get("quickbus"):
+            commands.append((WebioClass.QUICKBUS, build_quickbus_webio_command(io, webhook_path)))
+        else:
+            commands.append((WebioClass.IO, build_io_webio_command(io, webhook_path)))
+    for knx_item in parsed_data.get("knx", []):
+        if not (ignored_knx_ids and int(knx_item["id"]) in ignored_knx_ids):
+            commands.append((WebioClass.KNX, build_marker_webio_command(knx_item, webhook_path, WebioClass.KNX)))
+    # Collisions are found across all classes, so a per-class upload leaves out the same ones.
+    return [cmd for cls, cmd in _without_colliding_names(commands) if webio_class in (None, cls)]
 
-    markers = parsed_data.get("markers", []) if webio_class in (None, WebioClass.MARKER) else []
-    for m in markers:
-        if ignored_marker_ids and int(m["id"]) in ignored_marker_ids:
-            continue
-        commands.append(build_marker_webio_command(m, webhook_path))
 
-    io_entries = parsed_data.get("io", []) if webio_class in (None, WebioClass.IO) else []
-    commands.extend(build_io_webio_command(io_item, webhook_path) for io_item in io_entries)
+def _without_colliding_names(
+    commands: list[tuple[WebioClass, dict[str, Any]]],
+) -> list[tuple[WebioClass, dict[str, Any]]]:
+    """The commands whose name no other command shares (ignoring case); the others are logged.
 
-    knx_entries = parsed_data.get("knx", []) if webio_class in (None, WebioClass.KNX) else []
-    for knx_item in knx_entries:
-        if ignored_knx_ids and int(knx_item["id"]) in ignored_knx_ids:
-            continue
-        commands.append(build_marker_webio_command(knx_item, webhook_path, source_type=WebioClass.KNX))
-
-    return commands
+    A consumer keys its Web-IO commands by name across all classes (parse_config's
+    "webio_commands"), so two commands of one name would overwrite each other there, and no
+    rule says which one is meant. A marker schema without its MarkerId can e.g. render a
+    marker name that equals an IO command name.
+    """
+    counts = Counter(cmd["Name"].casefold() for _, cmd in commands)
+    colliding = sorted({cmd["Name"] for _, cmd in commands if counts[cmd["Name"].casefold()] > 1})
+    if colliding:
+        _LOGGER.warning(
+            "%d Web-IO command names are generated more than once, those commands are left out "
+            "(rename the item in Comexio or change the naming schema): %s",
+            len(colliding),
+            log_excerpt(colliding),
+        )
+    return [(cls, cmd) for cls, cmd in commands if counts[cmd["Name"].casefold()] == 1]
 
 
 def generate_webio_json(
