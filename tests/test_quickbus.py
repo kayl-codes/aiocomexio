@@ -1,0 +1,557 @@
+"""Quickbus devices (Multitouch buttons, motion sensors): parsing, Web-IO commands and plan labels.
+
+The IOs of Quickbus devices sit in their extension's "inoutput" group like any other IO, but
+their identifiers (G1, TL1, ...) repeat once per device; "lowcan" lists the devices and
+"mapping.lowcan" maps each IO "Id" to its device.
+"""
+
+import copy
+import json
+import logging
+from typing import Any
+
+import pytest
+
+from aiocomexio.config import ParseOptions, parse_config
+from aiocomexio.const import WebioClass
+from aiocomexio.function_plan.render_geometry import _apply_geometry_target_fields
+from aiocomexio.function_plan.render_values import _pill_parts_io, element_search_id, io_owner
+from aiocomexio.webio import build_webio_commands, generate_webio_json
+from tests.common import load_json_fixture
+
+_HOOK = "/api/webhook/comexio_test"
+_UNRESOLVED = "entries point to an unknown device, are malformed or contradict each other"
+
+# Type ids as Comexio sends them: 134 = Multitouch gesture, 126 = motion (PIR), 12 = temperature,
+# 111 = LED colour channel. $IOInputTypes marks gestures and PIR as "not an input".
+_IO_TYPES = {
+    "1": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+    "12": {"binary": False, "min": 0, "max": 100, "unit": "°C"},
+    "111": {"binary": False, "min": 0, "max": 100, "unit": "%"},
+    "126": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+    "134": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+}
+_IO_INPUT_TYPES = {
+    "1": {"input": True},
+    "12": {"input": True},
+    "111": {"input": True},
+    "126": {"input": False},
+    "134": {"input": False},
+}
+
+
+def _parse(conf: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+    return parse_config(
+        conf if conf is not None else load_json_fixture("config_quickbus.json"),
+        io_types=_IO_TYPES,
+        io_input_types=_IO_INPUT_TYPES,
+        **kwargs,
+    )
+
+
+def _io_all(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {io["id"]: io for io in result["io_all"]}
+
+
+def _base_ext(conf: dict[str, Any]) -> dict[str, Any]:
+    ext: dict[str, Any] = conf["FubModules"]["1"]["1"]
+    return ext
+
+
+def test_quickbus_devices_are_listed_per_device_id() -> None:
+    result = _parse()
+
+    assert result["quickbus_devices"] == {
+        "1": {"id": "1", "name": "MT Flur", "serial": "2400-1200-9000", "type_id": 21, "ext_id": "1"},
+        "2": {"id": "2", "name": "MT Bad", "serial": "", "type_id": 21, "ext_id": "1"},
+        "3": {"id": "3", "name": "BM Diele", "serial": "", "type_id": 22, "ext_id": "2"},
+    }
+
+
+def test_repeated_identifiers_are_tagged_with_their_own_device() -> None:
+    """G1/TL1 exist once per device — only the device tag tells them apart."""
+    ios = _io_all(_parse())
+
+    assert {io_id: ios[io_id]["identifier"] for io_id in ("201", "211")} == {"201": "G1", "211": "G1"}
+    assert ios["201"]["quickbus"] == {"device_id": "1", "name": "MT Flur"}
+    assert ios["211"]["quickbus"] == {"device_id": "2", "name": "MT Bad"}
+    assert ios["213"]["quickbus"] == {"device_id": "2", "name": "MT Bad"}
+    # A device on another extension; its mapping holds the device id once as a digit string.
+    assert ios["301"]["quickbus"] == {"device_id": "3", "name": "BM Diele"}
+    assert ios["302"]["quickbus"] == {"device_id": "3", "name": "BM Diele"}
+
+
+def test_plain_ios_next_to_quickbus_devices_stay_plain() -> None:
+    ios = _io_all(_parse())
+
+    assert ios["11"]["quickbus"] is None
+    assert ios["11"]["name"] == "BASE I1 Taster Flur"
+    # The extension's own TL1 shares the identifier with the devices' TL1 but is no device IO.
+    assert ios["46"]["quickbus"] is None
+    assert ios["46"]["name"] == "BASE TL1 Onboard Temperatur"
+
+
+def test_quickbus_io_direction_comes_from_int_is_output() -> None:
+    """$IOInputTypes marks gestures/PIR as no input — they must still be read-only inputs."""
+    ios = _io_all(_parse())
+
+    assert ios["201"]["is_input"] is True  # gesture
+    assert ios["301"]["is_input"] is True  # PIR
+    assert ios["204"]["is_input"] is False  # LED colour channel
+
+
+def test_quickbus_io_is_named_after_its_device() -> None:
+    ios = _io_all(_parse())
+
+    assert ios["202"]["name"] == "MT Flur G18 Licht Flur"
+    assert ios["202"]["ha_name"] == "G18 Licht Flur"
+    assert ios["211"]["name"] == "MT Bad G1"
+    assert ios["211"]["ha_name"] == "G1 #nn"
+
+
+def test_ext_name_placeholder_renders_the_device_name() -> None:
+    ios = _io_all(_parse(options=ParseOptions(schema_io="{ExtName} {IoId} {IoTitle}")))
+
+    assert ios["202"]["ha_name"] == "MT Flur G18 Licht Flur"
+    assert ios["202"]["ext_name"] == "BASE"
+    assert ios["11"]["ha_name"] == "BASE I1 Taster Flur"
+
+
+def test_inactive_quickbus_io_is_labelled_but_not_active() -> None:
+    result = _parse()
+
+    assert "212" in _io_all(result)
+    assert "212" not in {io["id"] for io in result["io"]}
+
+
+def test_extension_without_quickbus_has_no_devices() -> None:
+    result = parse_config(load_json_fixture("config_basic.json"), io_types=_IO_TYPES)
+
+    assert result["quickbus_devices"] == {}
+    assert all(io["quickbus"] is None for io in result["io_all"])
+
+
+def test_mapping_to_an_unknown_device_leaves_a_plain_io(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["mapping"]["lowcan"]["211"] = 9
+    _base_ext(conf)["mapping"]["lowcan"]["213"] = True
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["211"]["quickbus"] is None
+    assert ios["213"]["quickbus"] is None
+    assert ios["201"]["quickbus"] == {"device_id": "1", "name": "MT Flur"}
+    assert f"2 {_UNRESOLVED}" in caplog.text
+
+
+def test_device_id_seen_on_two_extensions_drops_both(caplog: pytest.LogCaptureFixture) -> None:
+    """Neither extension keeps the id — which one wins must not depend on the parse order."""
+    conf = load_json_fixture("config_quickbus.json")
+    multibridge = conf["FubModules"]["1"]["2"]
+    multibridge["lowcan"] = {"1": {"Id": 1, "Name": "Doppelt", "Identifier": "", "TypeId": 22}}
+    multibridge["mapping"]["lowcan"] = {"301": 1, "302": 1}
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    ios = _io_all(result)
+    assert "1" not in result["quickbus_devices"]
+    assert ios["301"]["quickbus"] is None
+    assert ios["302"]["quickbus"] is None
+    assert ios["201"]["quickbus"] is None
+    assert ios["211"]["quickbus"] == {"device_id": "2", "name": "MT Bad"}
+    assert (
+        "Quickbus device ids are not unique, their devices are dropped and their IOs treated as plain IOs: 1"
+        in caplog.text
+    )
+    # The mapping entries of the dropped id are covered by that warning, not reported a second time.
+    assert "Quickbus mapping of extension" not in caplog.text
+    assert "no usable IO mapping" not in caplog.text
+
+
+def test_device_id_listed_twice_in_one_extension_drops_both(caplog: pytest.LogCaptureFixture) -> None:
+    """Neither entry may keep the id — the IOs of the second would land on the first device."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["lowcan"]["7"] = {"Id": "02", "Name": "MT Kopie", "Identifier": "", "TypeId": 21}
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    ios = _io_all(result)
+    assert "2" not in result["quickbus_devices"]
+    assert ios["211"]["quickbus"] is None
+    assert ios["201"]["quickbus"] == {"device_id": "1", "name": "MT Flur"}
+    assert "Quickbus device ids are not unique, their devices are dropped and their IOs treated as plain IOs: 2" in (
+        caplog.text
+    )
+
+
+def test_mapping_to_a_device_of_another_extension_leaves_a_plain_io(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    multibridge = conf["FubModules"]["1"]["2"]
+    del multibridge["lowcan"]
+    multibridge["mapping"]["lowcan"] = {"301": 1}
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["301"]["quickbus"] is None
+    assert f"Quickbus mapping of extension 2: 1 {_UNRESOLVED}" in caplog.text
+
+
+@pytest.mark.parametrize("bad_key", ["x", "-1", "2.0"])
+def test_malformed_io_key_in_mapping_is_reported(bad_key: str, caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["mapping"]["lowcan"][bad_key] = 1
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["201"]["quickbus"] == {"device_id": "1", "name": "MT Flur"}
+    assert f"1 {_UNRESOLVED}, those IOs are treated as plain IOs: '{bad_key}'->1" in caplog.text
+
+
+def test_io_mapped_to_two_devices_stays_plain(caplog: pytest.LogCaptureFixture) -> None:
+    """ "0211" and "211" are the same IO — with two different devices neither one is trusted."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["mapping"]["lowcan"]["0211"] = 1
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["211"]["quickbus"] is None
+    assert ios["213"]["quickbus"] == {"device_id": "2", "name": "MT Bad"}
+    assert f"Quickbus mapping of extension 1: 1 {_UNRESOLVED}, those IOs are treated as plain IOs: '0211'->1" in (
+        caplog.text
+    )
+
+
+def test_same_device_listed_twice_for_one_io_is_no_conflict(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["mapping"]["lowcan"]["0211"] = 2
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["211"]["quickbus"] == {"device_id": "2", "name": "MT Bad"}
+    assert "Quickbus mapping" not in caplog.text
+
+
+def test_repeated_identifier_within_one_device_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    """Their Web-IO command names would collide — Comexio should never list such a pair."""
+    conf = load_json_fixture("config_quickbus.json")
+    ext = _base_ext(conf)
+    ext["inoutput"]["205"] = {**ext["inoutput"]["201"], "Id": 205, "Identifier": "g1"}
+    ext["mapping"]["lowcan"]["205"] = 1
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    assert "1 Quickbus IOs of extension 1 repeat an identifier of their own device: MT Flur 'g1'" in caplog.text
+
+
+@pytest.mark.parametrize("mapping", [{}, {"wireless": []}, {"lowcan": []}, ["kaputt"]])
+def test_devices_without_a_mapping_are_reported(mapping: Any, caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    conf["FubModules"]["1"]["2"]["mapping"] = mapping
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["301"]["quickbus"] is None
+    assert "Extension 2 lists 1 Quickbus devices but no usable IO mapping" in caplog.text
+
+
+def test_long_unresolved_mapping_list_is_capped(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["mapping"]["lowcan"].update({str(900 + n): 9 for n in range(8)})
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    assert "8 entries point to an unknown device" in caplog.text
+    assert "'904'->9 and 3 more" in caplog.text
+    assert "'905'" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "key", "expected"),
+    [
+        ("Identifier", 1234, "serial", ""),
+        ("TypeId", "21", "type_id", None),
+        ("TypeId", True, "type_id", None),
+    ],
+)
+def test_malformed_device_field_is_reported(
+    field: str, value: Any, key: str, expected: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["lowcan"]["1"][field] = value
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    assert result["quickbus_devices"]["1"][key] == expected
+    assert "Quickbus device 1 of extension 1 has a" in caplog.text
+
+
+@pytest.mark.parametrize("field", ["Identifier", "TypeId"])
+def test_missing_device_field_is_not_reported(field: str, caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    del _base_ext(conf)["lowcan"]["1"][field]
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    assert "Quickbus device 1" not in caplog.text
+
+
+@pytest.mark.parametrize("bad_id", [None, True, -1, 1.0, "1a", "", "٣", "9" * 5000])
+def test_malformed_device_entry_is_skipped(bad_id: Any, caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["lowcan"]["2"]["Id"] = bad_id
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    assert "2" not in result["quickbus_devices"]
+    assert _io_all(result)["211"]["quickbus"] is None
+    assert "Skipping malformed Quickbus device entry 2 of extension 1" in caplog.text
+
+
+def test_non_dict_device_entry_and_non_dict_mapping_do_not_crash(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["lowcan"]["2"] = "kaputt"
+    conf["FubModules"]["1"]["2"]["mapping"] = ["kaputt"]
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["201"]["quickbus"] == {"device_id": "1", "name": "MT Flur"}
+    assert ios["211"]["quickbus"] is None
+    assert ios["301"]["quickbus"] is None
+    assert "Skipping malformed Quickbus device entry 2 of extension 1: 'kaputt'" in caplog.text
+
+
+def test_device_id_string_is_canonical() -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["lowcan"]["2"]["Id"] = "002"
+
+    result = _parse(conf)
+
+    assert result["quickbus_devices"]["2"]["id"] == "2"
+    assert _io_all(result)["211"]["quickbus"] == {"device_id": "2", "name": "MT Bad"}
+
+
+def test_unnamed_device_gets_a_fallback_name() -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["lowcan"]["2"]["Name"] = ""
+
+    result = _parse(conf)
+
+    assert result["quickbus_devices"]["2"]["name"] == "QB2"
+    assert _io_all(result)["211"]["name"] == "QB2 G1"
+
+
+@pytest.mark.parametrize("flag", [None, True, False, 2, 0.0, "yes"])
+def test_unusable_int_is_output_makes_a_read_only_input(flag: Any, caplog: pytest.LogCaptureFixture) -> None:
+    """Not the type table: its row 134 says "input: false" and would make the gesture an output."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["201"]["IntIsOutput"] = flag
+    _base_ext(conf)["inoutput"]["204"]["IntIsOutput"] = flag
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["201"]["is_input"] is True
+    assert ios["204"]["is_input"] is True
+    assert (
+        "2 Quickbus IOs of extension 1 have no usable IntIsOutput flag and are treated as read-only inputs: "
+        f"MT Flur 'G1': {flag!r}, MT Flur 'R': {flag!r}"
+    ) in caplog.text
+
+
+@pytest.mark.parametrize(("flag", "is_input"), [("0", True), ("1", False)])
+def test_int_is_output_as_digit_string(flag: str, is_input: bool) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["201"]["IntIsOutput"] = flag
+
+    assert _io_all(_parse(conf))["201"]["is_input"] is is_input
+
+
+def test_int_is_output_does_not_change_plain_ios() -> None:
+    """Outside the Quickbus the identifier prefix keeps deciding, whatever IntIsOutput says."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = 1
+
+    assert _io_all(_parse(conf))["11"]["is_input"] is True
+
+
+def test_legacy_hint_does_not_list_the_quickbus_class(caplog: pytest.LogCaptureFixture) -> None:
+    """Pre-split installs never had a Quickbus class — the migration hint must not ask for one."""
+    conf = load_json_fixture("config_quickbus.json")
+    conf["WebDevices"] = {"30": {"Name": "HomeAssistant", "Ip": "192.168.1.20:8123", "WebDeviceBaseId": 7}}
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    assert "missing class(es): Marker, IO, KNX." in caplog.text
+
+
+def test_no_quickbus_class_is_not_reported_as_missing(caplog: pytest.LogCaptureFixture) -> None:
+    """An install set up before Quickbus support has every class but [QB] — no warning for that."""
+    conf = load_json_fixture("config_quickbus.json")
+    conf["WebDevices"] = {
+        str(30 + n): {"Name": f"HomeAssistant{suffix}", "Ip": "192.168.1.20:8123", "WebDeviceBaseId": 7 + n}
+        for n, suffix in enumerate((" [M]", " [IO]", " [KNX]"))
+    }
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    assert result["webio_devices"][WebioClass.QUICKBUS] == {"device_id": None, "device_ip": None, "base_id": None}
+    assert "missing class" not in caplog.text
+
+
+def test_existing_quickbus_commands_are_parsed_into_their_class() -> None:
+    """The consumer's audit compares these against build_webio_commands — names and class must line up."""
+    conf = load_json_fixture("config_quickbus.json")
+    result = _parse(conf)
+    expected = build_webio_commands(_HOOK, result, WebioClass.QUICKBUS)
+    conf["FubModules"]["10"] = {
+        "31": {
+            str(500 + n): {"Name": cmd["Name"], "TypeId": cmd["TypeId"], "WebCommandId": 900 + n}
+            for n, cmd in enumerate(expected)
+        }
+    }
+
+    commands = _parse(conf)["webio_commands"]
+
+    assert set(commands) == {cmd["Name"] for cmd in expected}
+    assert commands["HA QB1 MT Flur G1"] == {
+        "webIoId": "500",
+        "cmdId": 900,
+        "typeId": 1,
+        "webioClass": WebioClass.QUICKBUS,
+    }
+    assert commands["HA QB1 MT Flur TL1"]["typeId"] == 2
+
+
+def test_quickbus_webio_device_is_found() -> None:
+    devices = _parse()["webio_devices"]
+
+    assert devices[WebioClass.QUICKBUS] == {"device_id": "31", "device_ip": "192.168.1.20:8123", "base_id": "8"}
+
+
+# --- Web-IO commands ---
+
+
+def test_io_class_leaves_quickbus_ios_out() -> None:
+    names = [cmd["Name"] for cmd in build_webio_commands(_HOOK, _parse(), WebioClass.IO)]
+
+    assert names == ["HA IO BASE I1"]
+
+
+def test_quickbus_class_has_one_command_per_active_quickbus_io() -> None:
+    commands = build_webio_commands(_HOOK, _parse(), WebioClass.QUICKBUS)
+
+    assert [cmd["Name"] for cmd in commands] == [
+        "HA QB1 MT Flur G1",
+        "HA QB1 MT Flur G18",
+        "HA QB1 MT Flur TL1",
+        "HA QB1 MT Flur R",
+        "HA QB2 MT Bad G1",
+        "HA QB2 MT Bad TL1",
+        "HA QB3 BM Diele PIR1",
+        "HA QB3 BM Diele TL1",
+    ]
+
+
+def test_quickbus_command_pushes_the_io_id() -> None:
+    commands = {cmd["Name"]: cmd for cmd in build_webio_commands(_HOOK, _parse(), WebioClass.QUICKBUS)}
+
+    gesture = commands["HA QB2 MT Bad G1"]
+    assert 'id="211", value=a, type="quickbus"' in gesture["Data"]
+    assert (gesture["TypeId"], gesture["Min"], gesture["Max"]) == (1, 0, 1)
+    assert gesture["Parameter"] == _HOOK
+    temperature = commands["HA QB1 MT Flur TL1"]
+    assert (temperature["TypeId"], temperature["Min"], temperature["Max"]) == (2, 0, 100)
+
+
+def test_quickbus_command_names_stay_unique_for_same_named_devices() -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["lowcan"]["2"]["Name"] = "MT Flur"
+
+    names = [cmd["Name"] for cmd in build_webio_commands(_HOOK, _parse(conf))]
+
+    assert len(names) == len(set(names))
+
+
+def test_all_classes_together_cover_every_active_io_once() -> None:
+    result = _parse()
+
+    commands = build_webio_commands(_HOOK, result)
+    per_class = build_webio_commands(_HOOK, result, WebioClass.IO) + build_webio_commands(
+        _HOOK, result, WebioClass.QUICKBUS
+    )
+
+    assert len(commands) == len(result["io"])
+    assert commands == per_class
+    assert len({cmd["Name"] for cmd in commands}) == len(commands)
+
+
+def test_quickbus_device_name_is_lua_escaped_in_name_only() -> None:
+    """The payload carries only the numeric IO id — a quote in the device name cannot break the Lua."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["lowcan"]["1"]["Name"] = 'MT "Flur"'
+
+    commands = build_webio_commands(_HOOK, _parse(conf), WebioClass.QUICKBUS)
+
+    assert commands[0]["Name"] == 'HA QB1 MT "Flur" G1'
+    assert 'id="201", value=a, type="quickbus"' in commands[0]["Data"]
+    assert "Flur" not in commands[0]["Data"]
+
+
+def test_generate_webio_json_for_the_quickbus_class() -> None:
+    result = _parse()
+
+    payload = json.loads(generate_webio_json(_HOOK, "HomeAssistant [QB]", result, WebioClass.QUICKBUS))
+
+    assert payload["base"]["Identifier"] == "HomeAssistant [QB]"
+    assert payload["commands"] == build_webio_commands(_HOOK, result, WebioClass.QUICKBUS)
+
+
+# --- Function plan labels ---
+
+
+def test_io_owner() -> None:
+    ios = _io_all(_parse())
+
+    assert io_owner(ios["211"]) == "MT Bad"
+    assert io_owner(ios["11"]) == "BASE"
+    assert io_owner({"quickbus": {"device_id": "1", "name": 7}, "ext_name": "BASE"}) == "BASE"
+    assert io_owner({"ext_name": None}) == ""
+
+
+def test_quickbus_io_is_addressed_by_its_device_in_plans() -> None:
+    ios = _io_all(_parse())
+    ref = {"reference": {"type": 1, "ref_id": 211}}
+
+    assert element_search_id(ref, ios) == "MT Bad#G1"
+    assert _pill_parts_io("202", ios) == ("MT Flur  #G18", "Licht Flur", "0")
+
+
+def test_quickbus_output_is_not_writable_from_a_plan() -> None:
+    """The plan card must not offer set_value for "MT Flur#R" — that address is unknown to the API."""
+    ios = _io_all(_parse())
+    plain_output = copy.deepcopy(ios["204"])
+    plain_output["quickbus"] = None
+    geo: dict[str, Any] = {"inactive": False}
+    plain_geo: dict[str, Any] = {"inactive": False}
+
+    _apply_geometry_target_fields(geo, 1, "204", {}, ios)
+    _apply_geometry_target_fields(plain_geo, 1, "204", {}, {"204": plain_output})
+
+    assert geo == {"inactive": False, "target": "MT Flur#R", "io_input": False, "writable": False}
+    assert plain_geo["writable"] is True

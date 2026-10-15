@@ -10,7 +10,7 @@ import math
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 from .const import (
@@ -62,12 +62,23 @@ TYPE_DIGITAL = "digital"
 _KEY_MARKERS = "markers"
 _KEY_WEBIO_COMMANDS = "webio_commands"
 _KEY_DPT_AMBIGUOUS = "dpt_ambiguous"
+_KEY_QUICKBUS_DEVICES = "quickbus_devices"
 
 # $FubModules keys of the three source categories and of the Web-IO command groups.
 _MODULE_IO = "1"
 _MODULE_MARKER = "2"
 _MODULE_WEBIO = "10"
 _MODULE_KNX = "11"
+
+# Key of an extension's Quickbus device table in $FubModules["1"], and of its IO-Id -> device-Id
+# map under the extension's "mapping" (Comexio's internal name for the Quickbus is "lowcan").
+_QUICKBUS_KEY = "lowcan"
+
+# Entries named in one aggregated warning before the rest is only counted.
+_MAX_LOGGED_ENTRIES = 5
+
+# Longest digit string _strict_id accepts as an id (fits a signed 64-bit integer).
+_MAX_ID_DIGITS = 18
 
 _OUTPUT_IO_RE = re.compile(r"^Q\d+$")
 _INPUT_IO_RE = re.compile(r"^(?:I|AI|QI)\d+$")
@@ -93,9 +104,9 @@ class ParseOptions:
 
     def __post_init__(self) -> None:
         """Reject a malformed schema here, naming the field, instead of mid-parse without context."""
-        for field in fields(self):
-            if field.name.startswith("schema_"):
-                _validate_schema(field.name, getattr(self, field.name))
+        for schema_field in fields(self):
+            if schema_field.name.startswith("schema_"):
+                _validate_schema(schema_field.name, getattr(self, schema_field.name))
 
 
 def _validate_schema(field_name: str, schema: str) -> None:
@@ -264,7 +275,11 @@ def parse_config(
 
     Returns a dict with the keys markers, io (active IOs), io_all (every IO, for labels), knx,
     webio_commands (the consumer's own classes, keyed by command name), webio_names (label
-    lexicon over ALL Web-IO devices), webio_devices (one entry per WebioClass) and extensions.
+    lexicon over ALL Web-IO devices), webio_devices (one entry per WebioClass), extensions and
+    quickbus_devices (Quickbus devices keyed by device id; an IO of one carries
+    "quickbus": {"device_id", "name"}, every other IO "quickbus": None). A Quickbus IO is
+    addressed by its unique "id" only — its ext_name/identifier pair repeats across devices, so
+    ComexioClient.set_io_value cannot reach it: treat it as read-only even when is_input is False.
     """
     options = options or ParseOptions()
     fub_modules = conf.get("FubModules")
@@ -280,6 +295,7 @@ def parse_config(
         "webio_devices": {cls: {"device_id": None, "device_ip": None, "base_id": None} for cls in WEBIO_CLASSES},
         # Per-extension identity (name + stable serial), lets a consumer detect a Comexio-side rename.
         "extensions": {},
+        _KEY_QUICKBUS_DEVICES: {},
     }
     if io_types is None and (fub_modules.get(_MODULE_IO) or fub_modules.get(_MODULE_KNX)):
         _LOGGER.warning(
@@ -350,6 +366,7 @@ def _process_device_info(
                 continue
             _add_webhook_command(data, w_id, w_obj, webio_class)
 
+    missing_classes = [c for c in missing_classes if c != WebioClass.QUICKBUS]
     if missing_classes and any(d.get("Name") == webio_name for d in web_devices.values()):
         # Pre-split installs have a single Web-IO device named exactly `webio_name`; it won't
         # match the "<name> [M]"/"<name> [IO]" class names, so the classes look missing.
@@ -652,6 +669,227 @@ def _extension_meta(ext_id: str, ext_content: Mapping[str, Any]) -> tuple[str, s
     )
 
 
+def _strict_id(value: Any) -> str | None:
+    """A Comexio id as a canonical str: a non-negative int (not bool) or an ASCII digit string; else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value) if value >= 0 else None
+    # The length cap keeps int() below its digit limit — a longer string would raise instead.
+    if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= _MAX_ID_DIGITS:
+        return str(int(value))
+    return None
+
+
+def _log_excerpt(items: list[str]) -> str:
+    """The first _MAX_LOGGED_ENTRIES items joined for a log line, with the rest counted."""
+    shown = ", ".join(items[:_MAX_LOGGED_ENTRIES])
+    more = len(items) - _MAX_LOGGED_ENTRIES
+    return f"{shown} and {more} more" if more > 0 else shown
+
+
+def _quickbus_device(dev_id: str, raw: Mapping[str, Any], ext_id: str) -> dict[str, Any]:
+    """One Quickbus device entry; a malformed field is logged and replaced by its empty value."""
+    name = _label(raw.get("Name"))
+    if not name:
+        _LOGGER.debug("Quickbus device %s of extension %s has no name (%r)", dev_id, ext_id, raw.get("Name"))
+    serial = raw.get("Identifier")
+    if serial is not None and not isinstance(serial, str):
+        _LOGGER.warning("Quickbus device %s of extension %s has a non-string serial %r", dev_id, ext_id, serial)
+    type_id = raw.get("TypeId")
+    type_ok = isinstance(type_id, int) and not isinstance(type_id, bool)
+    if type_id is not None and not type_ok:
+        _LOGGER.warning("Quickbus device %s of extension %s has a malformed TypeId %r", dev_id, ext_id, type_id)
+    return {
+        "id": dev_id,
+        "name": name or f"QB{dev_id}",
+        # Empty for a virtual device (created in Comexio Studio without hardware).
+        "serial": serial if isinstance(serial, str) else "",
+        "type_id": type_id if type_ok else None,
+        "ext_id": ext_id,
+    }
+
+
+def _quickbus_entries(ext_id: str, ext_content: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    """(device id, raw entry) of every well-formed Quickbus device entry of one extension."""
+    entries: list[tuple[str, Mapping[str, Any]]] = []
+    for key, raw in iter_group(ext_content.get(_QUICKBUS_KEY)):
+        dev_id = _strict_id(raw.get("Id")) if isinstance(raw, Mapping) else None
+        if dev_id is None:
+            _LOGGER.warning("Skipping malformed Quickbus device entry %s of extension %s: %r", key, ext_id, raw)
+            continue
+        entries.append((dev_id, raw))
+    return entries
+
+
+def _collect_quickbus_devices(fub_modules: Mapping[str, Any]) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """The Quickbus devices of every extension (ext id -> device id -> device), and the dropped ids.
+
+    A device id that is not unique — listed twice in one extension or on two extensions — is
+    dropped everywhere, so no IO is merged into the wrong device; the IOs of all its devices
+    stay plain IOs. Collected before any IO is built, so the outcome does not depend on the
+    order of the extensions.
+    """
+    by_ext: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    dropped: set[str] = set()
+    for ext_id, ext_content in iter_group(fub_modules.get(_MODULE_IO)):
+        if not isinstance(ext_content, Mapping):
+            continue
+        devices: dict[str, Any] = {}
+        for dev_id, raw in _quickbus_entries(ext_id, ext_content):
+            if dev_id in seen:
+                dropped.add(dev_id)
+                continue
+            seen.add(dev_id)
+            devices[dev_id] = _quickbus_device(dev_id, raw, ext_id)
+        by_ext[ext_id] = devices
+    if dropped:
+        _LOGGER.warning(
+            "Quickbus device ids are not unique, their devices are dropped and their IOs treated as plain IOs: %s",
+            _log_excerpt(sorted(dropped, key=int)),
+        )
+        by_ext = {
+            ext_id: {dev_id: dev for dev_id, dev in devices.items() if dev_id not in dropped}
+            for ext_id, devices in by_ext.items()
+        }
+    return by_ext, dropped
+
+
+def _quickbus_io_map(
+    ext_id: str, ext_content: Mapping[str, Any], devices: Mapping[str, Any], dropped: set[str]
+) -> dict[str, str]:
+    """IO id -> Quickbus device id of one extension, from its "mapping" (only devices of this extension).
+
+    Entries of a dropped device id are left out without a second warning; an IO mapped to two
+    different devices is left out entirely.
+    """
+    mapping = ext_content.get("mapping")
+    raw_map = mapping.get(_QUICKBUS_KEY) if isinstance(mapping, Mapping) else None
+    result: dict[str, str] = {}
+    conflicting: set[str] = set()
+    unresolved: list[str] = []
+    for io_key, dev_ref in iter_group(raw_map):
+        io_id = _strict_id(io_key)
+        dev_id = _strict_id(dev_ref)
+        if dev_id in dropped:
+            continue
+        if io_id is None or dev_id is None or dev_id not in devices or io_id in conflicting:
+            unresolved.append(f"{io_key!r}->{dev_ref!r}")
+            continue
+        if result.setdefault(io_id, dev_id) != dev_id:
+            # "5" and "05" are the same IO — two devices for it, so neither is trusted.
+            conflicting.add(io_id)
+            del result[io_id]
+            unresolved.append(f"{io_key!r}->{dev_ref!r}")
+    if unresolved:
+        _LOGGER.warning(
+            "Quickbus mapping of extension %s: %d entries point to an unknown device, are malformed or "
+            "contradict each other, those IOs are treated as plain IOs: %s",
+            ext_id,
+            len(unresolved),
+            _log_excerpt(unresolved),
+        )
+    elif devices and not result:
+        # Without the map every device IO would be a plain IO again — the identifier collisions.
+        _LOGGER.warning(
+            "Extension %s lists %d Quickbus devices but no usable IO mapping (%r) — their IOs are treated as plain IOs",
+            ext_id,
+            len(devices),
+            raw_map,
+        )
+    return result
+
+
+def _quickbus_io_direction(io_item: Mapping[str, Any]) -> bool | None:
+    """is_input of a Quickbus IO from its own IntIsOutput flag; None if that is malformed.
+
+    $IOInputTypes cannot be used for these: it marks e.g. the Multitouch gestures (type 134) as
+    not an input, which would make every gesture a writable output.
+    """
+    raw = io_item.get("IntIsOutput")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw in (0, 1):
+        return raw == 0
+    if isinstance(raw, str) and raw in ("0", "1"):
+        return raw == "0"
+    return None
+
+
+@dataclass
+class _QuickbusContext:
+    """The Quickbus devices and IO map of one extension, plus what its IOs report afterwards."""
+
+    ext_id: str
+    devices: Mapping[str, Any]
+    io_map: Mapping[str, str]
+    bad_flags: list[str] = field(default_factory=list)
+    seen_idents: set[tuple[str, str]] = field(default_factory=set)
+    duplicate_idents: list[str] = field(default_factory=list)
+
+    def resolve(self, io_item: Mapping[str, Any]) -> tuple[Mapping[str, Any] | None, bool | None]:
+        """The Quickbus device of an IO and its is_input; (None, None) for a plain IO."""
+        dev_id = self.io_map.get(_strict_id(io_item.get("Id")) or "")
+        if dev_id is None:
+            return None, None
+        device = self.devices[dev_id]
+        ident = io_item.get("Identifier")
+        key = (dev_id, str(ident).upper())
+        if key in self.seen_idents:
+            self.duplicate_idents.append(f"{device['name']} {ident!r}")
+        self.seen_idents.add(key)
+        is_input = _quickbus_io_direction(io_item)
+        if is_input is None:
+            # Read-only is the safe side: a wrong guess must never turn a gesture into an output.
+            self.bad_flags.append(f"{device['name']} {ident!r}: {io_item.get('IntIsOutput')!r}")
+            is_input = True
+        return device, is_input
+
+    def report(self) -> None:
+        if self.bad_flags:
+            _LOGGER.warning(
+                "%d Quickbus IOs of extension %s have no usable IntIsOutput flag and are treated as read-only "
+                "inputs: %s",
+                len(self.bad_flags),
+                self.ext_id,
+                _log_excerpt(self.bad_flags),
+            )
+        if self.duplicate_idents:
+            # Their Web-IO command names (and a consumer's ids) collide — Comexio should never list these.
+            _LOGGER.warning(
+                "%d Quickbus IOs of extension %s repeat an identifier of their own device: %s",
+                len(self.duplicate_idents),
+                self.ext_id,
+                _log_excerpt(self.duplicate_idents),
+            )
+
+
+def _process_extension_ios(
+    data: dict[str, Any],
+    ext_id: str,
+    ext_content: Mapping[str, Any],
+    builder: "_IoEntryBuilder",
+    qb: _QuickbusContext,
+) -> None:
+    """The IOs of one extension, incl. the IOs of its Quickbus devices."""
+    ext_name, ext_serial = _extension_meta(ext_id, ext_content)
+    data["extensions"][ext_id] = {"name": ext_name, "serial": ext_serial}
+    ext_offline = is_extension_offline(ext_serial)
+
+    for io_id, io_item in iter_group(ext_content.get("inoutput")):
+        if not isinstance(io_item, Mapping) or not io_item:
+            _LOGGER.debug("Skipping empty/non-dict IO entry %s of extension %s: %r", io_id, ext_name, io_item)
+            continue
+        qb_device, is_input = qb.resolve(io_item)
+        entry = builder.build(io_item, ext_name, qb_device, is_input)
+        entry["offline"] = ext_offline
+        # The extension group key; ComexioClient.get_io_live_states needs it as "ExtId".
+        entry["ext_id"] = ext_id
+        data["io_all"].append(entry)
+        if not entry["inactive"]:
+            data["io"].append(entry)
+    qb.report()
+
+
 def _process_ios(
     data: dict[str, Any],
     fub_modules: Mapping[str, Any],
@@ -660,30 +898,21 @@ def _process_ios(
     options: ParseOptions,
     io_live_states: Mapping[str, Any],
 ) -> None:
-    """Physical IOs from $FubModules["1"] (one group per extension).
+    """Physical IOs from $FubModules["1"] (one group per extension), incl. the IOs of Quickbus devices.
 
     Inactive IOs (Active=False) land only in "io_all" — Comexio itself refuses to wire a
     connection to an inactive IO, but a plan renderer still needs their label.
     """
+    builder = _IoEntryBuilder(io_types, io_input_types, options, io_live_states)
+    qb_by_ext, qb_dropped = _collect_quickbus_devices(fub_modules)
     for ext_id, ext_content in iter_group(fub_modules.get(_MODULE_IO)):
         if not isinstance(ext_content, Mapping):
             _LOGGER.debug("Skipping non-dict extension entry %s: %r", ext_id, ext_content)
             continue
-        ext_name, ext_serial = _extension_meta(ext_id, ext_content)
-        data["extensions"][ext_id] = {"name": ext_name, "serial": ext_serial}
-        ext_offline = is_extension_offline(ext_serial)
-
-        for io_id, io_item in iter_group(ext_content.get("inoutput")):
-            if not isinstance(io_item, Mapping) or not io_item:
-                _LOGGER.debug("Skipping empty/non-dict IO entry %s of extension %s: %r", io_id, ext_name, io_item)
-                continue
-            entry = _build_io_entry(io_item, ext_name, io_types, io_input_types, options, io_live_states)
-            entry["offline"] = ext_offline
-            # The extension group key; ComexioClient.get_io_live_states needs it as "ExtId".
-            entry["ext_id"] = ext_id
-            data["io_all"].append(entry)
-            if not entry["inactive"]:
-                data["io"].append(entry)
+        qb_devices = qb_by_ext.get(ext_id, {})
+        data[_KEY_QUICKBUS_DEVICES].update(qb_devices)
+        qb_map = _quickbus_io_map(ext_id, ext_content, qb_devices, qb_dropped)
+        _process_extension_ios(data, ext_id, ext_content, builder, _QuickbusContext(ext_id, qb_devices, qb_map))
 
 
 def _io_direction(ident_upper: str, type_id_raw: int, io_input_types: Mapping[str, Any]) -> bool:
@@ -702,6 +931,30 @@ def _io_direction(ident_upper: str, type_id_raw: int, io_input_types: Mapping[st
     return True
 
 
+@dataclass(frozen=True)
+class _IoEntryBuilder:
+    """The parse-wide inputs of _build_io_entry, bound once per parse_config call."""
+
+    io_types: Mapping[str, Any]
+    io_input_types: Mapping[str, Any]
+    options: ParseOptions
+    io_live_states: Mapping[str, Any]
+
+    def build(
+        self, io_item: Mapping[str, Any], ext_name: str, qb_device: Mapping[str, Any] | None, is_input: bool | None
+    ) -> dict[str, Any]:
+        return _build_io_entry(
+            io_item,
+            ext_name,
+            self.io_types,
+            self.io_input_types,
+            self.options,
+            self.io_live_states,
+            qb_device=qb_device,
+            is_input=is_input,
+        )
+
+
 def _build_io_entry(
     io_item: Mapping[str, Any],
     ext_name: str,
@@ -709,8 +962,17 @@ def _build_io_entry(
     io_input_types: Mapping[str, Any],
     options: ParseOptions,
     io_live_states: Mapping[str, Any],
+    *,
+    qb_device: Mapping[str, Any] | None = None,
+    is_input: bool | None = None,
 ) -> dict[str, Any]:
-    """Build one IO entry (without the extension's offline flag)."""
+    """Build one IO entry (without the extension's offline flag).
+
+    An IO of a Quickbus device (qb_device) is labelled with the device name instead of the
+    extension name, like Comexio Studio's "MT1 # G20"; the {ExtName} schema placeholder then
+    renders that device name as well. is_input overrides the direction derived from the
+    identifier and $IOInputTypes (a Quickbus IO brings its own, see _quickbus_io_direction).
+    """
     # A numeric identifier is stringified, not replaced — it feeds unique_id/entity_id.
     ident = _label(io_item.get("Identifier")) or str(io_item.get("Id", "unknown"))
     raw_desc = io_item.get("Description")
@@ -740,11 +1002,14 @@ def _build_io_entry(
         elif _BINARY_IO_RE.match(ident_upper):
             is_binary, v_max = True, 1
 
-    io_name = f"{ext_name} {ident} {description}" if description else f"{ext_name} {ident}"
+    owner = qb_device["name"] if qb_device else ext_name
+    io_name = f"{owner} {ident} {description}" if description else f"{owner} {ident}"
 
     ha_name = options.schema_io.format_map(
-        SafeDict(ServerAlias=options.server_alias, ExtName=ext_name, IoId=ident, IoTitle=description or NO_NAME_TITLE)
+        SafeDict(ServerAlias=options.server_alias, ExtName=owner, IoId=ident, IoTitle=description or NO_NAME_TITLE)
     )
+    if is_input is None:
+        is_input = _io_direction(ident_upper, type_id_raw, io_input_types)
     io_id = str(io_item.get("Id"))
     return {
         "id": io_id,
@@ -753,7 +1018,7 @@ def _build_io_entry(
         "ha_name": " ".join(ha_name.split()),
         "name": io_name,
         "is_binary": is_binary,
-        "is_input": _io_direction(ident_upper, type_id_raw, io_input_types),
+        "is_input": is_input,
         "unit": normalize_io_unit(type_info.get("unit", "")),
         "min": type_info.get("min", 0),
         "max": v_max,
@@ -762,4 +1027,6 @@ def _build_io_entry(
         "value": clean_value(live if (live := io_live_states.get(io_id)) is not None else io_item.get("Value", 0)),
         # Inactive IOs carry this flag so a plan renderer can grey the pill.
         "inactive": not io_item.get("Active"),
+        # Its identifier (G1, TL1, ...) repeats per device, so only the IO "Id" is unique.
+        "quickbus": {"device_id": qb_device["id"], "name": qb_device["name"]} if qb_device else None,
     }

@@ -15,6 +15,19 @@ from typing import Any
 type ItemsById = Mapping[str, Mapping[str, Any]]
 
 
+def io_owner(io: Mapping[str, Any]) -> str:
+    """The part before "#" in an IO's address label: its Quickbus device's name, else its extension's.
+
+    A Quickbus IO's identifier (G1, TL1, ...) repeats on every device of the same kind, so
+    Comexio Studio labels it by the device ("MT1 # G20"), not by the extension it hangs on.
+    """
+    qb = io.get("quickbus")
+    if isinstance(qb, Mapping) and isinstance(qb.get("name"), str):
+        return str(qb["name"])
+    ext = io.get("ext_name", "")
+    return ext if isinstance(ext, str) else ""
+
+
 def _element_analog(
     elem: dict[str, Any],
     markers_by_id: ItemsById,
@@ -83,7 +96,7 @@ def element_search_id(elem: dict[str, Any], ios_by_id: ItemsById) -> str:
     if prefix := _SEARCH_ID_PREFIX.get(etype):
         return f"{prefix}{rid}"
     if etype == 1 and (io := ios_by_id.get(rid)):
-        return f"{io.get('ext_name', '')}#{io.get('identifier', '')}"
+        return f"{io_owner(io)}#{io.get('identifier', '')}"
     return ""
 
 
@@ -135,7 +148,7 @@ def _pill_parts_knx(rid: str, knx_by_id: ItemsById) -> tuple[str, str, str]:
 
 def _pill_parts_io(rid: str, ios_by_id: ItemsById) -> tuple[str, str, str]:
     if io := ios_by_id.get(rid):
-        ext, ident = io.get("ext_name", ""), io.get("identifier", "")
+        ext, ident = io_owner(io), io.get("identifier", "")
         # Two non-breaking spaces between extension and IO (SVG collapses plain
         # whitespace runs); the "#" stays as Comexio's own IO marker.
         id_text = f"{ext}  #{ident}"

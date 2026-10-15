@@ -30,6 +30,9 @@ class WebioClass(StrEnum):
     MARKER = "marker"
     IO = "io"
     KNX = "knx"
+    # IOs of Quickbus devices (Multitouch buttons, motion sensors, ...): their identifiers repeat
+    # per device, so their commands address the IO by its unique "Id" instead of ext + identifier.
+    QUICKBUS = "quickbus"
 
 
 WEBIO_CLASSES = tuple(WebioClass)
@@ -39,6 +42,7 @@ WEBIO_CLASS_NAME_SUFFIX: dict[WebioClass, str] = {
     WebioClass.MARKER: " [M]",
     WebioClass.IO: " [IO]",
     WebioClass.KNX: " [KNX]",
+    WebioClass.QUICKBUS: " [QB]",
 }
 
 # Short display label per class, used in log messages.
@@ -46,6 +50,7 @@ WEBIO_CLASS_LABEL: dict[WebioClass, str] = {
     WebioClass.MARKER: "Marker",
     WebioClass.IO: "IO",
     WebioClass.KNX: "KNX",
+    WebioClass.QUICKBUS: "Quickbus",
 }
 
 

@@ -31,6 +31,7 @@ from .render_values import (
     _is_high,
     _pill_parts,
     element_search_id,
+    io_owner,
 )
 
 
@@ -191,14 +192,16 @@ def _apply_geometry_target_fields(
     card reads these fields (as data-* attributes) for click-to-fill, autocomplete and
     plan-local command validation. An IO INPUT (I/AI/…) is a pure source: the Comexio API
     cannot write it, so it is not writable and _render_pill draws no input pin for it either.
+    A Quickbus IO is never writable: its "MT1#R" address is not one the Comexio API is known to
+    accept (the IO API addresses ext + identifier, and the identifier repeats per device).
     """
     if etype == 2 and ref_id in markers_by_id:
         geo["target"] = f"M{ref_id}"
         geo["writable"] = True
     elif etype == 1 and (io := ios_by_id.get(ref_id)):
-        geo["target"] = f"{io.get('ext_name', '')}#{io.get('identifier', '')}"
+        geo["target"] = f"{io_owner(io)}#{io.get('identifier', '')}"
         geo["io_input"] = bool(io.get("is_input"))
-        geo["writable"] = not geo["io_input"] and not geo["inactive"]
+        geo["writable"] = not geo["io_input"] and not geo["inactive"] and not io.get("quickbus")
 
 
 def _build_one_geometry(

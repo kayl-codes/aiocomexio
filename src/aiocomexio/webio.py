@@ -26,12 +26,14 @@ __all__ = [
     "build_io_webio_command",
     "build_knx_loopback_webio_command",
     "build_marker_webio_command",
+    "build_quickbus_webio_command",
     "build_webio_commands",
     "generate_webio_json",
     "knx_loopback_class_json",
     "knx_loopback_range",
     "knx_webio_range",
     "lua_escape",
+    "quickbus_command_name",
     "safe_webio_range",
 ]
 
@@ -182,8 +184,8 @@ def build_marker_webio_command(
     )
 
 
-def build_io_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dict[str, Any]:
-    """Build the Web-IO command dict for a single physical IO.
+def _io_command_range(io_item: Mapping[str, Any]) -> tuple[bool, float, float]:
+    """(is_analog, Min, Max) of an IO's Web-IO command.
 
     Uses the authentic min/max from the Comexio IO type definition, unless it lands in the
     int16 danger zone (see safe_webio_range). io_item["min"/"max"] can be present but None
@@ -196,11 +198,47 @@ def build_io_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dic
     default_max = 100 if is_ana else 1
     v_max = default_max if raw_max is None else raw_max
     v_min, v_max = safe_webio_range(v_min, v_max)
+    return is_ana, v_min, v_max
+
+
+def build_io_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dict[str, Any]:
+    """Build the Web-IO command dict for a single physical IO (min/max: see _io_command_range)."""
+    is_ana, v_min, v_max = _io_command_range(io_item)
     safe_ext = lua_escape(io_item["ext_name"])
     safe_io_id = lua_escape(io_item["identifier"])
     lua = _webio_data_lua(f'ext="{safe_ext}", io="{safe_io_id}", value=a, type="io"')
     return _webio_command(
         name=f"HA IO {io_item['ext_name']} {io_item['identifier']}",
+        type_id=2 if is_ana else 1,
+        min_v=v_min,
+        max_v=v_max,
+        data=lua,
+        webhook_path=webhook_path,
+    )
+
+
+def quickbus_command_name(io_item: Mapping[str, Any]) -> str:
+    """Web-IO command name of a Quickbus IO, e.g. "HA QB1 MT1 G18".
+
+    The device id keeps names unique even when two Quickbus devices share a name; the device
+    name keeps them readable in Comexio Studio.
+    """
+    qb = io_item["quickbus"]
+    return f"HA QB{qb['device_id']} {qb['name']} {io_item['identifier']}"
+
+
+def build_quickbus_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dict[str, Any]:
+    """Build the Web-IO command dict for a single IO of a Quickbus device.
+
+    Its identifier (G1, TL1, ...) repeats on every device of the same kind, so the payload
+    carries the IO's unique "Id" instead of ext + identifier (type "quickbus"). Min/max: see
+    _io_command_range.
+    """
+    is_ana, v_min, v_max = _io_command_range(io_item)
+    safe_id = lua_escape(io_item["id"])
+    lua = _webio_data_lua(f'id="{safe_id}", value=a, type="{WebioClass.QUICKBUS}"')
+    return _webio_command(
+        name=quickbus_command_name(io_item),
         type_id=2 if is_ana else 1,
         min_v=v_min,
         max_v=v_max,
@@ -284,8 +322,11 @@ def build_webio_commands(
             continue
         commands.append(build_marker_webio_command(m, webhook_path))
 
-    io_entries = parsed_data.get("io", []) if webio_class in (None, WebioClass.IO) else []
-    commands.extend(build_io_webio_command(io_item, webhook_path) for io_item in io_entries)
+    io_entries = parsed_data.get("io", [])
+    if webio_class in (None, WebioClass.IO):
+        commands.extend(build_io_webio_command(io, webhook_path) for io in io_entries if not io.get("quickbus"))
+    if webio_class in (None, WebioClass.QUICKBUS):
+        commands.extend(build_quickbus_webio_command(io, webhook_path) for io in io_entries if io.get("quickbus"))
 
     knx_entries = parsed_data.get("knx", []) if webio_class in (None, WebioClass.KNX) else []
     for knx_item in knx_entries:
