@@ -521,6 +521,103 @@ def test_io_entries_without_a_valid_id_are_skipped(caplog: pytest.LogCaptureFixt
     )
 
 
+def test_quickbus_ios_without_a_type_row_are_left_out(caplog: pytest.LogCaptureFixture) -> None:
+    """G1 says nothing about binary or analog — a guessed kind would give a wrong command range."""
+    io_types = {k: v for k, v in _IO_TYPES.items() if k != "134"}
+
+    with caplog.at_level(logging.WARNING):
+        result = parse_config(
+            load_json_fixture("config_quickbus.json"), io_types=io_types, io_input_types=_IO_INPUT_TYPES
+        )
+
+    active = {io["id"] for io in result["io"]}
+    assert {"201", "202", "211"}.isdisjoint(active)
+    assert {"201", "202", "211"} <= _io_all(result).keys()
+    # Typed Quickbus IOs and the plain IO stay.
+    assert {"11", "203", "204", "213"} <= active
+    assert (
+        "3 active Quickbus IOs of extension 1 have no row in the IO type table, so binary or analog is unknown — "
+        "they are left out of the active IOs (no entity, no Web-IO command): MT Flur G1 (type 134), "
+        "MT Flur G18 (type 134), MT Bad G1 (type 134)"
+    ) in caplog.text
+
+
+@pytest.mark.parametrize("io_types", [None, {}])
+def test_missing_type_table_keeps_quickbus_ios(io_types: Any, caplog: pytest.LogCaptureFixture) -> None:
+    """A failed scrape must not drop every Quickbus entity for one poll — parse_config warns instead."""
+    with caplog.at_level(logging.WARNING):
+        result = parse_config(load_json_fixture("config_quickbus.json"), io_types=io_types)
+
+    assert {"201", "202", "203", "204", "211", "213"} <= {io["id"] for io in result["io"]}
+    assert "no row in the IO type table" not in caplog.text
+
+
+def test_inactive_or_plain_ios_without_a_type_row_give_no_type_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """212 is an inactive gesture, 11 a plain input that falls back to its identifier."""
+    conf = load_json_fixture("config_quickbus.json")
+    for io_id in ("201", "202", "211"):
+        _base_ext(conf)["inoutput"][io_id]["InOutputTypeId"] = 12
+    io_types = {k: v for k, v in _IO_TYPES.items() if k not in ("1", "134")}
+
+    with caplog.at_level(logging.WARNING):
+        result = parse_config(conf, io_types=io_types, io_input_types=_IO_INPUT_TYPES)
+
+    assert _io_all(result)["11"]["is_binary"] is True
+    assert "11" in {io["id"] for io in result["io"]}
+    assert "no row in the IO type table" not in caplog.text
+
+
+def test_huge_integer_type_id_names_no_type_row(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["203"]["InOutputTypeId"] = 10**5000
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    assert "203" not in {io["id"] for io in result["io"]}
+    assert "1 active Quickbus IOs of extension 1 have no row in the IO type table" in caplog.text
+    assert "MT Flur TL1 (type <int too large to print>)" in caplog.text
+
+
+def test_typed_quickbus_ios_give_no_type_warning(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        _parse()
+
+    assert "no row in the IO type table" not in caplog.text
+
+
+def test_scraped_names_cannot_forge_log_lines(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    ext = _base_ext(conf)
+    ext["lowcan"]["2"]["Name"] = "MT Bad\nERROR forged line\r\u2028"
+    del ext["mapping"]["lowcan"]["211"], ext["mapping"]["lowcan"]["212"], ext["mapping"]["lowcan"]["213"]
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    coverage = next(r.getMessage() for r in caplog.records if "have no IO in the mapping" in r.getMessage())
+    assert "\n" not in coverage
+    assert "\r" not in coverage
+    assert "\u2028" not in coverage
+    assert coverage.endswith(r"2 MT Bad\nERROR forged line\r\u2028")
+
+
+def test_long_scraped_values_are_cut_before_they_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    ext = _base_ext(conf)
+    ext["lowcan"]["2"]["Name"] = "N" * 100_000
+    del ext["mapping"]["lowcan"]["211"], ext["mapping"]["lowcan"]["212"], ext["mapping"]["lowcan"]["213"]
+    ext["inoutput"]["11"]["Id"] = ["x" * 100_000] * 1000
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    assert result["quickbus_devices"]["2"]["name"] == "N" * 100_000
+    assert max(len(r.getMessage()) for r in caplog.records) < 2000
+    assert "have no IO in the mapping, their IOs are treated as plain IOs: 2 NNN" in caplog.text
+    assert "Skipping 1 IO entries of extension 1 without a valid Id: 11: ['xxx" in caplog.text
+
+
 def test_huge_integer_ids_are_rejected_without_crashing(caplog: pytest.LogCaptureFixture) -> None:
     """Python refuses str() of an int beyond its digit limit — such an id is malformed, not fatal."""
     conf = load_json_fixture("config_quickbus.json")

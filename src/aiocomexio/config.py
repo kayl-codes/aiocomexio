@@ -8,6 +8,7 @@ catalog) plus optional live values. Nothing here touches the network.
 import logging
 import math
 import re
+import reprlib
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, fields
@@ -84,6 +85,23 @@ _MAX_ID_DIGITS = 18
 
 # Longest repr of a raw value quoted in a log line before it is cut off.
 _MAX_LOGGED_REPR = 80
+
+# Longest entry of an aggregated warning (log_excerpt) before it is cut off.
+_MAX_LOGGED_ENTRY = 2 * _MAX_LOGGED_REPR
+
+# Cuts strings and containers while rendering them, so a huge raw value is never rendered in full.
+_LOG_REPR = reprlib.Repr(
+    maxlevel=2,
+    maxtuple=_MAX_LOGGED_ENTRIES,
+    maxlist=_MAX_LOGGED_ENTRIES,
+    maxdict=_MAX_LOGGED_ENTRIES,
+    maxset=_MAX_LOGGED_ENTRIES,
+    maxstring=_MAX_LOGGED_REPR,
+    maxother=_MAX_LOGGED_REPR,
+)
+
+# Line breaks and other control characters of a scraped name would forge log lines.
+_LOG_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 _OUTPUT_IO_RE = re.compile(r"^Q\d+$")
 _INPUT_IO_RE = re.compile(r"^(?:I|AI|QI)\d+$")
@@ -184,7 +202,11 @@ def _label(value: Any) -> str:
 
 def _table_entry(table: Mapping[str, Any], key: Any) -> Mapping[str, Any]:
     """table[str(key)] if that is a mapping, else {} — a malformed type-table row must not crash parsing."""
-    entry = table.get(str(key))
+    try:
+        entry = table.get(str(key))
+    except ValueError:
+        # An int key beyond Python's int-to-str digit limit names no row.
+        return {}
     return entry if isinstance(entry, Mapping) else {}
 
 
@@ -296,8 +318,8 @@ def parse_config(
     "quickbus": {"device_id", "name"}, every other IO "quickbus": None). A Quickbus IO is
     addressed by its unique "id" only — its ext_name/identifier pair repeats across devices, so
     ComexioClient.set_io_value cannot reach it: treat it as read-only even when is_input is False.
-    Active IOs that repeat an identifier of their own device (Quickbus device or extension) land
-    only in "io_all".
+    Active IOs that repeat an identifier of their own device (Quickbus device or extension), and
+    active Quickbus IOs whose type has no row in a non-empty io_types, land only in "io_all".
     """
     options = options or ParseOptions()
     fub_modules = conf.get("FubModules")
@@ -318,8 +340,8 @@ def parse_config(
     }
     if io_types is None and (fub_modules.get(_MODULE_IO) or fub_modules.get(_MODULE_KNX)):
         _LOGGER.warning(
-            "parse_config called without io_types — IOs are classified by their identifier only "
-            "and every KNX object is flagged dpt_ambiguous"
+            "parse_config called without io_types — IOs are classified by their identifier only (a Quickbus "
+            "IO, whose identifier says nothing, as analog) and every KNX object is flagged dpt_ambiguous"
         )
     io_types = io_types or {}
 
@@ -712,20 +734,35 @@ def _strict_id(value: Any) -> str | None:
     return None
 
 
+def _log_safe(text: str) -> str:
+    """text cut after _MAX_LOGGED_ENTRY characters, its control characters escaped (a line break as \\n)."""
+    cut = text if len(text) <= _MAX_LOGGED_ENTRY else f"{text[:_MAX_LOGGED_ENTRY]}…"
+    return _LOG_CONTROL_CHAR_RE.sub(lambda m: repr(m.group())[1:-1], cut)
+
+
 def log_excerpt(items: list[str]) -> str:
-    """The first _MAX_LOGGED_ENTRIES items joined for a log line, with the rest counted."""
-    shown = ", ".join(items[:_MAX_LOGGED_ENTRIES])
+    """The first _MAX_LOGGED_ENTRIES items joined for a log line, with the rest counted.
+
+    Each item is cut and its control characters escaped — items carry scraped names.
+    """
+    shown = ", ".join(_log_safe(item) for item in items[:_MAX_LOGGED_ENTRIES])
     more = len(items) - _MAX_LOGGED_ENTRIES
     return f"{shown} and {more} more" if more > 0 else shown
 
 
 def _short_repr(value: Any) -> str:
-    """repr() of a raw value for a log line, cut off after _MAX_LOGGED_REPR characters."""
-    try:
-        text = repr(value)
-    except ValueError:
-        # An int (or a container holding one) beyond Python's int-to-str digit limit.
-        return f"<{type(value).__name__} too large to print>"
+    """repr() of a raw value for a log line, cut off after _MAX_LOGGED_REPR characters.
+
+    Strings and containers are cut while rendering (_LOG_REPR), not after.
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        try:
+            text = repr(value)
+        except ValueError:
+            # Beyond Python's int-to-str digit limit.
+            return f"<{type(value).__name__} too large to print>"
+    else:
+        text = _LOG_REPR.repr(value)
     return text if len(text) <= _MAX_LOGGED_REPR else f"{text[:_MAX_LOGGED_REPR]}…"
 
 
@@ -993,6 +1030,39 @@ def _ambiguous_ios(ext_id: str, entries: list[dict[str, Any]]) -> set[int]:
     return {pos for positions in repeated for pos in positions}
 
 
+def _untyped_quickbus_ios(
+    ext_id: str, entries: list[dict[str, Any]], type_ids: list[Any], io_types: Mapping[str, Any]
+) -> set[int]:
+    """Positions of the active Quickbus IOs whose type has no row in the IO type table.
+
+    A plain IO falls back to its identifier (I1, Q1, QI1, ...); G1, TL1 or R of a Quickbus
+    device say nothing about binary or analog, so its entity and Web-IO command would get a
+    guessed kind and range — those IOs are left out instead. Not when the whole table is
+    missing (a failed scrape, warned about by parse_config): leaving out every Quickbus IO for
+    one poll would make a consumer drop their entities.
+    """
+    if not io_types:
+        return set()
+    untyped = [
+        pos
+        for pos, (entry, type_id) in enumerate(zip(entries, type_ids, strict=True))
+        if entry["quickbus"] and not entry["inactive"] and not _table_entry(io_types, type_id)
+    ]
+    if untyped:
+        labels = [
+            f"{entries[pos]['quickbus']['name']} {entries[pos]['identifier']} (type {_short_repr(type_ids[pos])})"
+            for pos in untyped
+        ]
+        _LOGGER.warning(
+            "%d active Quickbus IOs of extension %s have no row in the IO type table, so binary or analog is "
+            "unknown — they are left out of the active IOs (no entity, no Web-IO command): %s",
+            len(untyped),
+            ext_id,
+            log_excerpt(labels),
+        )
+    return set(untyped)
+
+
 def _process_extension_ios(
     data: dict[str, Any],
     ext_id: str,
@@ -1006,6 +1076,7 @@ def _process_extension_ios(
     ext_offline = is_extension_offline(ext_serial)
 
     entries: list[dict[str, Any]] = []
+    type_ids: list[Any] = []
     bad_ids: list[str] = []
     for io_id, io_item in iter_group(ext_content.get("inoutput")):
         if not isinstance(io_item, Mapping) or not io_item:
@@ -1021,14 +1092,15 @@ def _process_extension_ios(
         # The extension group key; ComexioClient.get_io_live_states needs it as "ExtId".
         entry["ext_id"] = ext_id
         entries.append(entry)
+        type_ids.append(io_item.get("InOutputTypeId"))
     if bad_ids:
         _LOGGER.warning(
             "Skipping %d IO entries of extension %s without a valid Id: %s", len(bad_ids), ext_id, log_excerpt(bad_ids)
         )
     qb.report()
-    ambiguous = _ambiguous_ios(ext_id, entries)
+    left_out = _ambiguous_ios(ext_id, entries) | _untyped_quickbus_ios(ext_id, entries, type_ids, builder.io_types)
     data["io_all"].extend(entries)
-    data["io"].extend(e for pos, e in enumerate(entries) if not e["inactive"] and pos not in ambiguous)
+    data["io"].extend(e for pos, e in enumerate(entries) if not e["inactive"] and pos not in left_out)
 
 
 def _process_ios(
@@ -1133,10 +1205,10 @@ def _build_io_entry(
     if not type_info:
         if io_types:
             _LOGGER.debug(
-                "IO %s %s: no usable row for type %r in the IO type table — classified by identifier",
+                "IO %s %s: no usable row for type %s in the IO type table — classified by identifier",
                 ext_name,
                 ident,
-                io_item.get("InOutputTypeId"),
+                _short_repr(io_item.get("InOutputTypeId")),
             )
         if _ANALOG_OUTPUT_IO_RE.match(ident_upper):
             is_binary, v_max = False, 0
