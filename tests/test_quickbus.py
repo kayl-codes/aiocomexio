@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from aiocomexio import config as config_module
 from aiocomexio.config import ParseOptions, parse_config
 from aiocomexio.const import WebioClass
 from aiocomexio.function_plan.render_geometry import _apply_geometry_target_fields
@@ -616,6 +617,52 @@ def test_long_scraped_values_are_cut_before_they_are_logged(caplog: pytest.LogCa
     assert max(len(r.getMessage()) for r in caplog.records) < 2000
     assert "have no IO in the mapping, their IOs are treated as plain IOs: 2 NNN" in caplog.text
     assert "Skipping 1 IO entries of extension 1 without a valid Id: 11: ['xxx" in caplog.text
+
+
+def test_extensions_with_a_malformed_id_are_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    """The id lands in every warning about the extension, a line break in it would forge a log line."""
+    conf = load_json_fixture("config_quickbus.json")
+    io_module = conf["FubModules"]["1"]
+    io_module["1" + chr(10) + "ERROR forged"] = io_module.pop("2")
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    assert set(result["extensions"]) == {"1"}
+    assert set(result["quickbus_devices"]) == {"1", "2"}
+    assert not any(chr(10) in r.getMessage() for r in caplog.records)
+    assert "Skipping 1 extensions with a malformed id or content: id '1" in caplog.text
+
+
+def test_extensions_with_a_non_canonical_id_or_no_dict_content_are_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    io_module = conf["FubModules"]["1"]
+    io_module["01"] = io_module.pop("2")
+    io_module["3"] = [10**5000]
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    assert set(result["extensions"]) == {"1"}
+    assert "Skipping 2 extensions with a malformed id or content: id '01', 3: " in caplog.text
+
+
+def test_unprintable_container_falls_back_without_crashing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Older reprlib versions let the int-to-str ValueError of a nested huge int through."""
+
+    def _raise(_value: Any) -> str:
+        raise ValueError("Exceeds the limit (4300 digits) for integer string conversion")
+
+    monkeypatch.setattr(config_module._LOG_REPR, "repr", _raise)
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["11"]["Id"] = [10**5000]
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    assert "without a valid Id: 11: <list with a value too large to print>" in caplog.text
 
 
 def test_huge_integer_ids_are_rejected_without_crashing(caplog: pytest.LogCaptureFixture) -> None:

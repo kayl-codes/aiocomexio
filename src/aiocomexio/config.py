@@ -762,7 +762,11 @@ def _short_repr(value: Any) -> str:
             # Beyond Python's int-to-str digit limit.
             return f"<{type(value).__name__} too large to print>"
     else:
-        text = _LOG_REPR.repr(value)
+        try:
+            text = _LOG_REPR.repr(value)
+        except ValueError:
+            # A container holding such an int, on a Python whose reprlib does not catch it itself.
+            return f"<{type(value).__name__} with a value too large to print>"
     return text if len(text) <= _MAX_LOGGED_REPR else f"{text[:_MAX_LOGGED_REPR]}…"
 
 
@@ -810,7 +814,30 @@ def _quickbus_entries(ext_id: str, ext_content: Mapping[str, Any]) -> list[tuple
     return entries
 
 
-def _collect_quickbus_devices(fub_modules: Mapping[str, Any]) -> tuple[dict[str, dict[str, Any]], set[str]]:
+def _extension_groups(fub_modules: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    """The (ext id, content) groups of $FubModules["1"] with a canonical numeric id and a dict content.
+
+    The id feeds the consumer's data (extensions, an IO's ext_id) and every warning about the
+    extension, so a malformed one — even one carrying a line break, or "01" next to "1" — is
+    skipped, like a group that is no dict, with one warning.
+    """
+    groups: list[tuple[str, Mapping[str, Any]]] = []
+    skipped: list[str] = []
+    for ext_id, ext_content in iter_group(fub_modules.get(_MODULE_IO)):
+        if _strict_id(ext_id) != ext_id:
+            skipped.append(f"id {_short_repr(ext_id)}")
+        elif isinstance(ext_content, Mapping):
+            groups.append((ext_id, ext_content))
+        else:
+            skipped.append(f"{ext_id}: {_short_repr(ext_content)}")
+    if skipped:
+        _LOGGER.warning("Skipping %d extensions with a malformed id or content: %s", len(skipped), log_excerpt(skipped))
+    return groups
+
+
+def _collect_quickbus_devices(
+    extensions: list[tuple[str, Mapping[str, Any]]],
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
     """The Quickbus devices of every extension (ext id -> device id -> device), and the dropped ids.
 
     A device id that is not unique — listed twice in one extension or on two extensions — is
@@ -822,9 +849,7 @@ def _collect_quickbus_devices(fub_modules: Mapping[str, Any]) -> tuple[dict[str,
     seen: set[str] = set()
     dropped: set[str] = set()
     problems: list[str] = []
-    for ext_id, ext_content in iter_group(fub_modules.get(_MODULE_IO)):
-        if not isinstance(ext_content, Mapping):
-            continue
+    for ext_id, ext_content in extensions:
         devices: dict[str, Any] = {}
         for dev_id, raw in _quickbus_entries(ext_id, ext_content):
             if dev_id in seen:
@@ -1080,7 +1105,9 @@ def _process_extension_ios(
     bad_ids: list[str] = []
     for io_id, io_item in iter_group(ext_content.get("inoutput")):
         if not isinstance(io_item, Mapping) or not io_item:
-            _LOGGER.debug("Skipping empty/non-dict IO entry %s of extension %s: %r", io_id, ext_name, io_item)
+            _LOGGER.debug(
+                "Skipping empty/non-dict IO entry %s of extension %s: %s", io_id, ext_id, _short_repr(io_item)
+            )
             continue
         if _strict_id(io_item.get("Id")) is None:
             # The Id feeds unique_id/entity_id and the Quickbus payload; str() of a huge int even raises.
@@ -1117,11 +1144,9 @@ def _process_ios(
     connection to an inactive IO, but a plan renderer still needs their label.
     """
     builder = _IoEntryBuilder(io_types, io_input_types, options, io_live_states)
-    qb_by_ext, qb_dropped = _collect_quickbus_devices(fub_modules)
-    for ext_id, ext_content in iter_group(fub_modules.get(_MODULE_IO)):
-        if not isinstance(ext_content, Mapping):
-            _LOGGER.debug("Skipping non-dict extension entry %s: %r", ext_id, ext_content)
-            continue
+    extensions = _extension_groups(fub_modules)
+    qb_by_ext, qb_dropped = _collect_quickbus_devices(extensions)
+    for ext_id, ext_content in extensions:
         qb_devices = qb_by_ext.get(ext_id, {})
         data[_KEY_QUICKBUS_DEVICES].update(qb_devices)
         qb_map = _quickbus_io_map(ext_id, ext_content, qb_devices, qb_dropped)
