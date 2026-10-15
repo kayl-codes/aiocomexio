@@ -224,7 +224,7 @@ def test_io_mapped_to_two_devices_stays_plain(caplog: pytest.LogCaptureFixture) 
     assert ios["213"]["quickbus"] == {"device_id": "2", "name": "MT Bad"}
     assert (
         f"Quickbus mapping of extension 1: 2 {_UNRESOLVED}, those IOs are treated as plain IOs: '211'->2, '0211'->1"
-        in (caplog.text)
+        in caplog.text
     )
 
 
@@ -420,6 +420,23 @@ def test_device_without_a_mapped_io_is_reported(caplog: pytest.LogCaptureFixture
     assert (
         "1 Quickbus devices of extension 1 have no IO in the mapping, their IOs are treated as plain IOs: 2 MT Bad"
     ) in caplog.text
+
+
+def test_device_whose_only_mapping_entries_are_stale_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    lowcan = _base_ext(conf)["mapping"]["lowcan"]
+    for io_id in ("211", "212", "213"):
+        del lowcan[io_id]
+    lowcan["299"] = 2
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    assert "1 entries point to IOs the extension does not list: 299->2" in caplog.text
+    assert (
+        "1 Quickbus devices of extension 1 have no IO in the mapping, their IOs are treated as plain IOs: 2 MT Bad"
+        in caplog.text
+    )
 
 
 def test_complete_mapping_reports_no_coverage_gap(caplog: pytest.LogCaptureFixture) -> None:
@@ -714,6 +731,8 @@ def test_quickbus_command_names_stay_unique_for_same_named_devices() -> None:
     names = [cmd["Name"] for cmd in build_webio_commands(_HOOK, _parse(conf))]
 
     assert len(names) == len(set(names))
+    # Both devices keep their commands — the collision guard must not be what makes them unique.
+    assert {"HA QB1 MT Flur G1", "HA QB2 MT Flur G1", "HA QB1 MT Flur TL1", "HA QB2 MT Flur TL1"} <= set(names)
 
 
 def test_all_classes_together_cover_every_active_io_once() -> None:

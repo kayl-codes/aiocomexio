@@ -845,7 +845,9 @@ def _report_quickbus_coverage(
             len(stale),
             log_excerpt([f"{io_id}->{io_map[io_id]}" for io_id in stale]),
         )
-    unmapped = sorted(set(devices) - set(io_map.values()), key=int)
+    # A device whose only entries are stale has no IO either.
+    mapped = {dev_id for io_id, dev_id in io_map.items() if io_id in io_ids}
+    unmapped = sorted(set(devices) - mapped, key=int)
     if unmapped:
         _LOGGER.warning(
             "%d Quickbus devices of extension %s have no IO in the mapping, their IOs are treated as plain IOs: %s",
