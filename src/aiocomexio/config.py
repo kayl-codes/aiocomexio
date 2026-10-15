@@ -792,7 +792,7 @@ def _resolve_quickbus_mapping(
     reported again, the non-unique ids are warned about on their own.
     """
     result: dict[str, str] = {}
-    trusted: dict[str, str] = {}
+    first_entry: dict[str, str] = {}
     conflicting: set[str] = set()
     unresolved: list[str] = []
     for io_key, dev_ref in iter_group(raw_map):
@@ -809,11 +809,11 @@ def _resolve_quickbus_mapping(
             and dev_id in devices
             and result.setdefault(io_id, dev_id) == dev_id
         ):
-            trusted.setdefault(io_id, entry)
+            first_entry.setdefault(io_id, entry)
             continue
         conflicting.add(io_id)
         if result.pop(io_id, None) is not None:
-            unresolved.append(trusted.pop(io_id))
+            unresolved.append(first_entry.pop(io_id))
         if dev_id not in dropped:
             unresolved.append(entry)
     return result, unresolved
