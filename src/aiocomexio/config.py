@@ -47,6 +47,7 @@ __all__ = [
     "io_schema_title",
     "is_extension_offline",
     "iter_group",
+    "log_excerpt",
     "marker_kind",
     "normalize_io_unit",
     "parse_config",
@@ -283,7 +284,8 @@ def parse_config(
     "quickbus": {"device_id", "name"}, every other IO "quickbus": None). A Quickbus IO is
     addressed by its unique "id" only — its ext_name/identifier pair repeats across devices, so
     ComexioClient.set_io_value cannot reach it: treat it as read-only even when is_input is False.
-    Active Quickbus IOs that repeat an identifier of their own device land only in "io_all".
+    Active IOs that repeat an identifier of their own device (Quickbus device or extension) land
+    only in "io_all".
     """
     options = options or ParseOptions()
     fub_modules = conf.get("FubModules")
@@ -678,14 +680,15 @@ def _strict_id(value: Any) -> str | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return str(value) if value >= 0 else None
+        # The same digit cap as for strings — str() of a huge int would even raise.
+        return str(value) if 0 <= value < 10**_MAX_ID_DIGITS else None
     # The length cap keeps int() below its digit limit — a longer string would raise instead.
     if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= _MAX_ID_DIGITS:
         return str(int(value))
     return None
 
 
-def _log_excerpt(items: list[str]) -> str:
+def log_excerpt(items: list[str]) -> str:
     """The first _MAX_LOGGED_ENTRIES items joined for a log line, with the rest counted."""
     shown = ", ".join(items[:_MAX_LOGGED_ENTRIES])
     more = len(items) - _MAX_LOGGED_ENTRIES
@@ -694,7 +697,11 @@ def _log_excerpt(items: list[str]) -> str:
 
 def _short_repr(value: Any) -> str:
     """repr() of a raw value for a log line, cut off after _MAX_LOGGED_REPR characters."""
-    text = repr(value)
+    try:
+        text = repr(value)
+    except ValueError:
+        # An int (or a container holding one) beyond Python's int-to-str digit limit.
+        return f"<{type(value).__name__} too large to print>"
     return text if len(text) <= _MAX_LOGGED_REPR else f"{text[:_MAX_LOGGED_REPR]}…"
 
 
@@ -737,7 +744,7 @@ def _quickbus_entries(ext_id: str, ext_content: Mapping[str, Any]) -> list[tuple
             "Skipping %d malformed Quickbus device entries of extension %s: %s",
             len(malformed),
             ext_id,
-            _log_excerpt(malformed),
+            log_excerpt(malformed),
         )
     return entries
 
@@ -767,12 +774,12 @@ def _collect_quickbus_devices(fub_modules: Mapping[str, Any]) -> tuple[dict[str,
         by_ext[ext_id] = devices
     if problems:
         _LOGGER.warning(
-            "%d malformed Quickbus device fields, they are left empty: %s", len(problems), _log_excerpt(problems)
+            "%d malformed Quickbus device fields, they are left empty: %s", len(problems), log_excerpt(problems)
         )
     if dropped:
         _LOGGER.warning(
             "Quickbus device ids are not unique, their devices are dropped and their IOs treated as plain IOs: %s",
-            _log_excerpt(sorted(dropped, key=int)),
+            log_excerpt(sorted(dropped, key=int)),
         )
         by_ext = {
             ext_id: {dev_id: dev for dev_id, dev in devices.items() if dev_id not in dropped}
@@ -819,6 +826,35 @@ def _resolve_quickbus_mapping(
     return result, unresolved
 
 
+def _report_quickbus_coverage(
+    ext_id: str, ext_content: Mapping[str, Any], devices: Mapping[str, Any], io_map: Mapping[str, str]
+) -> None:
+    """Warn about mapping entries of IOs the extension does not list and devices without a mapped IO.
+
+    The IOs of such a device are plain IOs; the ones repeating an identifier are left out
+    later (_ambiguous_ios).
+    """
+    io_ids = {
+        _strict_id(item.get("Id")) for _, item in iter_group(ext_content.get("inoutput")) if isinstance(item, Mapping)
+    }
+    stale = sorted((io_id for io_id in io_map if io_id not in io_ids), key=int)
+    if stale:
+        _LOGGER.warning(
+            "Quickbus mapping of extension %s: %d entries point to IOs the extension does not list: %s",
+            ext_id,
+            len(stale),
+            log_excerpt([f"{io_id}->{io_map[io_id]}" for io_id in stale]),
+        )
+    unmapped = sorted(set(devices) - set(io_map.values()), key=int)
+    if unmapped:
+        _LOGGER.warning(
+            "%d Quickbus devices of extension %s have no IO in the mapping, their IOs are treated as plain IOs: %s",
+            len(unmapped),
+            ext_id,
+            log_excerpt([f"{dev_id} {devices[dev_id]['name']}" for dev_id in unmapped]),
+        )
+
+
 def _quickbus_io_map(
     ext_id: str, ext_content: Mapping[str, Any], devices: Mapping[str, Any], dropped: set[str]
 ) -> dict[str, str]:
@@ -829,13 +865,15 @@ def _quickbus_io_map(
     mapping = ext_content.get("mapping")
     raw_map = mapping.get(_QUICKBUS_KEY) if isinstance(mapping, Mapping) else None
     result, unresolved = _resolve_quickbus_mapping(raw_map, devices, dropped)
+    if result:
+        _report_quickbus_coverage(ext_id, ext_content, devices, result)
     if unresolved:
         _LOGGER.warning(
             "Quickbus mapping of extension %s: %d entries point to an unknown device, are malformed or "
             "contradict each other, those IOs are treated as plain IOs: %s",
             ext_id,
             len(unresolved),
-            _log_excerpt(unresolved),
+            log_excerpt(unresolved),
         )
     elif devices and not result:
         # Without the map every device IO would be a plain IO again — the identifier collisions.
@@ -892,36 +930,40 @@ class _QuickbusContext:
                 "inputs: %s",
                 len(self.bad_flags),
                 self.ext_id,
-                _log_excerpt(self.bad_flags),
+                log_excerpt(self.bad_flags),
             )
 
-    def ambiguous(self, entries: list[dict[str, Any]]) -> set[int]:
-        """Positions of the active Quickbus IOs whose device lists their identifier more than once.
 
-        Their Web-IO command names (and a consumer's ids) would collide, and no rule says which
-        one is meant — so all of them are left out. Comexio should never list such a pair.
-        """
-        by_key: dict[tuple[str, str], list[int]] = {}
-        for pos, entry in enumerate(entries):
+def _ambiguous_ios(ext_id: str, entries: list[dict[str, Any]]) -> set[int]:
+    """Positions of the active IOs whose device lists their identifier more than once.
+
+    The device of a Quickbus IO is its Quickbus device, that of a plain IO the extension — this
+    also catches the IOs of a Quickbus device without a usable mapping, which repeat G1, TL1, ...
+    Their Web-IO command names (and a consumer's ids) would collide, and no rule says which
+    one is meant — so all of them are left out. Comexio should never list such a pair.
+    """
+    by_key: dict[tuple[str | None, str], list[int]] = {}
+    for pos, entry in enumerate(entries):
+        if not entry["inactive"]:
             qb = entry["quickbus"]
-            if qb and not entry["inactive"]:
-                by_key.setdefault((qb["device_id"], str(entry["identifier"]).upper()), []).append(pos)
-        repeated = [positions for positions in by_key.values() if len(positions) > 1]
-        if repeated:
-            _LOGGER.warning(
-                "%d identifiers of Quickbus devices of extension %s repeat within their device, their %d active IOs "
-                "are left out of the active IOs (no entity, no Web-IO command): %s",
-                len(repeated),
-                self.ext_id,
-                sum(map(len, repeated)),
-                _log_excerpt(
-                    [
-                        f"{entries[pos[0]]['quickbus']['name']} {_short_repr(entries[pos[0]]['identifier'])}"
-                        for pos in repeated
-                    ]
-                ),
-            )
-        return {pos for positions in repeated for pos in positions}
+            key = (qb["device_id"] if qb else None, str(entry["identifier"]).upper())
+            by_key.setdefault(key, []).append(pos)
+    repeated = [positions for positions in by_key.values() if len(positions) > 1]
+    if repeated:
+        labels = []
+        for positions in repeated:
+            first = entries[positions[0]]
+            owner = first["quickbus"]["name"] if first["quickbus"] else first["ext_name"]
+            labels.append(f"{owner} {_short_repr(first['identifier'])}")
+        _LOGGER.warning(
+            "%d IO identifiers of extension %s repeat within their device, their %d active IOs are left out of "
+            "the active IOs (no entity, no Web-IO command): %s",
+            len(repeated),
+            ext_id,
+            sum(map(len, repeated)),
+            log_excerpt(labels),
+        )
+    return {pos for positions in repeated for pos in positions}
 
 
 def _process_extension_ios(
@@ -948,7 +990,7 @@ def _process_extension_ios(
         entry["ext_id"] = ext_id
         entries.append(entry)
     qb.report()
-    ambiguous = qb.ambiguous(entries)
+    ambiguous = _ambiguous_ios(ext_id, entries)
     data["io_all"].extend(entries)
     data["io"].extend(e for pos, e in enumerate(entries) if not e["inactive"] and pos not in ambiguous)
 

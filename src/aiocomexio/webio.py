@@ -7,10 +7,11 @@ change; each K-element wired to a bridge marker additionally gets an API-loopbac
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Collection, Mapping
 from typing import Any
 
-from .config import TYPE_ANALOG
+from .config import TYPE_ANALOG, log_excerpt
 from .const import (
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_INT16_DANGER_ZONE,
@@ -314,27 +315,42 @@ def build_webio_commands(
     ignored_marker_ids / ignored_knx_ids exclude items the consumer does not expose — they
     need no command pushing their values.
     """
-    commands: list[dict[str, Any]] = []
+    commands: list[tuple[WebioClass, dict[str, Any]]] = []
+    for m in parsed_data.get("markers", []):
+        if not (ignored_marker_ids and int(m["id"]) in ignored_marker_ids):
+            commands.append((WebioClass.MARKER, build_marker_webio_command(m, webhook_path)))
+    for io in parsed_data.get("io", []):
+        if io.get("quickbus"):
+            commands.append((WebioClass.QUICKBUS, build_quickbus_webio_command(io, webhook_path)))
+        else:
+            commands.append((WebioClass.IO, build_io_webio_command(io, webhook_path)))
+    for knx_item in parsed_data.get("knx", []):
+        if not (ignored_knx_ids and int(knx_item["id"]) in ignored_knx_ids):
+            commands.append((WebioClass.KNX, build_marker_webio_command(knx_item, webhook_path, WebioClass.KNX)))
+    # Collisions are found across all classes, so a per-class upload leaves out the same ones.
+    return [cmd for cls, cmd in _without_colliding_names(commands) if webio_class in (None, cls)]
 
-    markers = parsed_data.get("markers", []) if webio_class in (None, WebioClass.MARKER) else []
-    for m in markers:
-        if ignored_marker_ids and int(m["id"]) in ignored_marker_ids:
-            continue
-        commands.append(build_marker_webio_command(m, webhook_path))
 
-    io_entries = parsed_data.get("io", [])
-    if webio_class in (None, WebioClass.IO):
-        commands.extend(build_io_webio_command(io, webhook_path) for io in io_entries if not io.get("quickbus"))
-    if webio_class in (None, WebioClass.QUICKBUS):
-        commands.extend(build_quickbus_webio_command(io, webhook_path) for io in io_entries if io.get("quickbus"))
+def _without_colliding_names(
+    commands: list[tuple[WebioClass, dict[str, Any]]],
+) -> list[tuple[WebioClass, dict[str, Any]]]:
+    """The commands whose name no other command shares (ignoring case); the others are logged.
 
-    knx_entries = parsed_data.get("knx", []) if webio_class in (None, WebioClass.KNX) else []
-    for knx_item in knx_entries:
-        if ignored_knx_ids and int(knx_item["id"]) in ignored_knx_ids:
-            continue
-        commands.append(build_marker_webio_command(knx_item, webhook_path, source_type=WebioClass.KNX))
-
-    return commands
+    A consumer keys its Web-IO commands by name across all classes (parse_config's
+    "webio_commands"), so two commands of one name would overwrite each other there, and no
+    rule says which one is meant. A marker schema without its MarkerId can e.g. render a
+    marker name that equals an IO command name.
+    """
+    counts = Counter(cmd["Name"].casefold() for _, cmd in commands)
+    colliding = sorted({cmd["Name"] for _, cmd in commands if counts[cmd["Name"].casefold()] > 1})
+    if colliding:
+        _LOGGER.warning(
+            "%d Web-IO command names are generated more than once, those commands are left out "
+            "(rename the item in Comexio or change the naming schema): %s",
+            len(colliding),
+            log_excerpt(colliding),
+        )
+    return [(cls, cmd) for cls, cmd in commands if counts[cmd["Name"].casefold()] == 1]
 
 
 def generate_webio_json(

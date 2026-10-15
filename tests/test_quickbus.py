@@ -298,8 +298,8 @@ def test_repeated_identifier_within_one_device_is_left_out(caplog: pytest.LogCap
     assert len(names) == len(set(names))
     assert "HA QB1 MT Flur G1" not in names
     assert (
-        "1 identifiers of Quickbus devices of extension 1 repeat within their device, their 2 active IOs are left "
-        "out of the active IOs (no entity, no Web-IO command): MT Flur 'G1'"
+        "1 IO identifiers of extension 1 repeat within their device, their 2 active IOs are left out of the active "
+        "IOs (no entity, no Web-IO command): MT Flur 'G1'"
     ) in caplog.text
 
 
@@ -312,16 +312,57 @@ def test_identifier_repeated_on_other_devices_is_no_conflict(caplog: pytest.LogC
     assert "repeat within their device" not in caplog.text
 
 
-def test_repeated_identifier_of_plain_ios_is_left_alone(caplog: pytest.LogCaptureFixture) -> None:
+def test_repeated_identifier_of_plain_ios_is_left_out(caplog: pytest.LogCaptureFixture) -> None:
+    """The extension is the device of a plain IO — "HA IO <ext> I1" would name both."""
     conf = load_json_fixture("config_quickbus.json")
     ext = _base_ext(conf)
-    ext["inoutput"]["19"] = {**ext["inoutput"]["11"], "Id": 19}
+    ext["inoutput"]["19"] = {**ext["inoutput"]["11"], "Id": 19, "Identifier": "i1"}
 
     with caplog.at_level(logging.WARNING):
         result = _parse(conf)
 
-    assert {"11", "19"} <= {io["id"] for io in result["io"]}
+    active = {io["id"] for io in result["io"]}
+    assert {"11", "19"}.isdisjoint(active)
+    assert {"11", "19"} <= set(_io_all(result))
+    # The same identifier on another extension is no conflict, extension 2 stays untouched.
+    assert {"301", "302"} <= active
+    assert "extension 2" not in caplog.text
+    ext_name = result["extensions"]["1"]["name"]
+    assert "1 IO identifiers of extension 1 repeat within their device, their 2 active IOs" in caplog.text
+    assert f"(no entity, no Web-IO command): {ext_name} 'I1'" in caplog.text
+
+
+def test_plain_io_sharing_an_identifier_with_a_quickbus_io_is_no_conflict(caplog: pytest.LogCaptureFixture) -> None:
+    """Their command names differ ("HA IO <ext> G1" / "HA QB1 MT Flur G1")."""
+    conf = load_json_fixture("config_quickbus.json")
+    ext = _base_ext(conf)
+    ext["inoutput"]["19"] = {**ext["inoutput"]["11"], "Id": 19, "Identifier": "G1"}
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    assert {"19", "201", "211"} <= {io["id"] for io in result["io"]}
     assert "repeat within their device" not in caplog.text
+
+
+@pytest.mark.parametrize("mapping", [{}, {"lowcan": []}])
+def test_ios_of_devices_without_a_mapping_that_repeat_identifiers_are_left_out(
+    mapping: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Without the map, G1 of both Multitouch devices is a plain IO of the same extension."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["mapping"] = mapping
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    active = {io["id"] for io in result["io"]}
+    assert {"201", "211", "203", "213"}.isdisjoint(active)
+    assert {"11", "202", "204"} <= active
+    names = [cmd["Name"] for cmd in build_webio_commands(_HOOK, result)]
+    assert len(names) == len(set(names))
+    assert "Extension 1 lists 2 Quickbus devices but no usable IO mapping" in caplog.text
+    assert "2 IO identifiers of extension 1 repeat within their device, their 4 active IOs" in caplog.text
 
 
 def test_repeated_identifier_of_an_inactive_io_is_no_conflict(caplog: pytest.LogCaptureFixture) -> None:
@@ -352,6 +393,43 @@ def test_devices_without_a_mapping_are_reported(mapping: Any, caplog: pytest.Log
     assert "Extension 2 lists 1 Quickbus devices but no usable IO mapping" in caplog.text
 
 
+def test_mapping_entry_of_an_io_the_extension_does_not_list_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["mapping"]["lowcan"]["299"] = 2
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["211"]["quickbus"] == {"device_id": "2", "name": "MT Bad"}
+    assert "Quickbus mapping of extension 1: 1 entries point to IOs the extension does not list: 299->2" in (
+        caplog.text
+    )
+
+
+def test_device_without_a_mapped_io_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    lowcan = _base_ext(conf)["mapping"]["lowcan"]
+    for io_id in ("211", "212", "213"):
+        del lowcan[io_id]
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["211"]["quickbus"] is None
+    assert ios["201"]["quickbus"] == {"device_id": "1", "name": "MT Flur"}
+    assert (
+        "1 Quickbus devices of extension 1 have no IO in the mapping, their IOs are treated as plain IOs: 2 MT Bad"
+    ) in caplog.text
+
+
+def test_complete_mapping_reports_no_coverage_gap(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        _parse()
+
+    assert "does not list" not in caplog.text
+    assert "have no IO in the mapping" not in caplog.text
+
+
 def test_long_unresolved_mapping_list_is_capped(caplog: pytest.LogCaptureFixture) -> None:
     conf = load_json_fixture("config_quickbus.json")
     _base_ext(conf)["mapping"]["lowcan"].update({str(900 + n): 9 for n in range(8)})
@@ -375,6 +453,23 @@ def test_huge_raw_values_are_cut_off_in_the_log(caplog: pytest.LogCaptureFixture
     assert "Skipping 1 malformed Quickbus device entries of extension 1" in caplog.text
     assert "no usable IO mapping" in caplog.text
     assert all(len(record.getMessage()) < 1000 for record in caplog.records)
+
+
+def test_huge_integer_ids_are_rejected_without_crashing(caplog: pytest.LogCaptureFixture) -> None:
+    """Python refuses str() of an int beyond its digit limit — such an id is malformed, not fatal."""
+    conf = load_json_fixture("config_quickbus.json")
+    ext = _base_ext(conf)
+    ext["lowcan"]["2"]["Id"] = 10**5000
+    ext["mapping"]["lowcan"]["211"] = 10**5000
+    conf["FubModules"]["1"]["2"]["lowcan"]["3"]["Id"] = 10**18
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    assert set(result["quickbus_devices"]) == {"1"}
+    assert _io_all(result)["211"]["quickbus"] is None
+    assert "<int too large to print>" in caplog.text
+    assert "Skipping 1 malformed Quickbus device entries of extension 2" in caplog.text
 
 
 def test_many_malformed_device_entries_give_one_capped_warning(caplog: pytest.LogCaptureFixture) -> None:
@@ -602,7 +697,10 @@ def test_quickbus_command_pushes_the_io_id() -> None:
     commands = {cmd["Name"]: cmd for cmd in build_webio_commands(_HOOK, _parse(), WebioClass.QUICKBUS)}
 
     gesture = commands["HA QB2 MT Bad G1"]
-    assert 'id="211", value=a, type="quickbus"' in gesture["Data"]
+    # The whole body: no ext/io pair next to the id that a consumer could route by.
+    assert gesture["Data"] == (
+        'function data(a)\r\n  local d = { id="211", value=a, type="quickbus" }\r\n  return json_stringify(d)\r\nend'
+    )
     assert (gesture["TypeId"], gesture["Min"], gesture["Max"]) == (1, 0, 1)
     assert gesture["Parameter"] == _HOOK
     temperature = commands["HA QB1 MT Flur TL1"]
@@ -629,6 +727,52 @@ def test_all_classes_together_cover_every_active_io_once() -> None:
     assert len(commands) == len(result["io"])
     assert commands == per_class
     assert len({cmd["Name"] for cmd in commands}) == len(commands)
+
+
+@pytest.mark.parametrize("webio_class", [None, WebioClass.MARKER, WebioClass.QUICKBUS])
+def test_command_names_colliding_across_classes_are_left_out(
+    webio_class: WebioClass | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A marker schema without {MarkerId} can render the name of a Quickbus command."""
+    result = _parse()
+    result["markers"] = [
+        {"id": "7", "name": "qb2 MT Bad G1", "type": "digital"},
+        {"id": "8", "name": "M8 Licht", "type": "digital"},
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        names = [cmd["Name"] for cmd in build_webio_commands(_HOOK, result, webio_class)]
+
+    assert not {"HA QB2 MT Bad G1", "HA qb2 MT Bad G1"} & set(names)
+    assert ("HA M8 Licht" in names) == (webio_class in (None, WebioClass.MARKER))
+    assert ("HA QB1 MT Flur G18" in names) == (webio_class in (None, WebioClass.QUICKBUS))
+    assert (
+        "2 Web-IO command names are generated more than once, those commands are left out (rename the item in "
+        "Comexio or change the naming schema): HA QB2 MT Bad G1, HA qb2 MT Bad G1"
+    ) in caplog.text
+
+
+def test_ignored_items_do_not_collide(caplog: pytest.LogCaptureFixture) -> None:
+    """An item the consumer does not expose gets no command, so it must not knock out another one."""
+    result = _parse()
+    result["markers"] = [{"id": "7", "name": "QB2 MT Bad G1", "type": "digital"}]
+    result["knx"] = [{"id": "9", "name": "QB1 MT Flur G1", "type": "digital"}]
+
+    with caplog.at_level(logging.WARNING):
+        names = [
+            cmd["Name"] for cmd in build_webio_commands(_HOOK, result, ignored_marker_ids={7}, ignored_knx_ids={9})
+        ]
+
+    assert {"HA QB2 MT Bad G1", "HA QB1 MT Flur G1"} <= set(names)
+    assert len(names) == len(set(names))
+    assert "generated more than once" not in caplog.text
+
+
+def test_unique_command_names_give_no_collision_warning(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        build_webio_commands(_HOOK, _parse())
+
+    assert "generated more than once" not in caplog.text
 
 
 def test_quickbus_device_name_is_lua_escaped_in_name_only() -> None:
