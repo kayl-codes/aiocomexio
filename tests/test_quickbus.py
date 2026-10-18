@@ -813,6 +813,33 @@ def test_io_id_string_is_canonical() -> None:
     assert 'id="211"' in commands["HA QB2 MT Bad G1"]["Data"]
 
 
+def test_plain_io_id_string_is_canonical() -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["11"]["Id"] = "0011"
+
+    ios = _io_all(_parse(conf, io_live_states={"11": "1"}))
+
+    assert "0011" not in ios
+    assert (ios["11"]["id"], ios["11"]["value"], ios["11"]["quickbus"]) == ("11", 1, None)
+
+
+def test_ios_whose_ids_repeat_once_canonical_are_left_out(caplog: pytest.LogCaptureFixture) -> None:
+    """ "211" and "00211" would share one live state and one pushed id — neither of them is meant."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["202"]["Id"] = "00211"
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    active_ids = [io["id"] for io in result["io"]]
+    assert "211" not in active_ids
+    assert {"201", "203", "213"} <= set(active_ids)
+    assert (
+        "1 IO ids of extension 1 repeat, their 2 IOs are left out of the active IOs (no entity, no Web-IO command): 211"
+        in caplog.text
+    )
+
+
 def test_unnamed_device_gets_a_fallback_name() -> None:
     conf = load_json_fixture("config_quickbus.json")
     _base_ext(conf)["lowcan"]["2"]["Name"] = ""
