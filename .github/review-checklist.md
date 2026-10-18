@@ -58,6 +58,13 @@ published on PyPI and consumed by the Home Assistant integration
   and `inf` pass every `isinstance` check and every `<`/`>` range check (a comparison with `nan` is always false).
 - **Digits in protocol regexes:** write `\d` (SonarQube S6353 wants it instead of `[0-9]`) and compile with
   `re.ASCII`; without it `\d` also matches non-ASCII digits such as `٣`, which Comexio never sends.
+- **HTML forms are read with `html.parser`, not regexes:** a form field (a `<select>`, its `<option>`s, an
+  `<input>`) is read as a browser reads it: attribute values unquoted and entities resolved, the first of two
+  equal attribute names wins, a bare attribute is `""`, a `>` inside a quoted value does not end the tag. An
+  element is matched by its exact `id`/`name`, not a prefix; of several `selected` options the last one counts, and
+  without one the first. A cut-off answer (an element without its end tag) reads as unknown, never as the first
+  option — that would be a plausible-looking but wrong value. A regex that tries to cover these cases outgrows
+  SonarQube's regex complexity limit (S5843) and still misses some of them.
 - **Live readings stay at DEBUG:** a WARNING or higher about an unexpected answer to a *value* request (live states,
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
   answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes
