@@ -50,7 +50,10 @@ published on PyPI and consumed by the Home Assistant integration
 - **An unknown kind stays unknown:** when the data cannot tell what an entry is (binary or analog, input or output,
   its type), the parsed field is `None`, not a silent default such as `False`/`0`/analog, and every reader of
   that field (e.g. the function plan renderers) handles `None` as unknown. A default turns missing data into a
-  plausible-looking but wrong result: an untyped Quickbus IO drawn as an analog pin (#32).
+  plausible-looking but wrong result: an untyped Quickbus IO drawn as an analog pin (#32). The rule targets
+  *silent* defaults: an explicit, documented and logged conservative fallback stays allowed — the fallbacks listed
+  above, a Quickbus IO with a malformed direction flag kept read-only, and the identifier classification when the
+  whole IO type table is missing (`parse_config` warns; leaving out every IO for one poll would drop entities).
 - **Public API:** fully typed; flag breaking changes to public names or signatures that are not called out in the PR.
 - **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776); no duplicated string literals — extract
   constants (S1192).
