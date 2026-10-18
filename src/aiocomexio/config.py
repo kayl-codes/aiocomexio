@@ -1107,6 +1107,40 @@ def _repeat_labels(repeated: dict[str, list[str]]) -> str:
     return log_excerpt(labels)
 
 
+def _type_bound(value: Any) -> float | None:
+    """A min/max from the IO type table if it is a finite int or float, else None.
+
+    The table is scraped JSON: a text, bool or infinite bound would break the range math of a
+    Web-IO command (abs()) and with it a whole upload, unrelated classes included.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        return value if math.isfinite(value) else None
+    except OverflowError:  # an int beyond float's range
+        return None
+
+
+def _type_bounds(type_info: Mapping[str, Any], ext_name: str, ident: str) -> tuple[float | None, float | None]:
+    """(min, max) of an IO from its type row; both None (the Web-IO defaults) if one is unusable.
+
+    One bound alone does not make a range: a kept min of 200 with a defaulted max of 100 would
+    turn it upside down. A missing or null bound stays as before (min 0, max 1 or None).
+    """
+    raw = (type_info.get("min", 0), type_info.get("max", 1))
+    bounds = (_type_bound(raw[0]), _type_bound(raw[1]))
+    if any(bound is None and value is not None for bound, value in zip(bounds, raw, strict=True)):
+        _LOGGER.warning(
+            "IO %s %r: the IO type table has an unusable min/max (%s, %s), the Web-IO command gets the default range",
+            ext_name,
+            ident,
+            _short_repr(raw[0]),
+            _short_repr(raw[1]),
+        )
+        return None, None
+    return bounds
+
+
 def _untyped_quickbus_ios(
     ext_id: str, entries: list[dict[str, Any]], type_ids: list[Any], io_types: Mapping[str, Any]
 ) -> set[int]:
@@ -1283,7 +1317,7 @@ def _build_io_entry(
     description = _io_description(raw_desc if isinstance(raw_desc, str) else "", ident)
     type_info = _table_entry(io_types, io_item.get("InOutputTypeId"))
     is_binary = type_info.get("binary", False)
-    v_max = type_info.get("max", 1)
+    v_min, v_max = _type_bounds(type_info, ext_name, ident)
     ident_upper = ident.upper()
 
     try:
@@ -1323,7 +1357,7 @@ def _build_io_entry(
         "is_binary": is_binary,
         "is_input": is_input,
         "unit": normalize_io_unit(type_info.get("unit", "")),
-        "min": type_info.get("min", 0),
+        "min": v_min,
         "max": v_max,
         "type_id_raw": type_id_raw,
         # None is "no reading" (like an absent IO), not a non-numeric one: the config's "Value" stays.

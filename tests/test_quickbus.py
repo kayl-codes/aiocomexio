@@ -1160,6 +1160,45 @@ def test_malformed_marker_and_knx_ids_do_not_abort_the_build(bad_id: Any) -> Non
     assert quickbus == build_webio_commands(_HOOK, _parse(), WebioClass.QUICKBUS)
 
 
+def _with_type_bounds(v_min: Any, v_max: Any) -> dict[str, Any]:
+    io_types = {key: {**row, "min": v_min, "max": v_max} for key, row in _IO_TYPES.items()}
+    return parse_config(load_json_fixture("config_quickbus.json"), io_types=io_types, io_input_types=_IO_INPUT_TYPES)
+
+
+@pytest.mark.parametrize(
+    ("v_min", "v_max"),
+    [("abc", 10), (0, "7"), (True, 10), (0, float("inf")), (float("nan"), 10), (0, 10**400), (200, 10**5000)],
+    ids=["text", "numeric-text", "bool", "inf", "nan", "beyond-float", "beyond-str-limit"],
+)
+def test_unusable_type_bounds_give_the_default_range(v_min: Any, v_max: Any, caplog: pytest.LogCaptureFixture) -> None:
+    """A malformed min/max must not break a Web-IO upload, an unrelated class included; one bad bound drops both."""
+    with caplog.at_level(logging.WARNING):
+        result = _with_type_bounds(v_min, v_max)
+
+    assert {(io["min"], io["max"]) for io in result["io_all"]} == {(None, None)}
+    for io in result["io"]:
+        command = build_io_webio_command(io, _HOOK)
+        expected = (0, 1) if io["is_binary"] else (0, 100)
+        assert (command["Min"], command["Max"]) == expected, io["identifier"]
+    assert build_webio_commands(_HOOK, result, WebioClass.MARKER) == build_webio_commands(
+        _HOOK, _parse(), WebioClass.MARKER
+    )
+    first = result["io_all"][0]
+    assert (
+        f"IO {first['ext_name']} {first['identifier']!r}: the IO type table has an unusable min/max "
+        f"({config_module._short_repr(v_min)}, {config_module._short_repr(v_max)}), "
+        "the Web-IO command gets the default range"
+    ) in [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.parametrize(("bound", "kind"), [(5, int), (-40, int), (2.5, float)])
+def test_numeric_type_bounds_are_kept(bound: Any, kind: type) -> None:
+    result = _with_type_bounds(bound, bound)
+
+    assert {(io["min"], io["max"]) for io in result["io_all"]} == {(bound, bound)}
+    assert {type(io["min"]) for io in result["io_all"]} == {kind}
+
+
 @pytest.mark.parametrize("item_id", [7, "7", "007"])
 def test_ignored_ids_match_by_value(item_id: Any) -> None:
     result = _parse()
