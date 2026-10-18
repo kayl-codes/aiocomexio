@@ -589,6 +589,23 @@ def test_huge_integer_type_id_names_no_type_row(caplog: pytest.LogCaptureFixture
     assert "MT Flur TL1 (type <int too large to print>)" in caplog.text
 
 
+@pytest.mark.parametrize("type_id", [float("inf"), float("-inf"), float("nan")])
+def test_non_finite_type_id_names_no_type_row(type_id: float, caplog: pytest.LogCaptureFixture) -> None:
+    """json.loads accepts Infinity/NaN; int() of them must not abort parse_config."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["203"]["InOutputTypeId"] = type_id
+    _base_ext(conf)["inoutput"]["11"]["InOutputTypeId"] = type_id
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    ios = _io_all(result)
+    assert "203" not in {io["id"] for io in result["io"]}
+    # A plain IO falls back to its identifier: I1 is a binary input.
+    assert (ios["11"]["type_id_raw"], ios["11"]["is_binary"], ios["11"]["is_input"]) == (1, True, True)
+    assert "1 active Quickbus IOs of extension 1 have no row in the IO type table" in caplog.text
+
+
 def test_typed_quickbus_ios_give_no_type_warning(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING):
         _parse()

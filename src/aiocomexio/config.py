@@ -478,7 +478,7 @@ def _add_webhook_command(data: dict[str, Any], w_id: str, w_obj: dict[str, Any],
     raw_type = w_obj.get("TypeId")
     try:
         val_type = int(raw_type) if raw_type is not None else 1
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):  # OverflowError: JSON Infinity
         val_type = 1
 
     name = w_obj.get("Name")
@@ -1257,7 +1257,7 @@ def _build_io_entry(
 
     try:
         type_id_raw = int(io_item.get("InOutputTypeId", 1))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):  # OverflowError: JSON Infinity
         type_id_raw = 1
 
     # Fallback classification when the IO type table has no usable row for this IO — not only
