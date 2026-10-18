@@ -80,7 +80,9 @@ _QUICKBUS_KEY = "lowcan"
 # Entries named in one aggregated warning before the rest is only counted.
 _MAX_LOGGED_ENTRIES = 5
 
-# Longest digit string _strict_id accepts as an id (fits a signed 64-bit integer).
+# Longest digit string _strict_id accepts as an id. A Comexio id is a database key, far below
+# this; the cap is a sanity limit (always within a signed 64-bit integer, leading zeros counted),
+# not the full int64 range: anything longer is treated as malformed.
 _MAX_ID_DIGITS = 18
 
 # Longest repr of a raw value quoted in a log line before it is cut off.
