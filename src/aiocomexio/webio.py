@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Collection, Mapping
 from typing import Any
 
-from .config import TYPE_ANALOG, log_excerpt
+from .config import TYPE_ANALOG, _strict_id, log_excerpt
 from .const import (
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_INT16_DANGER_ZONE,
@@ -323,7 +323,7 @@ def build_webio_commands(
     """
     commands: list[tuple[WebioClass, dict[str, Any]]] = []
     for m in parsed_data.get("markers", []):
-        if not (ignored_marker_ids and int(m["id"]) in ignored_marker_ids):
+        if not _is_ignored(m["id"], ignored_marker_ids):
             commands.append((WebioClass.MARKER, build_marker_webio_command(m, webhook_path)))
     for io in parsed_data.get("io", []):
         if io.get("quickbus"):
@@ -331,10 +331,21 @@ def build_webio_commands(
         else:
             commands.append((WebioClass.IO, build_io_webio_command(io, webhook_path)))
     for knx_item in parsed_data.get("knx", []):
-        if not (ignored_knx_ids and int(knx_item["id"]) in ignored_knx_ids):
+        if not _is_ignored(knx_item["id"], ignored_knx_ids):
             commands.append((WebioClass.KNX, build_marker_webio_command(knx_item, webhook_path, WebioClass.KNX)))
     # Collisions are found across all classes, so a per-class upload leaves out the same ones.
     return [cmd for cls, cmd in _without_colliding_names(commands) if webio_class in (None, cls)]
+
+
+def _is_ignored(item_id: Any, ignored_ids: Collection[int] | None) -> bool:
+    """Whether item_id is one of ignored_ids; an id _strict_id rejects is never ignored.
+
+    parse_config keeps a marker/KNX id as it comes, so a malformed one must not abort the whole
+    build (and with it a per-class upload of an unrelated class).
+    """
+    if not ignored_ids:
+        return False
+    return (strict_id := _strict_id(item_id)) is not None and int(strict_id) in ignored_ids
 
 
 def _without_colliding_names(

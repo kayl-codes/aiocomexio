@@ -835,7 +835,25 @@ def test_ios_whose_ids_repeat_once_canonical_are_left_out(caplog: pytest.LogCapt
     assert "211" not in active_ids
     assert {"201", "203", "213"} <= set(active_ids)
     assert (
-        "1 IO ids of extension 1 repeat, their 2 IOs are left out of the active IOs (no entity, no Web-IO command): 211"
+        "1 IO ids repeat, their 2 IOs are left out of the active IOs (no entity, no Web-IO command): 211 (ext 1)"
+        in caplog.text
+    )
+
+
+def test_ios_whose_ids_repeat_across_extensions_are_left_out(caplog: pytest.LogCaptureFixture) -> None:
+    """get_io_live_states refuses one IO id under two extension ids, so a poll of both would fail."""
+    conf = load_json_fixture("config_quickbus.json")
+    conf["FubModules"]["1"]["2"]["inoutput"]["301"]["Id"] = "0211"
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    active_ids = [io["id"] for io in result["io"]]
+    assert "211" not in active_ids
+    assert {"201", "213"} <= set(active_ids)
+    assert [io["ext_id"] for io in result["io_all"] if io["id"] == "211"] == ["1", "2"]
+    assert (
+        "1 IO ids repeat, their 2 IOs are left out of the active IOs (no entity, no Web-IO command): 211 (ext 1, 2)"
         in caplog.text
     )
 
@@ -1057,13 +1075,30 @@ def test_command_names_colliding_across_classes_are_left_out(
     with caplog.at_level(logging.WARNING):
         names = [cmd["Name"] for cmd in build_webio_commands(_HOOK, result, webio_class)]
 
-    assert not {"HA QB2 MT Bad G1", "HA qb2 MT Bad G1"} & set(names)
+    # Exactly the commands without the two colliding ones — not renamed, not kept under another name.
+    without_collision = {**result, "markers": [{"id": "8", "name": "M8 Licht", "type": "digital"}]}
+    expected = [cmd["Name"] for cmd in build_webio_commands(_HOOK, without_collision, webio_class)]
+    assert names == [name for name in expected if name != "HA QB2 MT Bad G1"]
     assert ("HA M8 Licht" in names) == (webio_class in (None, WebioClass.MARKER))
     assert ("HA QB1 MT Flur G18" in names) == (webio_class in (None, WebioClass.QUICKBUS))
     assert (
         "2 Web-IO command names are generated more than once, those commands are left out (rename the item in "
         "Comexio or change the naming schema): HA QB2 MT Bad G1, HA qb2 MT Bad G1"
     ) in caplog.text
+
+
+@pytest.mark.parametrize("bad_id", ["", "abc", "-3", "1" * 5000, None, 2.5])
+def test_malformed_marker_and_knx_ids_do_not_abort_the_build(bad_id: Any) -> None:
+    """Such an id matches no ignored id; a per-class upload of an unrelated class still works."""
+    result = _parse()
+    result["markers"] = [{"id": bad_id, "name": "M Kaputt", "type": "digital"}]
+    result["knx"] = [{"id": bad_id, "name": "K Kaputt", "type": "digital"}]
+
+    names = [cmd["Name"] for cmd in build_webio_commands(_HOOK, result, None, {7}, {7})]
+    quickbus = build_webio_commands(_HOOK, result, WebioClass.QUICKBUS, {7}, {7})
+
+    assert {"HA M Kaputt", "HA K Kaputt"} <= set(names)
+    assert quickbus == build_webio_commands(_HOOK, _parse(), WebioClass.QUICKBUS)
 
 
 def test_ignored_items_do_not_collide(caplog: pytest.LogCaptureFixture) -> None:

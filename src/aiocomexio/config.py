@@ -1055,26 +1055,27 @@ def _ambiguous_ios(ext_id: str, entries: list[dict[str, Any]]) -> set[int]:
     return {pos for positions in repeated for pos in positions}
 
 
-def _repeated_io_ids(ext_id: str, entries: list[dict[str, Any]]) -> set[int]:
-    """Positions of the IOs whose canonical "Id" another IO of the extension has as well ("211" and "00211").
+def _repeated_io_ids(entries: list[dict[str, Any]]) -> set[str]:
+    """The canonical IO "Id"s more than one IO has, across all extensions ("211" and "00211").
 
-    The Id keys the live states and the Quickbus payload, so the IOs would read and push each
-    other's values — all of them are left out. Comexio should never list such a pair.
+    The Id keys the live states and the Quickbus payload (ComexioClient.get_io_live_states even
+    refuses one IO id under two extension ids), so the IOs would read and push each other's
+    values — all of them are left out. Comexio should never list such a pair.
     """
-    by_id: dict[str, list[int]] = {}
-    for pos, entry in enumerate(entries):
-        by_id.setdefault(entry["id"], []).append(pos)
-    repeated = {io_id: positions for io_id, positions in by_id.items() if len(positions) > 1}
+    by_id: dict[str, list[str]] = {}
+    for entry in entries:
+        by_id.setdefault(entry["id"], []).append(entry["ext_id"])
+    repeated = {io_id: ext_ids for io_id, ext_ids in by_id.items() if len(ext_ids) > 1}
     if repeated:
         _LOGGER.warning(
-            "%d IO ids of extension %s repeat, their %d IOs are left out of the active IOs "
-            "(no entity, no Web-IO command): %s",
+            "%d IO ids repeat, their %d IOs are left out of the active IOs (no entity, no Web-IO command): %s",
             len(repeated),
-            ext_id,
             sum(map(len, repeated.values())),
-            log_excerpt(sorted(repeated, key=int)),
+            log_excerpt(
+                [f"{io_id} (ext {', '.join(dict.fromkeys(ext_ids))})" for io_id, ext_ids in sorted(repeated.items())]
+            ),
         )
-    return {pos for positions in repeated.values() for pos in positions}
+    return set(repeated)
 
 
 def _untyped_quickbus_ios(
@@ -1147,11 +1148,7 @@ def _process_extension_ios(
             "Skipping %d IO entries of extension %s without a valid Id: %s", len(bad_ids), ext_id, log_excerpt(bad_ids)
         )
     qb.report()
-    left_out = (
-        _ambiguous_ios(ext_id, entries)
-        | _repeated_io_ids(ext_id, entries)
-        | _untyped_quickbus_ios(ext_id, entries, type_ids, builder.io_types)
-    )
+    left_out = _ambiguous_ios(ext_id, entries) | _untyped_quickbus_ios(ext_id, entries, type_ids, builder.io_types)
     data["io_all"].extend(entries)
     data["io"].extend(e for pos, e in enumerate(entries) if not e["inactive"] and pos not in left_out)
 
@@ -1177,6 +1174,8 @@ def _process_ios(
         data[_KEY_QUICKBUS_DEVICES].update(qb_devices)
         qb_map = _quickbus_io_map(ext_id, ext_content, qb_devices, qb_dropped)
         _process_extension_ios(data, ext_id, ext_content, builder, _QuickbusContext(ext_id, qb_devices, qb_map))
+    if repeated := _repeated_io_ids(data["io_all"]):
+        data["io"] = [entry for entry in data["io"] if entry["id"] not in repeated]
 
 
 def _io_direction(ident_upper: str, type_id_raw: int, io_input_types: Mapping[str, Any]) -> bool:
