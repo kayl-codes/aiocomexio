@@ -1225,12 +1225,20 @@ def test_numeric_type_bounds_are_kept(bound: Any, kind: type) -> None:
 @pytest.mark.parametrize("item_id", [7, "7", "007"])
 def test_ignored_ids_match_by_value(item_id: Any) -> None:
     result = _parse()
-    result["markers"] = [{"id": item_id, "name": "M Ignoriert", "type": "digital"}]
-    result["knx"] = [{"id": item_id, "name": "K Ignoriert", "type": "digital"}]
+    result["markers"] = [
+        {"id": item_id, "name": "M Ignoriert", "type": "digital"},
+        {"id": "8", "name": "M Bleibt", "type": "digital"},
+    ]
+    result["knx"] = [
+        {"id": item_id, "name": "K Ignoriert", "type": "digital"},
+        {"id": "8", "name": "K Bleibt", "type": "digital"},
+    ]
 
     names = {cmd["Name"] for cmd in build_webio_commands(_HOOK, result, None, {7}, {7})}
 
     assert not {"HA M Ignoriert", "HA K Ignoriert"} & names
+    # Only id 7 is ignored, not every marker or KNX object.
+    assert {"HA M Bleibt", "HA K Bleibt"} <= names
 
 
 def test_ignored_items_do_not_collide(caplog: pytest.LogCaptureFixture) -> None:
