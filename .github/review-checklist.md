@@ -47,6 +47,10 @@ published on PyPI and consumed by the Home Assistant integration
   The documented fallbacks — the generic KNX range when the DPT chain or its `KNX_DPT_ANALOG_RANGES` entry is
   missing, and the identifier-based IO classification when the type row is missing — are intentional and not
   findings unless the diff changes them.
+- **An unknown kind stays unknown:** when the data cannot tell what an entry is (binary or analog, input or output,
+  its type), the parsed field is `None`, not a silent default such as `False`/`0`/analog, and every reader of
+  that field (e.g. the function plan renderers) handles `None` as unknown. A default turns missing data into a
+  plausible-looking but wrong result: an untyped Quickbus IO drawn as an analog pin (#32).
 - **Public API:** fully typed; flag breaking changes to public names or signatures that are not called out in the PR.
 - **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776); no duplicated string literals — extract
   constants (S1192).
@@ -66,6 +70,9 @@ published on PyPI and consumed by the Home Assistant integration
   well, not only to values; `%r` alone quotes them but does not cap their length. `_excerpt` caps the *output*
   only — it builds the full `repr` first — so it is not a guard against huge or non-JSON values (see "Every scraped
   value, keys included").
+- **Scraped names in `config.py` log lines:** an extension name, identifier, title or other scraped string goes
+  through `_log_safe` (control characters escaped, length cut), a raw value of unknown type through `_short_repr`
+  (capped repr), a list of names through `log_excerpt` — never as a bare `%s` or an uncapped `%r` (#32).
 - **Caller values in new messages:** an id, name or value that comes from the caller or from Comexio is written as
   repr (`%r` in log calls, `!r` in f-strings for exceptions), so a line break in it cannot forge a log line and an
   empty string stays visible. Older `%s` calls are not a finding unless the diff touches them.
@@ -100,6 +107,9 @@ published on PyPI and consumed by the Home Assistant integration
   present where the contract keeps it (e.g. an inactive IO leaves `io` but stays in `io_all` for labels). A test
   that asserts entries are kept compares the complete expected result — `==` on a list, a sorted list or a
   `collections.Counter`, not on a `set`, which hides duplicates — not a subset or a single member.
+- **No vacuous loops:** a test that asserts inside a `for` over a result first asserts that the result holds the
+  expected entries (`==` on the ids, or at least non-empty and covering every case the loop distinguishes, e.g. a
+  binary and an analog IO). Otherwise a regression that drops the entries passes every assertion in the loop (#32).
 
 ## GitHub Actions
 
