@@ -1643,7 +1643,7 @@ def _plan_by_name(fubs: Any, name: str, *, what: str) -> CreatedFunctionPlan:
     key, plan = found[0]
     plan_id = _positive_id(key)
     if plan_id is None:
-        raise ComexioDataError(f"{what}: the new plan has no valid id, $Fubs lists it under {key!r}")
+        raise ComexioDataError(f"{what}: the new plan has no valid id, $Fubs lists it under {_excerpt(key)}")
     return CreatedFunctionPlan(plan_id, dict(plan))
 
 
