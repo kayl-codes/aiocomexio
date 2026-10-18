@@ -2,7 +2,15 @@
 
 from importlib.metadata import version
 
-from .client import ComexioClient, CreatedFunctionPlan, IoAddress, LiveStates, RawConfig, WebioBaseInfo
+from .client import (
+    ComexioClient,
+    CreatedFunctionPlan,
+    IoAddress,
+    LiveStates,
+    RawConfig,
+    WebioBaseInfo,
+    WebioCommandForm,
+)
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioConnectionError,
@@ -30,6 +38,7 @@ __all__ = [
     "LiveStates",
     "RawConfig",
     "WebioBaseInfo",
+    "WebioCommandForm",
     "__version__",
     "is_local_address",
     "progress_trace_config",

@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from html.parser import HTMLParser
 from http import HTTPStatus
 from typing import Any, NamedTuple, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
@@ -44,9 +45,17 @@ from .scrape import (
     scrape_js_vars,
 )
 from .session import is_local_address
-from .webio import CONTENT_TYPE_JSON
+from .webio import CONTENT_TYPE_JSON, WEBIO_PROTOCOL_HTTP
 
-__all__ = ["ComexioClient", "CreatedFunctionPlan", "IoAddress", "LiveStates", "RawConfig", "WebioBaseInfo"]
+__all__ = [
+    "ComexioClient",
+    "CreatedFunctionPlan",
+    "IoAddress",
+    "LiveStates",
+    "RawConfig",
+    "WebioBaseInfo",
+    "WebioCommandForm",
+]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -127,6 +136,9 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 # <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
 _WEBIO_CMD_INPUT_RE = re.compile(r'<input\b[^>]*\bid="(min|max)_cmd_io_0"[^>]*>', re.IGNORECASE)
 _WEBIO_CMD_VALUE_RE = re.compile(r'\bvalue="([^"]*)"')
+# The id of the form's protocol <select>, whose options read e.g. <option value="0" selected="selected">.
+_WEBIO_PROTOCOL_SELECT_ID = "protocol"
+_PROTOCOL_VALUE_RE = re.compile(r"\d+", re.ASCII)
 
 # Plain-text answer of fupValueData for a plan that is not running (instead of a JSON value dict).
 _JSON_START_CHARS = ("{", "[")
@@ -188,6 +200,18 @@ class CreatedFunctionPlan:
 
     fub_id: int
     fubs_entry: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class WebioCommandForm:
+    """The settings of one Web-IO command that only its edit form shows (see get_webio_command_form).
+
+    Each is None when the form lacks the field or its value is not numeric.
+    """
+
+    min: float | None
+    max: float | None
+    protocol: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -811,15 +835,19 @@ class ComexioClient:
         """Add a command to a Web-IO device (command_id None) or update the existing command command_id.
 
         command is one entry of webio.build_webio_commands (Name, Parameter, Data, TypeId, Min,
-        Max, optionally HeaderModifier / PostGet / Authentication — the KNX loopback command
-        needs its own values for those three). base_id is the device's class, only used for a
+        Max, Protocol — HTTP when absent, an int otherwise (ValueError) —, optionally HeaderModifier /
+        PostGet / Authentication — the KNX loopback command needs its own values for those three).
+        base_id is the device's class, only used for a
         new command. command_id must be numeric (ValueError otherwise). Comexio's answer carries
         no verdict, so returning only means the request was accepted — the next config scrape
         shows whether the command is there.
         """
+        protocol = command.get("Protocol", WEBIO_PROTOCOL_HTTP)
+        if type(protocol) is not int:  # bool is an int subclass; None is an unread form value
+            raise ValueError(f"Web-IO command protocol must be an int, got {protocol!r}")
         payload: dict[str, Any] = {
             "dlg_web_device_id": str(device_id),
-            "protocol": 0,
+            "protocol": protocol,
             "parameter": command["Parameter"],
             "header_modifier": command.get("HeaderModifier", CONTENT_TYPE_JSON),
             "data": command["Data"],
@@ -879,10 +907,15 @@ class ComexioClient:
     async def get_webio_command_range(
         self, command_id: str | int, device_id: str | int
     ) -> tuple[float | None, float | None]:
-        """(Min, Max) of one Web-IO command, read from its edit form.
+        """(Min, Max) of one Web-IO command, read from its edit form (see get_webio_command_form)."""
+        form = await self.get_webio_command_form(command_id, device_id)
+        return form.min, form.max
 
-        The config scrape never carries Min/Max of Web-IO commands, so the edit form is the only
-        source. A field that is missing or not numeric comes back as None; a form without any
+    async def get_webio_command_form(self, command_id: str | int, device_id: str | int) -> WebioCommandForm:
+        """Min, Max and protocol of one Web-IO command, read from its edit form in one request.
+
+        The config scrape never carries these fields of Web-IO commands, so the edit form is the
+        only source. A field that is missing or not numeric comes back as None; a form without any
         min/max field raises ComexioDataError (or ComexioAuthenticationError for the login form).
         """
         html = await self._request_admin_text(
@@ -891,7 +924,8 @@ class ComexioClient:
             what=f"Web-IO command {command_id} edit form",
             params={"Id": str(command_id), "TestDevice": str(device_id)},
         )
-        return _command_range(html, command_id)
+        v_min, v_max = _command_range(html, command_id)
+        return WebioCommandForm(min=v_min, max=v_max, protocol=_command_protocol(html, command_id))
 
     # --- markers and KNX objects (admin session) ---
 
@@ -1747,6 +1781,69 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
     if not matched:
         raise _missing_data_error(html, f"Web-IO command {command_id} edit form has no min/max fields")
     return values["min"], values["max"]
+
+
+class _ProtocolSelectParser(HTMLParser):
+    """The <option> attributes of a page's first <select id="protocol">, read as a browser does.
+
+    Attribute values come unquoted with entities resolved, the first of a name wins and a bare one is "";
+    a ">" inside a quoted value does not end its tag. closed says the select's </select> was read, so its
+    options are complete (a cut-off answer drops a half-read option tag).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.found = False
+        self.closed = False
+        self.options: list[dict[str, str]] = []
+        self._inside = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes: dict[str, str] = {}
+        for name, value in attrs:
+            attributes.setdefault(name, value or "")
+        if tag == "select":
+            self._inside = not self.found and attributes.get("id") == _WEBIO_PROTOCOL_SELECT_ID
+            self.found = self.found or self._inside
+        elif tag == "option" and self._inside:
+            self.options.append(attributes)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "select":
+            self.closed = self.closed or self._inside
+            self._inside = False
+
+
+def _command_protocol(html: str, command_id: str | int) -> int | None:
+    """The protocol a Web-IO command edit form has chosen, as a browser shows it.
+
+    That is its last selected option (a single select keeps only the last), else its first option.
+    None means unknown — the form has no protocol select, no option or no numeric value — never HTTP.
+    """
+    parser = _ProtocolSelectParser()
+    parser.feed(html)
+    parser.close()
+    if not parser.found:
+        _LOGGER.debug("Web-IO command %r edit form has no protocol select", command_id)
+        return None
+    if not parser.closed:
+        _LOGGER.debug("Web-IO command %r protocol select is not closed", command_id)
+        return None
+    options = parser.options
+    if not options:
+        _LOGGER.debug("Web-IO command %r protocol select has no option", command_id)
+        return None
+    selected = [option for option in options if "selected" in option]
+    if len(selected) > 1:
+        _LOGGER.debug(
+            "Web-IO command %r protocol select has %d selected options, the last counts", command_id, len(selected)
+        )
+    chosen = selected[-1] if selected else options[0]
+    value = chosen.get("value")
+    if value is None or not _PROTOCOL_VALUE_RE.fullmatch(value):
+        _LOGGER.warning("Web-IO command %r has a non-numeric protocol value: %r", command_id, value)
+        return None
+    return int(value)
 
 
 def _collect_io_values(result: dict[str, Any], io_ids: Iterable[str]) -> tuple[dict[str, str], list[str]]:
