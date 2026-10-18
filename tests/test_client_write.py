@@ -7,6 +7,7 @@ import logging
 import math
 import re
 from collections.abc import Awaitable, Callable
+from html.parser import HTMLParser
 from typing import Any
 
 import aiohttp
@@ -736,7 +737,7 @@ async def test_get_webio_command_range(logged_in: ComexioClient, comexio: FakeCo
     comexio.serve_text(
         "GET",
         WEBIO_EDIT_COMMAND_PATH,
-        '<input type="text" id="min_cmd_io_0" value="-500000"><input id="MAX_cmd_io_0" value="abc">',
+        '<input type="text" id="min_cmd_io_0" value="-500000"><input id="max_cmd_io_0" value="abc">',
     )
 
     assert await logged_in.get_webio_command_range(1324, 34) == (-500000.0, None)
@@ -765,6 +766,10 @@ async def test_get_webio_command_range_field_without_value_is_none(
         ('<input id="max_cmd_io_0" value="5">', (None, 5.0)),
         ('<input id="min_cmd_io_0"><input id="min_cmd_io_0" value="3">', (None, None)),
         ('<input id="min_cmd_io_0" value="-5"><input id="max_cmd_io_0" value="5', (-5.0, None)),
+        ('<input id="MIN_cmd_io_0" value="0"><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<textarea><input id="min_cmd_io_0" value="0"></textarea><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<title><input id="max_cmd_io_0" value="0"></title><input id="max_cmd_io_0" value="5">', (None, 5.0)),
+        ('<textarea/><input id="min_cmd_io_0" value="0"></textarea><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
     ],
     ids=[
         "single-quoted-and-unquoted",
@@ -777,6 +782,10 @@ async def test_get_webio_command_range_field_without_value_is_none(
         "max-only",
         "first-input-without-value-wins",
         "cut-off-input-is-unknown",
+        "upper-case-id-is-another-input",
+        "input-written-into-a-textarea",
+        "input-written-into-the-title",
+        "input-after-a-self-closing-textarea",
     ],
 )
 async def test_get_webio_command_range_reads_the_inputs_as_a_browser_does(
@@ -785,6 +794,28 @@ async def test_get_webio_command_range_reads_the_inputs_as_a_browser_does(
     comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, html)
 
     assert await logged_in.get_webio_command_range(1324, 34) == expected
+
+
+@pytest.mark.parametrize(
+    "opening", ["<textarea>", "<title>", "<textarea/>", "<TEXTAREA>"], ids=["textarea", "title", "slash", "upper"]
+)
+async def test_get_webio_command_form_reads_text_only_content_as_text_on_an_older_html_parser(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, opening: str
+) -> None:
+    """Python releases before RCDATA_CONTENT_ELEMENTS report markup inside a <textarea> or <title> as tags.
+
+    Another end tag inside it (here </b> and </select>) does not end it, only its own does.
+    """
+    monkeypatch.setattr(HTMLParser, "RCDATA_CONTENT_ELEMENTS", (), raising=False)
+    closing = "</" + opening.strip("</>").lower() + ">"
+    comexio.serve_text(
+        "GET",
+        WEBIO_EDIT_COMMAND_PATH,
+        f'{opening}</b><select id="protocol"><option value="5" selected></select><input id="min_cmd_io_0" value="0">'
+        f'{closing}<input id="min_cmd_io_0" value="-5"><select id="protocol"><option value="1" selected></select>',
+    )
+
+    assert await logged_in.get_webio_command_form(1324, 34) == WebioCommandForm(min=-5.0, max=None, protocol=1)
 
 
 @pytest.mark.parametrize(
@@ -914,6 +945,12 @@ _RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" val
         pytest.param('<select id="protocol-extra"><option value="1" selected></option></select>', None, id="prefix-id"),
         pytest.param("", None, id="no-select"),
         pytest.param('<select id="protocol"></select>', None, id="no-options"),
+        pytest.param(
+            '<textarea><select id="protocol"><option value="5" selected></select></textarea>'
+            '<select id="protocol"><option value="1" selected></select>',
+            1,
+            id="select-written-into-a-textarea",
+        ),
     ],
 )
 async def test_get_webio_command_form_reads_protocol(

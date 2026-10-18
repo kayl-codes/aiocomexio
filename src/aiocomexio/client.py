@@ -135,6 +135,8 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 # The ids of the min/max <input> tags on a Web-IO command's edit form and the field each fills, e.g.
 # <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
 _WEBIO_RANGE_INPUT_IDS = {"min_cmd_io_0": "min", "max_cmd_io_0": "max"}
+# Elements whose content a browser reads as text, so markup inside them is no form field.
+_TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title"})
 # The id of the form's protocol <select>, whose options read e.g. <option value="0" selected="selected">.
 _WEBIO_PROTOCOL_SELECT_ID = "protocol"
 _PROTOCOL_VALUE_RE = re.compile(r"\d+", re.ASCII)
@@ -1793,27 +1795,64 @@ def _first_attributes(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
     return attributes
 
 
-class _CommandRangeParser(HTMLParser):
-    """The value of each min/max <input> on a Web-IO command edit form, read as a browser does.
+class _FormParser(HTMLParser):
+    """An HTMLParser that reads the content of a <textarea> or <title> as text, as a browser does.
 
-    Attribute values come unquoted with entities resolved and a ">" inside a quoted value does not end its tag.
-    The first input of an id counts, as getElementById finds it; the id is compared case-insensitively.
-    fields maps "min"/"max" to the value, or None if the input has no value attribute.
+    Newer Pythons do this themselves; older 3.13 releases report markup inside them as tags, so a field written
+    as text into a textarea would be read as a real one. Subclasses get the remaining tags through handle_form_tag
+    and handle_form_endtag, with the attributes from _first_attributes.
     """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.fields: dict[str, str | None] = {}
+        self._text_only: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "input":
+        if self._text_only is not None:
             return
-        attributes = _first_attributes(attrs)
-        if (field := _WEBIO_RANGE_INPUT_IDS.get(attributes.get("id", "").lower())) is not None:
+        if tag in _TEXT_ONLY_ELEMENTS:
+            self._text_only = tag
+        else:
+            self.handle_form_tag(tag, _first_attributes(attrs))
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # A browser ignores the slash of <textarea/> and <title/>: what follows is still their text.
+        if tag in _TEXT_ONLY_ELEMENTS:
+            self.handle_starttag(tag, attrs)
+        else:
+            super().handle_startendtag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._text_only is None:
+            self.handle_form_endtag(tag)
+        elif tag == self._text_only:
+            self._text_only = None
+
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        """A start tag outside a text-only element."""
+
+    def handle_form_endtag(self, tag: str) -> None:
+        """An end tag outside a text-only element."""
+
+
+class _CommandRangeParser(_FormParser):
+    """The value of each min/max <input> on a Web-IO command edit form, read as a browser does.
+
+    Attribute values come unquoted with entities resolved and a ">" inside a quoted value does not end its tag.
+    The first input of an id counts and the id is compared exactly (case included), as getElementById finds it.
+    fields maps "min"/"max" to the value, or None if the input has no value attribute.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fields: dict[str, str | None] = {}
+
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        if tag == "input" and (field := _WEBIO_RANGE_INPUT_IDS.get(attributes.get("id", ""))) is not None:
             self.fields.setdefault(field, attributes.get("value"))
 
 
-class _ProtocolSelectParser(HTMLParser):
+class _ProtocolSelectParser(_FormParser):
     """The <option> attributes of a page's first <select id="protocol">, read as a browser does.
 
     Attribute values come unquoted with entities resolved, the first of a name wins and a bare one is "";
@@ -1822,21 +1861,20 @@ class _ProtocolSelectParser(HTMLParser):
     """
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
+        super().__init__()
         self.found = False
         self.closed = False
         self.options: list[dict[str, str]] = []
         self._inside = False
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = _first_attributes(attrs)
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag == "select":
             self._inside = not self.found and attributes.get("id") == _WEBIO_PROTOCOL_SELECT_ID
             self.found = self.found or self._inside
         elif tag == "option" and self._inside:
             self.options.append(attributes)
 
-    def handle_endtag(self, tag: str) -> None:
+    def handle_form_endtag(self, tag: str) -> None:
         if tag == "select":
             self.closed = self.closed or self._inside
             self._inside = False

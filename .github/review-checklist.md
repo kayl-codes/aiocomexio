@@ -66,7 +66,9 @@ published on PyPI and consumed by the Home Assistant integration
 - **HTML forms are read with `html.parser`, not regexes:** a form field (a `<select>`, its `<option>`s, an
   `<input>`) is read as a browser reads it: attribute values unquoted and entities resolved, the first of two
   equal attribute names wins, a bare attribute is `""`, a `>` inside a quoted value does not end the tag. An
-  element is matched by its exact `id`/`name`, not a prefix, and the first element of an id counts. In a single
+  element is matched by its exact `id`/`name` (case included), not a prefix, and the first element of an id counts.
+  Markup inside a `<textarea>` or `<title>` is text, not a field (older 3.13 releases of `html.parser` report it as
+  tags; `_FormParser` in `client.py` skips it). In a single
   `<select>` (no `multiple`) the last of several `selected` options counts, and without one the first; a
   `<select multiple>` keeps every selected option and none when none is selected. A cut-off answer — a `<select>`
   without its `</select>`, so its options may be incomplete — reads as unknown, never as the first option: that
