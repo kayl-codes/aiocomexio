@@ -1,6 +1,7 @@
 """Fixtures for the client tests: a running fake Comexio server and a client wired to it."""
 
-from collections.abc import AsyncIterator
+import sys
+from collections.abc import AsyncIterator, Iterator
 
 import aiohttp
 import pytest
@@ -32,3 +33,12 @@ def client(comexio: FakeComexio, session: aiohttp.ClientSession) -> ComexioClien
 async def logged_in(client: ComexioClient) -> ComexioClient:
     await client.login()
     return client
+
+
+@pytest.fixture
+def int_max_str_digits() -> Iterator[None]:
+    """Python's default int-to-str digit limit (4300), whatever PYTHONINTMAXSTRDIGITS sets for the run."""
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    yield
+    sys.set_int_max_str_digits(previous)

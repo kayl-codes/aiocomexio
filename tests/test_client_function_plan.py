@@ -529,6 +529,7 @@ async def test_add_function_plan_element_with_connection(logged_in: ComexioClien
         (["55"], ComexioDataError),
     ],
 )
+@pytest.mark.usefixtures("int_max_str_digits")
 async def test_add_function_plan_element_without_id_raises(
     logged_in: ComexioClient, comexio: FakeComexio, answer: Any, error: type[Exception]
 ) -> None:

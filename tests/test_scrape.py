@@ -95,6 +95,7 @@ def _huge_int_error() -> str:
     return str(exc_info.value)
 
 
+@pytest.mark.usefixtures("int_max_str_digits")
 def test_scrape_js_vars_skips_a_huge_int_with_warning(caplog: pytest.LogCaptureFixture) -> None:
     html = f'<script>var $Big = {{"1": {{"Id": {_HUGE_INT}}}}};\nvar $Fubs = {{"1": {{"Id": 1}}}};</script>'
 
@@ -107,6 +108,7 @@ def test_scrape_js_vars_skips_a_huge_int_with_warning(caplog: pytest.LogCaptureF
     ]
 
 
+@pytest.mark.usefixtures("int_max_str_digits")
 def test_parse_io_types_with_a_huge_int_returns_empty_with_warning(caplog: pytest.LogCaptureFixture) -> None:
     html = f'<script>var $ioTypes = {{"1": {{"binary": 1, "min": {_HUGE_INT}}}}};</script>'
 
@@ -120,6 +122,7 @@ def test_parse_io_types_with_a_huge_int_returns_empty_with_warning(caplog: pytes
     ]
 
 
+@pytest.mark.usefixtures("int_max_str_digits")
 def test_parse_io_input_types_with_a_huge_int_returns_empty_with_warning(caplog: pytest.LogCaptureFixture) -> None:
     html = f'<script>var $IOInputTypes = {{"1": {{"input": {_HUGE_INT}}}}};</script>'
 
@@ -130,6 +133,7 @@ def test_parse_io_input_types_with_a_huge_int_returns_empty_with_warning(caplog:
     assert [r.getMessage() for r in caplog.records] == [f"Failed to decode $IOInputTypes: {_huge_int_error()}"]
 
 
+@pytest.mark.usefixtures("int_max_str_digits")
 @pytest.mark.parametrize("broken", ["DeviceBaseList", "DeviceList"])
 def test_parse_webio_add_page_with_a_huge_int_is_no_add_page(caplog: pytest.LogCaptureFixture, broken: str) -> None:
     lists = dict.fromkeys(("DeviceBaseList", "DeviceList"), '{"1": {"Id": 1}}')

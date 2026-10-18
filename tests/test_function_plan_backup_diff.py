@@ -227,6 +227,7 @@ def test_ref_id_as_digit_string_is_the_same_element() -> None:
     assert plan_hash({"elements": {"1": _marker("\u00b2")}, "connections": {}}) != plan_hash(older)
 
 
+@pytest.mark.usefixtures("int_max_str_digits")
 def test_ids_beyond_the_int_digit_limit_stay_strings() -> None:
     # A digit string beyond Python's int-to-str limit (4300) raised ValueError in hash and diff.
     huge = "1" * 5000
