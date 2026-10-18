@@ -327,6 +327,19 @@ def test_non_dict_webio_command_entries_are_skipped() -> None:
     assert list(result["webio_names"]) == ["101"]
 
 
+@pytest.mark.parametrize("type_id", [float("inf"), float("nan")])
+def test_non_finite_webio_type_id_falls_back(type_id: float) -> None:
+    """json.loads accepts Infinity/NaN; int() of them must not abort parse_config."""
+    conf = {
+        "WebDevices": {"30": {"Name": "HomeAssistant [M]", "Ip": "192.168.1.20", "WebDeviceBaseId": 7}},
+        "FubModules": {"10": {"30": {"101": {"Name": "HA M1 Licht", "WebCommandId": 5, "TypeId": type_id}}}},
+    }
+
+    assert parse_config(conf)["webio_commands"] == {
+        "HA M1 Licht": {"webIoId": "101", "cmdId": 5, "typeId": 1, "webioClass": WebioClass.MARKER}
+    }
+
+
 @pytest.mark.parametrize("field", ["schema_marker", "schema_io", "schema_knx"])
 @pytest.mark.parametrize("schema", ["M{MarkerId", "{0} x", "{MarkerTitle.nope}"])
 def test_parse_options_rejects_malformed_schema(field: str, schema: str) -> None:

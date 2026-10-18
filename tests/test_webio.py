@@ -62,7 +62,9 @@ def test_build_webio_commands_default_protocol_is_http(parsed: dict[str, Any]) -
 
 @pytest.mark.parametrize("webio_class", list(WebioClass))
 def test_build_webio_commands_writes_the_protocol(parsed: dict[str, Any], webio_class: WebioClass) -> None:
-    commands = build_webio_commands(_HOOK, parsed, webio_class, protocol=WEBIO_PROTOCOL_HTTPS)
+    # The basic fixture has no Quickbus devices; a missing IO type table keeps their IOs active.
+    source = parse_config(load_json_fixture("config_quickbus.json")) if webio_class is WebioClass.QUICKBUS else parsed
+    commands = build_webio_commands(_HOOK, source, webio_class, protocol=WEBIO_PROTOCOL_HTTPS)
 
     assert commands
     assert {cmd["Protocol"] for cmd in commands} == {WEBIO_PROTOCOL_HTTPS}
