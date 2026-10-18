@@ -20,8 +20,9 @@ from aiocomexio import (
     ComexioRequestRejectedError,
     ComexioResponseError,
     WebioBaseInfo,
+    WebioCommandForm,
 )
-from aiocomexio.webio import CONTENT_TYPE_JSON
+from aiocomexio.webio import CONTENT_TYPE_JSON, WEBIO_PROTOCOL_HTTPS
 from tests.fake_comexio import LOGIN_PAGE, PASSWORD, USERNAME, FakeComexio
 
 API_PATH = "/api/"
@@ -681,6 +682,25 @@ async def test_save_webio_command_update_keeps_command_specific_request_shape(
     assert (form["header_modifier"], form["post_get"], form["authentication"]) == ("", "0", "1")
 
 
+async def test_save_webio_command_posts_the_command_protocol(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("POST", WEBIO_SAVE_COMMAND_PATH, "")
+
+    await logged_in.save_webio_command(34, {**_COMMAND, "Protocol": WEBIO_PROTOCOL_HTTPS}, base_id=17)
+
+    (request,) = comexio.received_at("POST", WEBIO_SAVE_COMMAND_PATH)
+    assert request.form["protocol"] == "1"
+
+
+@pytest.mark.parametrize("protocol", [None, True, "1", 1.0])
+async def test_save_webio_command_rejects_a_non_int_protocol(
+    logged_in: ComexioClient, comexio: FakeComexio, protocol: object
+) -> None:
+    with pytest.raises(ValueError, match="protocol must be an int"):
+        await logged_in.save_webio_command(34, {**_COMMAND, "Protocol": protocol}, base_id=17)
+
+    assert not comexio.received_at("POST", WEBIO_SAVE_COMMAND_PATH)
+
+
 async def test_save_webio_command_http_error_raises(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve_text("POST", WEBIO_SAVE_COMMAND_PATH, "", status=500)
 
@@ -727,6 +747,79 @@ async def test_get_webio_command_range_without_fields_raises(
 
     with pytest.raises(error):
         await logged_in.get_webio_command_range(1324, 34)
+
+
+_RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" value="1">'
+
+
+@pytest.mark.parametrize(
+    ("select", "protocol"),
+    [
+        pytest.param(
+            '<select id="protocol"><option value="0">HTTP/1.1</option>'
+            '<option value="1" selected="selected">HTTPS/1.1</option></select>',
+            1,
+            id="selected-option",
+        ),
+        pytest.param(
+            '<SELECT class="x" ID="protocol"><option value="5">HTTPS/2</option>'
+            '<option value="0">HTTP/1.1</option></SELECT>',
+            5,
+            id="none-selected-takes-first",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="0" class="not-selected" data-selected="1">HTTP/1.1</option>'
+            '<option value="1" selected>HTTPS/1.1</option></select>',
+            1,
+            id="selected-only-as-attribute",
+        ),
+        pytest.param(
+            "<select name='p' id='protocol'><option data-value=9 value=4 selected>HTTP/2</option></select>",
+            4,
+            id="single-and-unquoted-attributes",
+        ),
+        pytest.param('<select data-id="protocol"><option value="1" selected></option></select>', None, id="data-id"),
+        pytest.param("", None, id="no-select"),
+        pytest.param('<select id="protocol"></select>', None, id="no-options"),
+    ],
+)
+async def test_get_webio_command_form_reads_protocol(
+    logged_in: ComexioClient, comexio: FakeComexio, select: str, protocol: int | None
+) -> None:
+    other = '<select id="post_get"><option value="7" selected>POST</option></select>'
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, other + _RANGE_FIELDS + select)
+
+    form = await logged_in.get_webio_command_form(1324, 34)
+
+    assert form == WebioCommandForm(min=0.0, max=1.0, protocol=protocol)
+    (request,) = comexio.received_at("GET", WEBIO_EDIT_COMMAND_PATH)
+    assert request.query == {"Id": "1324", "TestDevice": "34"}
+
+
+@pytest.mark.parametrize(
+    ("option", "shown"),
+    [
+        ('<option value="https" selected>', "'https'"),
+        ('<option value="1_0" selected>', "'1_0'"),
+        ('<option value="٣" selected>', "'٣'"),
+        ('<option value="-1" selected>', "'-1'"),
+        ('<option value="" selected>', "''"),
+        ("<option selected>", "None"),
+    ],
+)
+async def test_get_webio_command_form_non_numeric_protocol_warns(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, option: str, shown: str
+) -> None:
+    select = f'<select id="protocol">{option}HTTPS</option></select>'
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, _RANGE_FIELDS + select)
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        form = await logged_in.get_webio_command_form(1324, 34)
+
+    assert form == WebioCommandForm(min=0.0, max=1.0, protocol=None)
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.WARNING, f"Web-IO command 1324 has a non-numeric protocol value: {shown}")
+    ]
 
 
 # --- markers and KNX objects ------------------------------------------------------------------------
