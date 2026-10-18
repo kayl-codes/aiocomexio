@@ -29,19 +29,23 @@ published on PyPI and consumed by the Home Assistant integration
   or fractional float turns into a wrong id. Accept only the types the source really sends (e.g. `int` or an
   integer string), reject `bool` explicitly (it is a subclass of `int`), and treat anything else as malformed.
 - **Every scraped value, keys included:** the strict check covers dict *keys* of a scraped structure as well as its
-  values; a key is not trusted because it came out of the same answer. Converting a scraped `int` with `str()` or
-  `repr()` raises `ValueError` beyond Python's int-to-str limit (4300 digits), also when the int sits inside a
-  container that is rendered, so a malformed value is length-checked or rendered through a bounded helper first.
+  values; a key is not trusted because it came out of the same answer. `str()`/`repr()` of an `int` with more than
+  4300 digits raises `ValueError`, also inside a rendered container. `json.loads` already rejects such ints, so this
+  only matters for input that does not come through JSON (caller-built data, regex or HTML scrapes): there, a value
+  is type-checked before it is rendered.
 - **Name-keyed stores:** a dict or store keyed by a name (command name, device name, title) needs an explicit rule
   for two entries with the same name — report them, keep both under distinct keys, or reject — and that rule
   applies when stored data is read back as well, not only when new data is added. A plain assignment silently
   drops the first entry.
-- **Public builders take every input kind:** an exported builder or helper (e.g. a Web-IO command builder) handles
-  every kind of entry the library's own parser can hand it — including tagged variants such as Quickbus IOs — by
-  routing it correctly or raising a typed error. It must not quietly build the payload of a different kind.
-- **Fallback guesses check their basis:** before a fallback fills in a missing value with a guess (a default type,
-  range or class), it checks that the data at hand is enough for that guess; if not, the entry is reported and
-  skipped instead of being emitted with a plausible-looking but wrong value.
+- **Public builders take every input kind:** when a diff adds a new kind of parser entry, or a tagged variant of an
+  existing kind, every exported builder that accepts entries of that shape (the Web-IO command builders in
+  `webio.py`) routes it correctly or raises a typed error. It must not quietly build the payload of a different kind.
+- **Fallback guesses check their basis:** a *new* fallback that fills in a missing value with a guess (a default
+  type, range or class) names what the guess is based on and logs it. A guess the data at hand cannot support is
+  reported and the entry skipped, or a typed error raised, instead of emitting a plausible-looking but wrong value.
+  The documented fallbacks — the generic KNX range when the DPT chain or its `KNX_DPT_ANALOG_RANGES` entry is
+  missing, and the identifier-based IO classification when the type row is missing — are intentional and not
+  findings unless the diff changes them.
 - **Public API:** fully typed; flag breaking changes to public names or signatures that are not called out in the PR.
 - **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776); no duplicated string literals — extract
   constants (S1192).
@@ -57,10 +61,10 @@ published on PyPI and consumed by the Home Assistant integration
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
   answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes
   through `_excerpt` in `client.py` (repr + length cap), never unbounded.
-- **Bounded logs of scraped data:** raw scraped values reach a log line or exception only through a bounded repr
-  helper (`_excerpt` in `client.py`, or the bounded helpers next to the parser in `config.py`) — this includes
-  dict keys and names used as ids, not only values. `%r` alone bounds neither length nor the cost of building
-  the repr.
+- **Scraped keys and names count as content:** the length cap above applies to dict keys and names used as ids as
+  well, not only to values; `%r` alone quotes them but does not cap their length. `_excerpt` caps the *output*
+  only — it builds the full `repr` first — so it is not a guard against huge or non-JSON values (see "Every scraped
+  value, keys included").
 - **Caller values in new messages:** an id, name or value that comes from the caller or from Comexio is written as
   repr (`%r` in log calls, `!r` in f-strings for exceptions), so a line break in it cannot forge a log line and an
   empty string stays visible. Older `%s` calls are not a finding unless the diff touches them.
@@ -90,10 +94,11 @@ published on PyPI and consumed by the Home Assistant integration
 - Test data is synthetic, never real installation data. Every bug fix in pure logic needs a regression test that
   fails without the fix.
 - Flag deleted or loosened assertions and snapshot updates that are not explained in the PR.
-- **Dropped means gone everywhere:** a test that asserts an entry is skipped also asserts it is absent from every
-  result list that could carry it (e.g. `io`, the per-kind lists, device maps), not only from the one list the fix
-  touched. A test that asserts entries are kept compares the complete expected set (`==`), not a subset or a
-  single member, so an extra or a missing entry fails the test.
+- **Dropped means gone everywhere it is meant to be dropped:** a test that asserts an entry is skipped also asserts
+  it is absent from every result list the contract drops it from, not only from the one list the fix touched — and
+  present where the contract keeps it (e.g. an inactive IO leaves `io` but stays in `io_all` for labels). A test
+  that asserts entries are kept compares the complete expected result — `==` on a list, a sorted list or a
+  `collections.Counter`, not on a `set`, which hides duplicates — not a subset or a single member.
 
 ## GitHub Actions
 
