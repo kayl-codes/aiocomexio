@@ -142,6 +142,8 @@ _HTML_WHITESPACE = "\t\n\f\r "
 _HTML_WHITESPACE_RE = re.compile(f"[{_HTML_WHITESPACE}]+")
 # Tags that end an open <option>, so text after them is no longer its text.
 _OPTION_ENDING_TAGS = frozenset({"option", "optgroup", "hr"})
+# Elements whose content is no option text (script-supporting elements); a <script/> stays open, as in a browser.
+_HIDDEN_ELEMENTS = frozenset({"script", "template"})
 # Start tags that end an open <select> before a browser reads them.
 _SELECT_ENDING_TAGS = frozenset({"input", "textarea"})
 # The start of a size attribute as a browser parses a non-negative integer (whitespace, an optional "+", digits).
@@ -1883,15 +1885,18 @@ class _ProtocolSelectParser(_FormParser):
         self._open = False  # any select is open; a <select> inside it only ends it
         self._inside = False  # the open select is the protocol select
         self._in_option = False
-        self._group_disabled = False
+        self._group: bool | None = None  # whether the open <optgroup> is disabled; None: no optgroup is open
+        self._hidden = 0  # open <script>/<template> elements: their content is neither option text nor a field
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if self._open and self._text_only is None and tag in _SELECT_ENDING_TAGS:
+        if self._open and self._text_only is None and not self._hidden and tag in _SELECT_ENDING_TAGS:
             self._end_select()
         super().handle_starttag(tag, attrs)
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        if tag == "select":
+        if tag in _HIDDEN_ELEMENTS or self._hidden:
+            self._hidden += tag in _HIDDEN_ELEMENTS
+        elif tag == "select":
             if self._open:
                 self._end_select()
                 return
@@ -1903,28 +1908,34 @@ class _ProtocolSelectParser(_FormParser):
                 self.listbox = _shows_several_rows(attributes.get("size", ""))
         elif tag in _OPTION_ENDING_TAGS:
             if tag != "option":  # an <optgroup> outside the protocol select does not group its options
-                self._group_disabled = self._inside and tag == "optgroup" and "disabled" in attributes
+                self._group = "disabled" in attributes if tag == "optgroup" and self._inside else None
             self._in_option = tag == "option" and self._inside
             if self._in_option:
                 self.options.append(attributes)
                 self.texts.append([])
-                self.disabled.append("disabled" in attributes or self._group_disabled)
+                self.disabled.append("disabled" in attributes or bool(self._group))
 
     def handle_form_endtag(self, tag: str) -> None:
-        if tag == "select" and self._open:
+        # A browser ignores </hr>, and </optgroup> without an open optgroup; </option> and </optgroup> end the option.
+        if self._hidden:
+            self._hidden -= tag in _HIDDEN_ELEMENTS
+        elif tag == "select" and self._open:
             self._end_select()
-        elif tag in _OPTION_ENDING_TAGS:
+        elif tag == "option":
             self._in_option = False
-            if tag == "optgroup":
-                self._group_disabled = False
+        elif tag == "optgroup" and self._group is not None:
+            self._in_option = False
+            self._group = None
 
     def handle_data(self, data: str) -> None:
-        if self._in_option and self._text_only is None:
+        # The text of a <title> in an option is part of its text; the content of a <script> or <template> is not.
+        if self._in_option and not self._hidden:
             self.texts[-1].append(data)
 
     def _end_select(self) -> None:
         self.closed = self.closed or self._inside
         self._open = self._inside = self._in_option = False
+        self._group = None
 
 
 def _shows_several_rows(size: str) -> bool:

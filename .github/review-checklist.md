@@ -72,12 +72,14 @@ published on PyPI and consumed by the Home Assistant integration
   without one the first enabled one (not `disabled`, not in a disabled `<optgroup>`) — unless its `size` makes it a
   list box, which selects none; a `<select multiple>` keeps every selected option and none when none is selected, so a
   field that holds one value reads it as unknown. An `<option>` without a `value` attribute has its text (whitespace
-  collapsed) as value, and a `<select>`, `<input>` or `<textarea>` start tag inside an open select ends that select.
-  The slash of a start tag is ignored: `<select/>` and `<option/>` open their element. A cut-off answer — a `<select>`
-  without its `</select>`, so its options may be incomplete — reads as unknown, never as the first option: that would
-  be a plausible-looking but wrong value. Void elements such as `<input>` have no end tag and are read as they are; a
-  cut-off `<input>` tag is dropped, so its field reads as unknown too. A regex that tries to cover these cases
-  outgrows SonarQube's regex complexity limit (S5843) and still misses some of them.
+  collapsed, the content of a `<script>` or `<template>` left out, a `<title>`'s text kept) as value; `</hr>` and a
+  `</optgroup>` without an open optgroup do not end it, and a `<select>`, `<input>` or `<textarea>` start tag inside
+  an open select ends that select. The slash of a start tag is ignored: `<select/>` and `<option/>` open their
+  element. A cut-off answer — a `<select>` without its `</select>`, so its options may be incomplete — reads as
+  unknown, never as the first option: that would be a plausible-looking but wrong value. Void elements such as
+  `<input>` have no end tag and are read as they are; a cut-off `<input>` tag is dropped, so its field reads as
+  unknown too. A regex that tries to cover these cases outgrows SonarQube's regex complexity limit (S5843) and still
+  misses some of them.
 - **Live readings stay at DEBUG:** a WARNING or higher about an unexpected answer to a *value* request (live states,
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
   answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes

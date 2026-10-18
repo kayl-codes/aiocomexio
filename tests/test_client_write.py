@@ -989,6 +989,37 @@ _RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" val
             1,
             id="input-ends-the-select",
         ),
+        # An option's text leaves out script source but keeps a title's text; </hr> and a stray </optgroup> are ignored.
+        pytest.param(
+            '<select id="protocol"><option>1<script>5</script></option></select>', 1, id="script-in-the-option"
+        ),
+        pytest.param(
+            '<select id="protocol"><option>1<script>5</script>7</option></select>', 17, id="text-after-the-script"
+        ),
+        pytest.param(
+            '<select id="protocol"><option>1<template>5</template></option></select>', 1, id="template-in-the-option"
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><template><option value="5" selected></template></select>',
+            1,
+            id="option-in-a-template",
+        ),
+        pytest.param(
+            '<template><select id="protocol"><option value="5" selected></select></template>'
+            '<select id="protocol"><option value="1" selected></select>',
+            1,
+            id="select-in-a-template",
+        ),
+        # A browser ignores the slash of <script/>: the rest of the page is its source.
+        pytest.param(
+            '<script/><select id="protocol"><option value="1" selected></select>', None, id="self-closing-script"
+        ),
+        pytest.param('<select id="protocol"><option>1<title>5</title></option></select>', 15, id="title-in-the-option"),
+        pytest.param('<select id="protocol"><option>1</hr>5</option></select>', 15, id="hr-end-tag-is-ignored"),
+        pytest.param('<select id="protocol"><option>1</optgroup>5</option></select>', 15, id="stray-optgroup-end-tag"),
+        pytest.param(
+            '<select id="protocol"><optgroup><option>1</optgroup>5</select>', 1, id="optgroup-end-tag-ends-the-option"
+        ),
         # Without a selected option a browser shows the first enabled one; a list box shows none.
         pytest.param(
             '<select id="protocol"><option value="0" disabled><option value="1"></select>', 1, id="skips-disabled"

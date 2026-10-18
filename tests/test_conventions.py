@@ -339,7 +339,16 @@ def _spared_setters(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[as
             after = [*statement.finalbody, *body[index + 1 :]]
         else:
             continue
-        restores = [restore for restore in after if _is_restore(restore, saved)]
+        # A return or raise before the restore may skip it, so only restores before the first one count.
+        first_exit = next(
+            (
+                position
+                for position, later in enumerate(after)
+                if any(isinstance(node, ast.Return | ast.Raise) for node in ast.walk(later))
+            ),
+            len(after),
+        )
+        restores = [restore for restore in after[:first_exit] if _is_restore(restore, saved)]
         return [*filter(_is_setter_call, body[:index]), *restores] if restores else []
     return []
 
@@ -471,6 +480,21 @@ _RESTORING_FIXTURE = (
             ),
             ["m.py:6"],
         ),
+        (
+            _RESTORING_FIXTURE.replace("    yield\n", "    yield\n    if flag:\n        return\n"),
+            ["m.py:4", "m.py:8"],
+        ),
+        (
+            _RESTORING_FIXTURE.replace("    yield\n", "    yield\n    if flag:\n        raise ValueError\n"),
+            ["m.py:4", "m.py:8"],
+        ),
+        (
+            _RESTORING_FIXTURE.replace(
+                "    yield\n    sys.set_int_max_str_digits(previous)\n",
+                "    try:\n        yield\n        return\n    finally:\n        sys.set_int_max_str_digits(previous)\n",
+            ),
+            [],
+        ),
     ],
     ids=[
         "restoring-fixture",
@@ -487,6 +511,9 @@ _RESTORING_FIXTURE = (
         "saves-the-limit-after-setting-it",
         "another-setter-after-the-restore",
         "another-setter-in-a-branch",
+        "return-before-the-restore",
+        "raise-before-the-restore",
+        "return-in-the-try-body",
     ],
 )
 def test_the_guard_spares_only_a_fixture_that_restores_the_digit_limit(source: str, expected: list[str]) -> None:
