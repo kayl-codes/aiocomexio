@@ -28,6 +28,15 @@ def io_owner(io: Mapping[str, Any]) -> str:
     return ext if isinstance(ext, str) else ""
 
 
+def _io_analog(io: Mapping[str, Any] | None) -> bool | None:
+    """Analog classification of an IO (None = unknown).
+
+    is_binary None marks an untyped Quickbus IO, kept in io_all for its label only.
+    """
+    binary = None if io is None else io.get("is_binary", False)
+    return None if binary is None else not binary
+
+
 def _element_analog(
     elem: dict[str, Any],
     markers_by_id: ItemsById,
@@ -44,10 +53,7 @@ def _element_analog(
         source = (markers_by_id if etype == 2 else knx_by_id or {}).get(ref_id)
         return None if source is None else source.get("type") == "analog"
     if etype == 1:
-        # is_binary None: an untyped Quickbus IO, kept in io_all for its label only.
-        io = ios_by_id.get(ref_id)
-        binary = None if io is None else io.get("is_binary", False)
-        return None if binary is None else not binary
+        return _io_analog(ios_by_id.get(ref_id))
     if etype == 10:
         webio = webio_by_id.get(ref_id)
         return None if webio is None else bool(webio.get("analog"))
