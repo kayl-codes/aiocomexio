@@ -28,6 +28,20 @@ published on PyPI and consumed by the Home Assistant integration
   before use. Never coerce silently with `int()`/`float()`: `int(True)` is `1` and `int(1.5)` is `1`, so a bool
   or fractional float turns into a wrong id. Accept only the types the source really sends (e.g. `int` or an
   integer string), reject `bool` explicitly (it is a subclass of `int`), and treat anything else as malformed.
+- **Every scraped value, keys included:** the strict check covers dict *keys* of a scraped structure as well as its
+  values; a key is not trusted because it came out of the same answer. Converting a scraped `int` with `str()` or
+  `repr()` raises `ValueError` beyond Python's int-to-str limit (4300 digits), also when the int sits inside a
+  container that is rendered, so a malformed value is length-checked or rendered through a bounded helper first.
+- **Name-keyed stores:** a dict or store keyed by a name (command name, device name, title) needs an explicit rule
+  for two entries with the same name — report them, keep both under distinct keys, or reject — and that rule
+  applies when stored data is read back as well, not only when new data is added. A plain assignment silently
+  drops the first entry.
+- **Public builders take every input kind:** an exported builder or helper (e.g. a Web-IO command builder) handles
+  every kind of entry the library's own parser can hand it — including tagged variants such as Quickbus IOs — by
+  routing it correctly or raising a typed error. It must not quietly build the payload of a different kind.
+- **Fallback guesses check their basis:** before a fallback fills in a missing value with a guess (a default type,
+  range or class), it checks that the data at hand is enough for that guess; if not, the entry is reported and
+  skipped instead of being emitted with a plausible-looking but wrong value.
 - **Public API:** fully typed; flag breaking changes to public names or signatures that are not called out in the PR.
 - **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776); no duplicated string literals — extract
   constants (S1192).
@@ -43,6 +57,10 @@ published on PyPI and consumed by the Home Assistant integration
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
   answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes
   through `_excerpt` in `client.py` (repr + length cap), never unbounded.
+- **Bounded logs of scraped data:** raw scraped values reach a log line or exception only through a bounded repr
+  helper (`_excerpt` in `client.py`, or the bounded helpers next to the parser in `config.py`) — this includes
+  dict keys and names used as ids, not only values. `%r` alone bounds neither length nor the cost of building
+  the repr.
 - **Caller values in new messages:** an id, name or value that comes from the caller or from Comexio is written as
   repr (`%r` in log calls, `!r` in f-strings for exceptions), so a line break in it cannot forge a log line and an
   empty string stays visible. Older `%s` calls are not a finding unless the diff touches them.
@@ -72,6 +90,10 @@ published on PyPI and consumed by the Home Assistant integration
 - Test data is synthetic, never real installation data. Every bug fix in pure logic needs a regression test that
   fails without the fix.
 - Flag deleted or loosened assertions and snapshot updates that are not explained in the PR.
+- **Dropped means gone everywhere:** a test that asserts an entry is skipped also asserts it is absent from every
+  result list that could carry it (e.g. `io`, the per-kind lists, device maps), not only from the one list the fix
+  touched. A test that asserts entries are kept compares the complete expected set (`==`), not a subset or a
+  single member, so an extra or a missing entry fails the test.
 
 ## GitHub Actions
 
