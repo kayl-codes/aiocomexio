@@ -145,7 +145,7 @@ def scrape_js_vars(html: str, *, page_label: str) -> dict[str, Any]:
 
             try:
                 decoded = json.loads(normalize_js_like_object(raw_obj))
-            except json.JSONDecodeError as exc:
+            except ValueError as exc:  # JSONDecodeError, or an int beyond Python's int-to-str digit limit
                 _LOGGER.warning("Failed to decode JSON for variable $%s on %s page: %s", var_name, page_label, exc)
                 continue
             if (mapping := _as_id_mapping(decoded, f"${var_name}")) is not None:
@@ -171,7 +171,7 @@ def _decode_js_var(html: str, decl_re: re.Pattern[str], var_name: str) -> dict[s
         return None
     try:
         decoded = json.loads(normalize_js_like_object(raw_object))
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:  # JSONDecodeError, or an int beyond Python's int-to-str digit limit
         _LOGGER.warning("Failed to decode %s: %s", var_name, exc)
         return None
     return _as_id_mapping(decoded, var_name)

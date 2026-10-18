@@ -103,6 +103,25 @@ async def test_create_function_plan_defaults_to_a4_landscape_90_dpi(
     )
 
 
+@pytest.mark.usefixtures("int_max_str_digits")
+async def test_create_function_plan_with_an_invalid_id_keeps_the_error_short(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    huge = "1" * 5000  # beyond Python's int-to-str digit limit, so no valid id
+    comexio.serve_json("POST", UNIQUE_CHECK_PATH, {"result": True})
+    _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
+    _serve_plans(comexio, {huge: {"Name": "Neu"}})
+
+    with pytest.raises(ComexioCreatedWithoutIdError) as caught:
+        await logged_in.create_function_plan("Neu")
+
+    what = "Creating function plan 'Neu'"
+    assert str(caught.value) == (
+        f"{what}: Comexio confirmed the plan, only reading back its id failed: "
+        f"{what}: the new plan has no valid id, $Fubs lists it under {repr(huge)[:200]}..."
+    )
+
+
 async def test_create_function_plan_taken_name_is_rejected_before_saving(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
@@ -172,9 +191,12 @@ async def test_create_function_plan_invalid_id_is_a_data_error(
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
     _serve_plans(comexio, {plan_key: {"Name": "Neu"}})
 
-    with pytest.raises(ComexioCreatedWithoutIdError, match="no valid id") as caught:
+    with pytest.raises(ComexioCreatedWithoutIdError) as caught:
         await logged_in.create_function_plan("Neu")
     assert isinstance(caught.value.__cause__, ComexioDataError)
+    assert str(caught.value.__cause__) == (
+        f"Creating function plan 'Neu': the new plan has no valid id, $Fubs lists it under {plan_key!r}"
+    )
 
 
 async def test_create_function_plan_unconfirmed_redirect_is_rejected(
@@ -525,9 +547,11 @@ async def test_add_function_plan_element_with_connection(logged_in: ComexioClien
         ({"id": 0}, ComexioDataError),
         ({"id": "0"}, ComexioDataError),
         ({"id": "²"}, ComexioDataError),
+        ({"id": "1" * 5000}, ComexioDataError),  # beyond Python's int-to-str digit limit
         (["55"], ComexioDataError),
     ],
 )
+@pytest.mark.usefixtures("int_max_str_digits")
 async def test_add_function_plan_element_without_id_raises(
     logged_in: ComexioClient, comexio: FakeComexio, answer: Any, error: type[Exception]
 ) -> None:

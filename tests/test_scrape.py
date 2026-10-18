@@ -1,5 +1,8 @@
 """Scraping of Comexio's inline `var $Name = {...}` JS object literals out of admin pages."""
 
+import json
+import logging
+
 import pytest
 
 from aiocomexio.scrape import (
@@ -8,6 +11,7 @@ from aiocomexio.scrape import (
     parse_comexio_version,
     parse_io_input_types,
     parse_io_types,
+    parse_webio_add_page,
     scrape_js_vars,
 )
 from tests.common import load_fixture
@@ -78,6 +82,69 @@ def test_scrape_js_vars_skips_invalid_json_with_warning(caplog: pytest.LogCaptur
 
     assert "Broken" not in result
     assert "Failed to decode JSON for variable $Broken on test page" in caplog.text
+
+
+# json.loads raises a plain ValueError, not JSONDecodeError, for an int beyond the int-to-str digit limit (4300).
+_HUGE_INT = "1" + "0" * 5000
+
+
+def _huge_int_error() -> str:
+    with pytest.raises(ValueError) as exc_info:
+        json.loads(_HUGE_INT)
+    assert not isinstance(exc_info.value, json.JSONDecodeError)
+    return str(exc_info.value)
+
+
+@pytest.mark.usefixtures("int_max_str_digits")
+def test_scrape_js_vars_skips_a_huge_int_with_warning(caplog: pytest.LogCaptureFixture) -> None:
+    html = f'<script>var $Big = {{"1": {{"Id": {_HUGE_INT}}}}};\nvar $Fubs = {{"1": {{"Id": 1}}}};</script>'
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.scrape"):
+        result = scrape_js_vars(html, page_label="test")
+
+    assert result == {"Fubs": {"1": {"Id": 1}}}
+    assert [r.getMessage() for r in caplog.records] == [
+        f"Failed to decode JSON for variable $Big on test page: {_huge_int_error()}"
+    ]
+
+
+@pytest.mark.usefixtures("int_max_str_digits")
+def test_parse_io_types_with_a_huge_int_returns_empty_with_warning(caplog: pytest.LogCaptureFixture) -> None:
+    html = f'<script>var $ioTypes = {{"1": {{"binary": 1, "min": {_HUGE_INT}}}}};</script>'
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.scrape"):
+        result = parse_io_types(html)
+
+    assert result == {}
+    assert [r.getMessage() for r in caplog.records] == [
+        f"Failed to decode $ioTypes: {_huge_int_error()}",
+        "No IO type data found ($ioTypes / $IOTypesBinary) — using identifier fallback",
+    ]
+
+
+@pytest.mark.usefixtures("int_max_str_digits")
+def test_parse_io_input_types_with_a_huge_int_returns_empty_with_warning(caplog: pytest.LogCaptureFixture) -> None:
+    html = f'<script>var $IOInputTypes = {{"1": {{"input": {_HUGE_INT}}}}};</script>'
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.scrape"):
+        result = parse_io_input_types(html)
+
+    assert result == {}
+    assert [r.getMessage() for r in caplog.records] == [f"Failed to decode $IOInputTypes: {_huge_int_error()}"]
+
+
+@pytest.mark.usefixtures("int_max_str_digits")
+@pytest.mark.parametrize("broken", ["DeviceBaseList", "DeviceList"])
+def test_parse_webio_add_page_with_a_huge_int_is_no_add_page(caplog: pytest.LogCaptureFixture, broken: str) -> None:
+    lists = dict.fromkeys(("DeviceBaseList", "DeviceList"), '{"1": {"Id": 1}}')
+    lists[broken] = f'{{"1": {{"Id": {_HUGE_INT}}}}}'
+    html = f"<script>DeviceBaseList={lists['DeviceBaseList']}; DeviceList={lists['DeviceList']};</script>"
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.scrape"):
+        result = parse_webio_add_page(html)
+
+    assert result is None
+    assert [r.getMessage() for r in caplog.records] == [f"Failed to decode {broken}: {_huge_int_error()}"]
 
 
 def test_scrape_js_vars_empty_array_does_not_steal_next_object() -> None:

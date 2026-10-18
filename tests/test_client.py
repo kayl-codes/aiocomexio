@@ -319,6 +319,20 @@ async def test_fetch_marker_titles_skips_malformed_entries(logged_in: ComexioCli
     assert await logged_in.fetch_marker_titles() == {1: "Licht", 3: ""}
 
 
+async def test_fetch_marker_titles_caps_a_long_malformed_key_in_the_warning(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    key = "k" * 1000
+    modules = {"2": {"1": {"Name": "Licht"}, key: {"Name": "bad id"}}}
+    comexio.serve_text("GET", FUNCTION_MODULE_PATH, f"<script>var $FubModules = {json.dumps(modules)};</script>")
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert await logged_in.fetch_marker_titles() == {1: "Licht"}
+
+    (warning,) = caplog.records
+    assert warning.getMessage() == f"Skipping malformed marker entry {repr(key)[:200]}..."
+
+
 async def test_get_knx_dpt_catalog(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve_text(
         "GET",
@@ -938,6 +952,19 @@ async def test_load_all_function_plans_filters_and_skips_malformed(
     assert "plan 5" in caplog.text
     assert "missing from the bulk result: [4, 5, 9]" in caplog.text
     assert sorted(strict) == [1, 2]
+
+
+async def test_load_all_function_plans_caps_a_long_non_numeric_key_in_the_warning(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    key = "x" * 1000
+    comexio.serve_json("GET", LOAD_ALL_ELEMENTS_PATH, {"1": {"elements": {}, "connections": {}}, key: {}})
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert sorted(await logged_in.load_all_function_plans()) == [1]
+
+    (warning,) = caplog.records
+    assert warning.getMessage() == f"Skipping bulk function plan entry with non-numeric id {repr(key)[:200]}..."
 
 
 async def test_load_all_function_plans_strict_requires_the_connections_collection(
