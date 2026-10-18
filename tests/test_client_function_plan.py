@@ -525,6 +525,7 @@ async def test_add_function_plan_element_with_connection(logged_in: ComexioClien
         ({"id": 0}, ComexioDataError),
         ({"id": "0"}, ComexioDataError),
         ({"id": "²"}, ComexioDataError),
+        ({"id": "1" * 5000}, ComexioDataError),  # beyond Python's int-to-str digit limit
         (["55"], ComexioDataError),
     ],
 )

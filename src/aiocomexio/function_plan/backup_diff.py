@@ -54,7 +54,13 @@ def _ref_id(ref: Mapping[str, Any]) -> Any:
 
 def _is_ascii_int(text: str) -> bool:
     """Whether int(text) parses — str.isdigit alone also accepts e.g. "²"."""
-    return text.isascii() and text.isdigit()
+    if not (text.isascii() and text.isdigit()):
+        return False
+    try:
+        int(text)
+    except ValueError:  # beyond Python's int-to-str digit limit
+        return False
+    return True
 
 
 def _element_identity(elem: Mapping[str, Any]) -> _Identity:

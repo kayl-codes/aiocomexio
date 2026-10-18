@@ -226,6 +226,12 @@ def test_element_id_sort_key_orders_numerically_and_never_raises() -> None:
     assert sorted(ids, key=element_id_sort_key) == ["1", "2", "10", "b", "²"]
 
 
+def test_element_id_sort_key_sorts_an_id_beyond_the_int_digit_limit_as_text() -> None:
+    huge = "1" * 5000
+
+    assert sorted(["b", huge, "2"], key=element_id_sort_key) == ["2", huge, "b"]
+
+
 _OR_TITLE = "<title>Oder</title>"
 
 

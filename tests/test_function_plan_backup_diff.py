@@ -227,6 +227,16 @@ def test_ref_id_as_digit_string_is_the_same_element() -> None:
     assert plan_hash({"elements": {"1": _marker("\u00b2")}, "connections": {}}) != plan_hash(older)
 
 
+def test_ids_beyond_the_int_digit_limit_stay_strings() -> None:
+    # A digit string beyond Python's int-to-str limit (4300) raised ValueError in hash and diff.
+    huge = "1" * 5000
+    older = {"elements": {"1": _marker(9)}, "connections": {}}
+    newer = {"elements": {"1": _marker(9), huge: _marker(huge)}, "connections": {}}
+
+    assert diff_snapshots(newer, older)["markers"] == {"added": [(2, huge, None, None, None)], "removed": []}
+    assert plan_hash(newer) != plan_hash(older)
+
+
 def test_null_reference_does_not_crash(plan: dict[str, Any]) -> None:
     # Regression: "reference": null raised AttributeError in hash, diff and label capture.
     broken = copy.deepcopy(plan)

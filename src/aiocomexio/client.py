@@ -1689,7 +1689,10 @@ def _positive_id(value: Any) -> int | None:
     """value as a Comexio id, or None: only a positive integer, as number or ASCII digit string."""
     # int() would turn true into 1, 1.9 into 1 and "-3" into -3.
     if isinstance(value, str) and value.isascii() and value.isdigit():
-        value = int(value)
+        try:
+            value = int(value)
+        except ValueError:  # beyond Python's int-to-str digit limit
+            return None
     return value if _is_int(value) and value > 0 else None
 
 

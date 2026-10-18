@@ -29,10 +29,11 @@ published on PyPI and consumed by the Home Assistant integration
   or fractional float turns into a wrong id. Accept only the types the source really sends (e.g. `int` or an
   integer string), reject `bool` explicitly (it is a subclass of `int`), and treat anything else as malformed.
 - **Every scraped value, keys included:** the strict check covers dict *keys* of a scraped structure as well as its
-  values; a key is not trusted because it came out of the same answer. `str()`/`repr()` of an `int` with more than
-  4300 digits raises `ValueError`, also inside a rendered container. `json.loads` already rejects such ints, so this
-  only matters for input that does not come through JSON (caller-built data, regex or HTML scrapes): there, a value
-  is type-checked before it is rendered.
+  values; a key is not trusted because it came out of the same answer. Python refuses to convert an `int` with more
+  than 4300 digits: `json.loads` raises a plain `ValueError` for one (not `JSONDecodeError`), so a decode of scraped
+  or received text catches `ValueError`. Data that does not come through `json.loads` (caller-built, regex
+  captures) can still hold such an int, and `str()`/`repr()`/`_excerpt` raise on it, also inside a container: a type
+  check alone does not help there, so the int is range-checked (e.g. a plausible id range) before it is rendered.
 - **Name-keyed stores:** a dict or store keyed by a name (command name, device name, title) needs an explicit rule
   for two entries with the same name — report them, keep both under distinct keys, or reject — and that rule
   applies when stored data is read back as well, not only when new data is added. A plain assignment silently
