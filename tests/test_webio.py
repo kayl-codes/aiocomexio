@@ -16,6 +16,8 @@ from aiocomexio.const import (
 )
 from aiocomexio.knx import KNX_DPT_ANALOG_RANGES
 from aiocomexio.webio import (
+    WEBIO_PROTOCOL_HTTP,
+    WEBIO_PROTOCOL_HTTPS,
     build_io_webio_command,
     build_knx_loopback_webio_command,
     build_marker_webio_command,
@@ -54,6 +56,31 @@ def test_build_webio_commands_snapshot(parsed: dict[str, Any], snapshot: Snapsho
     assert build_webio_commands(_HOOK, parsed) == snapshot
 
 
+def test_build_webio_commands_default_protocol_is_http(parsed: dict[str, Any]) -> None:
+    assert {cmd["Protocol"] for cmd in build_webio_commands(_HOOK, parsed)} == {WEBIO_PROTOCOL_HTTP}
+
+
+@pytest.mark.parametrize("webio_class", list(WebioClass))
+def test_build_webio_commands_writes_the_protocol(parsed: dict[str, Any], webio_class: WebioClass) -> None:
+    # The basic fixture has no Quickbus devices; a missing IO type table keeps their IOs active.
+    source = parse_config(load_json_fixture("config_quickbus.json")) if webio_class is WebioClass.QUICKBUS else parsed
+    commands = build_webio_commands(_HOOK, source, webio_class, protocol=WEBIO_PROTOCOL_HTTPS)
+
+    assert commands
+    assert {cmd["Protocol"] for cmd in commands} == {WEBIO_PROTOCOL_HTTPS}
+
+
+def test_build_single_commands_write_the_protocol() -> None:
+    marker = build_marker_webio_command(
+        {"id": "5", "name": "M5 Licht", "type": "digital"}, _HOOK, protocol=WEBIO_PROTOCOL_HTTPS
+    )
+    io_command = build_io_webio_command(
+        {"ext_name": "BASE", "identifier": "Q1", "is_binary": True}, _HOOK, protocol=WEBIO_PROTOCOL_HTTPS
+    )
+
+    assert (marker["Protocol"], io_command["Protocol"]) == (WEBIO_PROTOCOL_HTTPS, WEBIO_PROTOCOL_HTTPS)
+
+
 @pytest.mark.parametrize(
     ("webio_class", "prefix"),
     [(WebioClass.MARKER, "HA M"), (WebioClass.IO, "HA IO "), (WebioClass.KNX, "HA K")],
@@ -84,6 +111,15 @@ def test_generate_webio_json_wraps_class_commands(parsed: dict[str, Any]) -> Non
     assert payload["data"] == "web_io"
     assert payload["base"] == {"Identifier": "HomeAssistant [IO]", "UseCookies": 0, "Login": 2, "BaseId": 0}
     assert payload["commands"] == build_webio_commands(_HOOK, parsed, WebioClass.IO)
+
+
+def test_generate_webio_json_passes_the_protocol(parsed: dict[str, Any]) -> None:
+    payload = json.loads(
+        generate_webio_json(_HOOK, "HomeAssistant [M]", parsed, WebioClass.MARKER, protocol=WEBIO_PROTOCOL_HTTPS)
+    )
+
+    assert payload["commands"]
+    assert {cmd["Protocol"] for cmd in payload["commands"]} == {WEBIO_PROTOCOL_HTTPS}
 
 
 @pytest.mark.parametrize(
@@ -170,7 +206,12 @@ def test_knx_loopback_command_digital() -> None:
 
     assert command["Name"] == "KNX K1 to M300"
     assert (command["TypeId"], command["Min"], command["Max"]) == (1, 0, 1)
-    assert (command["PostGet"], command["Authentication"], command["Data"]) == (0, 1, "")
+    assert (command["PostGet"], command["Authentication"], command["Data"], command["Protocol"]) == (
+        0,
+        1,
+        "",
+        WEBIO_PROTOCOL_HTTP,
+    )
     assert command["Parameter"] == ('function parameter(a)\r\n  return "/api/?action=set&marker=M300&value="..a\r\nend')
 
 

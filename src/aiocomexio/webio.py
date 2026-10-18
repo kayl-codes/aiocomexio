@@ -24,6 +24,8 @@ from .knx import KNX_DPT_ANALOG_RANGES, resolve_knx_dpt
 
 __all__ = [
     "CONTENT_TYPE_JSON",
+    "WEBIO_PROTOCOL_HTTP",
+    "WEBIO_PROTOCOL_HTTPS",
     "build_io_webio_command",
     "build_knx_loopback_webio_command",
     "build_marker_webio_command",
@@ -43,6 +45,11 @@ _LOGGER = logging.getLogger(__name__)
 # HeaderModifier of every JSON-POST Web-IO command (the default of ComexioClient.save_webio_command).
 CONTENT_TYPE_JSON = "Content-Type: application/json"
 
+# Values of a Web-IO command's "Protocol" field (the form's protocol <select>): HTTP and HTTPS, both
+# HTTP/1.1. Comexio also offers TCP (2), HTTP/2 (4) and HTTPS/2 (5); the values are not consecutive.
+WEBIO_PROTOCOL_HTTP = 0
+WEBIO_PROTOCOL_HTTPS = 1
+
 
 def lua_escape(value: Any) -> str:
     """Escape a value for embedding in a double-quoted Lua string literal."""
@@ -55,7 +62,7 @@ def _webio_data_lua(payload: str) -> str:
 
 
 def _webio_command(
-    *, name: str, type_id: int, min_v: float, max_v: float, data: str, webhook_path: str
+    *, name: str, type_id: int, min_v: float, max_v: float, data: str, webhook_path: str, protocol: int
 ) -> dict[str, Any]:
     """Build a webhook Web-IO command dict, filling in the fields shared by markers and IOs."""
     return {
@@ -66,7 +73,7 @@ def _webio_command(
         "Parameter": webhook_path,
         "HeaderModifier": CONTENT_TYPE_JSON,
         "Data": data,
-        "Protocol": 0,
+        "Protocol": protocol,
         "PostGet": 1,
         "WebDeviceId": 0,
         "Authentication": 0,
@@ -154,14 +161,19 @@ def knx_loopback_range(
 
 
 def build_marker_webio_command(
-    m: Mapping[str, Any], webhook_path: str, source_type: WebioClass = WebioClass.MARKER
+    m: Mapping[str, Any],
+    webhook_path: str,
+    source_type: WebioClass = WebioClass.MARKER,
+    *,
+    protocol: int = WEBIO_PROTOCOL_HTTP,
 ) -> dict[str, Any]:
     """Build the Web-IO command dict for a single marker or KNX object.
 
     source_type is the literal written into the webhook Lua payload's ``type=`` field
     ("marker" or "knx"); it tells the receiver which kind of item the pushed value belongs to.
     A KNX object may carry dpt_min/dpt_max (set by parse_config) — see knx_webio_range for how
-    those replace the generic ±500,000 range with the real DPT range.
+    those replace the generic ±500,000 range with the real DPT range. protocol is how the command
+    reaches the webhook (WEBIO_PROTOCOL_HTTP or WEBIO_PROTOCOL_HTTPS).
     """
     is_ana = m["type"] == TYPE_ANALOG
     min_v: float
@@ -182,6 +194,7 @@ def build_marker_webio_command(
         max_v=max_v,
         data=lua,
         webhook_path=webhook_path,
+        protocol=protocol,
     )
 
 
@@ -202,14 +215,18 @@ def _io_command_range(io_item: Mapping[str, Any]) -> tuple[bool, float, float]:
     return is_ana, v_min, v_max
 
 
-def build_io_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dict[str, Any]:
+def build_io_webio_command(
+    io_item: Mapping[str, Any], webhook_path: str, *, protocol: int = WEBIO_PROTOCOL_HTTP
+) -> dict[str, Any]:
     """Build the Web-IO command dict for a single physical IO (min/max: see _io_command_range).
+
+    protocol: see build_marker_webio_command.
 
     An IO of a Quickbus device gets its own command (build_quickbus_webio_command): ext +
     identifier would not tell it apart from the same identifier on another device.
     """
     if io_item.get("quickbus"):
-        return build_quickbus_webio_command(io_item, webhook_path)
+        return build_quickbus_webio_command(io_item, webhook_path, protocol=protocol)
     is_ana, v_min, v_max = _io_command_range(io_item)
     safe_ext = lua_escape(io_item["ext_name"])
     safe_io_id = lua_escape(io_item["identifier"])
@@ -221,6 +238,7 @@ def build_io_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dic
         max_v=v_max,
         data=lua,
         webhook_path=webhook_path,
+        protocol=protocol,
     )
 
 
@@ -234,12 +252,14 @@ def quickbus_command_name(io_item: Mapping[str, Any]) -> str:
     return f"HA QB{qb['device_id']} {qb['name']} {io_item['identifier']}"
 
 
-def build_quickbus_webio_command(io_item: Mapping[str, Any], webhook_path: str) -> dict[str, Any]:
+def build_quickbus_webio_command(
+    io_item: Mapping[str, Any], webhook_path: str, *, protocol: int = WEBIO_PROTOCOL_HTTP
+) -> dict[str, Any]:
     """Build the Web-IO command dict for a single IO of a Quickbus device.
 
     Its identifier (G1, TL1, ...) repeats on every device of the same kind, so the payload
     carries the IO's unique "Id" instead of ext + identifier (type "quickbus"). Min/max: see
-    _io_command_range.
+    _io_command_range; protocol: see build_marker_webio_command.
     """
     is_ana, v_min, v_max = _io_command_range(io_item)
     safe_id = lua_escape(io_item["id"])
@@ -251,6 +271,7 @@ def build_quickbus_webio_command(io_item: Mapping[str, Any], webhook_path: str) 
         max_v=v_max,
         data=lua,
         webhook_path=webhook_path,
+        protocol=protocol,
     )
 
 
@@ -290,7 +311,7 @@ def build_knx_loopback_webio_command(
         "Parameter": param_lua,
         "HeaderModifier": "",
         "Data": "",
-        "Protocol": 0,
+        "Protocol": WEBIO_PROTOCOL_HTTP,  # Comexio's own API, reached through the device
         "PostGet": 0,
         "WebDeviceId": 0,
         "Authentication": 1,
@@ -313,10 +334,13 @@ def build_webio_commands(
     webio_class: WebioClass | None = None,
     ignored_marker_ids: Collection[int] | None = None,
     ignored_knx_ids: Collection[int] | None = None,
+    *,
+    protocol: int = WEBIO_PROTOCOL_HTTP,
 ) -> list[dict[str, Any]]:
     """Build the Web-IO command dicts for a parse_config result.
 
-    webhook_path is the URL path every command POSTs to. webio_class restricts the result to
+    webhook_path is the URL path every command POSTs to, over protocol (WEBIO_PROTOCOL_HTTP or
+    WEBIO_PROTOCOL_HTTPS). webio_class restricts the result to
     one Web-IO class, for a per-class bulk upload (generate_webio_json); None returns all.
     ignored_marker_ids / ignored_knx_ids exclude items the consumer does not expose — they
     need no command pushing their values.
@@ -324,15 +348,17 @@ def build_webio_commands(
     commands: list[tuple[WebioClass, dict[str, Any]]] = []
     for m in parsed_data.get("markers", []):
         if not _is_ignored(m["id"], ignored_marker_ids):
-            commands.append((WebioClass.MARKER, build_marker_webio_command(m, webhook_path)))
+            commands.append((WebioClass.MARKER, build_marker_webio_command(m, webhook_path, protocol=protocol)))
     for io in parsed_data.get("io", []):
         if io.get("quickbus"):
-            commands.append((WebioClass.QUICKBUS, build_quickbus_webio_command(io, webhook_path)))
+            commands.append((WebioClass.QUICKBUS, build_quickbus_webio_command(io, webhook_path, protocol=protocol)))
         else:
-            commands.append((WebioClass.IO, build_io_webio_command(io, webhook_path)))
+            commands.append((WebioClass.IO, build_io_webio_command(io, webhook_path, protocol=protocol)))
     for knx_item in parsed_data.get("knx", []):
         if not _is_ignored(knx_item["id"], ignored_knx_ids):
-            commands.append((WebioClass.KNX, build_marker_webio_command(knx_item, webhook_path, WebioClass.KNX)))
+            commands.append(
+                (WebioClass.KNX, build_marker_webio_command(knx_item, webhook_path, WebioClass.KNX, protocol=protocol))
+            )
     # Collisions are found across all classes, so a per-class upload leaves out the same ones.
     return [cmd for cls, cmd in _without_colliding_names(commands) if webio_class in (None, cls)]
 
@@ -381,6 +407,8 @@ def generate_webio_json(
     webio_class: WebioClass | None = None,
     ignored_marker_ids: Collection[int] | None = None,
     ignored_knx_ids: Collection[int] | None = None,
+    *,
+    protocol: int = WEBIO_PROTOCOL_HTTP,
 ) -> str:
     """Upload-ready JSON string for the Comexio Web-IO class importer.
 
@@ -393,7 +421,7 @@ def generate_webio_json(
             "format": 1,
             "base": {"Identifier": webio_name, "UseCookies": 0, "Login": 2, "BaseId": 0},
             "commands": build_webio_commands(
-                webhook_path, parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids
+                webhook_path, parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids, protocol=protocol
             ),
         }
     )
