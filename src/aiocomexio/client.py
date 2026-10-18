@@ -135,13 +135,13 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 # <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
 _WEBIO_CMD_INPUT_RE = re.compile(r'<input\b[^>]*\bid="(min|max)_cmd_io_0"[^>]*>', re.IGNORECASE)
 _WEBIO_CMD_VALUE_RE = re.compile(r'\bvalue="([^"]*)"')
-# The form's protocol <select> and its chosen <option>, e.g. <option value="0" selected="selected">.
-_WEBIO_PROTOCOL_SELECT_RE = re.compile(
-    r"""<select\b[^>]*(?<![\w-])id\s*=\s*["']?protocol\b[^>]*>(.*?)</select>""", re.IGNORECASE | re.DOTALL
-)
+# The form's <select> tags (attributes, options) and their <option> tags, e.g. <option value="0" selected="selected">.
+_SELECT_RE = re.compile(r"<select\b([^>]*)>(.*?)</select>", re.IGNORECASE | re.DOTALL)
 _OPTION_RE = re.compile(r"<option\b([^>]*)>", re.IGNORECASE)
-# One attribute of a tag: its name and its double-, single- or unquoted value, if it has one.
-_ATTRIBUTE_RE = re.compile(r"""([\w-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?""")
+_WEBIO_PROTOCOL_SELECT_ID = "protocol"
+# One attribute of a tag: its name and its value as written (double-, single- or unquoted), if it has one.
+_ATTRIBUTE_RE = re.compile(r"""([\w-]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]+))?""")
+_QUOTES = "\"'"
 _PROTOCOL_VALUE_RE = re.compile(r"\d+", re.ASCII)
 
 # Plain-text answer of fupValueData for a plan that is not running (instead of a JSON value dict).
@@ -1782,25 +1782,41 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
 
 def _tag_attributes(attributes: str) -> dict[str, str]:
     """{lower-case name: value} of a tag's attribute text; an attribute without a value maps to ""."""
-    return {
-        match[1].lower(): next((value for value in match.groups()[1:] if value is not None), "")
-        for match in _ATTRIBUTE_RE.finditer(attributes)
-    }
+    return {match[1].lower(): _unquote(match[2] or "") for match in _ATTRIBUTE_RE.finditer(attributes)}
+
+
+def _unquote(value: str) -> str:
+    """An attribute value without the quotes it was written in."""
+    return value[1:-1] if value and value[0] in _QUOTES else value
 
 
 def _command_protocol(html: str, command_id: str | int) -> int | None:
-    """The protocol a Web-IO command edit form has chosen: its selected option, else the first (as a browser).
+    """The protocol a Web-IO command edit form has chosen, as a browser shows it.
 
+    That is its last selected option (a single select keeps only the last), else its first option.
     None means unknown — the form has no protocol select, no option or no numeric value — never HTTP.
     """
-    if not (select := _WEBIO_PROTOCOL_SELECT_RE.search(html)):
+    select = next(
+        (
+            match
+            for match in _SELECT_RE.finditer(html)
+            if _tag_attributes(match[1]).get("id") == _WEBIO_PROTOCOL_SELECT_ID
+        ),
+        None,
+    )
+    if select is None:
         _LOGGER.debug("Web-IO command %r edit form has no protocol select", command_id)
         return None
-    options = [_tag_attributes(attributes) for attributes in _OPTION_RE.findall(select[1])]
+    options = [_tag_attributes(attributes) for attributes in _OPTION_RE.findall(select[2])]
     if not options:
         _LOGGER.debug("Web-IO command %r protocol select has no option", command_id)
         return None
-    chosen = next((option for option in options if "selected" in option), options[0])
+    selected = [option for option in options if "selected" in option]
+    if len(selected) > 1:
+        _LOGGER.debug(
+            "Web-IO command %r protocol select has %d selected options, the last counts", command_id, len(selected)
+        )
+    chosen = selected[-1] if selected else options[0]
     value = chosen.get("value")
     if value is None or not _PROTOCOL_VALUE_RE.fullmatch(value):
         _LOGGER.warning("Web-IO command %r has a non-numeric protocol value: %r", command_id, value)

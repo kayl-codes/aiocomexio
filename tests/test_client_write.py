@@ -778,7 +778,20 @@ _RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" val
             4,
             id="single-and-unquoted-attributes",
         ),
+        pytest.param(
+            '<select id="protocol-extra"><option value="5" selected>HTTPS/2</option></select>'
+            '<select id=protocol><option value="1" selected>HTTPS/1.1</option></select>',
+            1,
+            id="longer-id-is-another-select",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="0" selected>HTTP/1.1</option>'
+            '<option value="4">HTTP/2</option><option value="1" selected>HTTPS/1.1</option></select>',
+            1,
+            id="several-selected-takes-last",
+        ),
         pytest.param('<select data-id="protocol"><option value="1" selected></option></select>', None, id="data-id"),
+        pytest.param('<select id="protocol-extra"><option value="1" selected></option></select>', None, id="prefix-id"),
         pytest.param("", None, id="no-select"),
         pytest.param('<select id="protocol"></select>', None, id="no-options"),
     ],
@@ -805,6 +818,8 @@ async def test_get_webio_command_form_reads_protocol(
         ('<option value="-1" selected>', "'-1'"),
         ('<option value="" selected>', "''"),
         ("<option selected>", "None"),
+        # The last selected option counts, even when an earlier one has a number.
+        ('<option value="0" selected>HTTP</option><option value="x" selected>', "'x'"),
     ],
 )
 async def test_get_webio_command_form_non_numeric_protocol_warns(
@@ -820,6 +835,30 @@ async def test_get_webio_command_form_non_numeric_protocol_warns(
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.WARNING, f"Web-IO command 1324 has a non-numeric protocol value: {shown}")
     ]
+
+
+@pytest.mark.parametrize(
+    ("select", "logged"),
+    [
+        ("", ["Web-IO command 1324 edit form has no protocol select"]),
+        ('<select id="protocol"></select>', ["Web-IO command 1324 protocol select has no option"]),
+        (
+            '<select id="protocol"><option value="0" selected><option value="1" selected></select>',
+            ["Web-IO command 1324 protocol select has 2 selected options, the last counts"],
+        ),
+        ('<select id="protocol"><option value="0"><option value="1" selected></select>', []),
+    ],
+)
+async def test_get_webio_command_form_protocol_debug_log(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, select: str, logged: list[str]
+) -> None:
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, _RANGE_FIELDS + select)
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.client"):
+        await logged_in.get_webio_command_form(1324, 34)
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG and "protocol" in r.getMessage()]
+    assert messages == logged
 
 
 # --- markers and KNX objects ------------------------------------------------------------------------
