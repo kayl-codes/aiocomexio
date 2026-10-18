@@ -1186,7 +1186,8 @@ def test_unusable_type_bounds_give_the_default_range(v_min: Any, v_max: Any, cap
     assert {(io["min"], io["max"]) for io in result["io_all"]} == {(None, None)}
     for io in result["io"]:
         command = build_io_webio_command(io, _HOOK)
-        assert (command["Min"], command["Max"]) == ((0, 1) if io["is_binary"] else (0, 100)), io["identifier"]
+        actual_range = (command["Min"], command["Max"])
+        assert actual_range == ((0, 1) if io["is_binary"] else (0, 100)), io["identifier"]
     assert build_webio_commands(_HOOK, result, WebioClass.MARKER) == build_webio_commands(
         _HOOK, _parse(), WebioClass.MARKER
     )
