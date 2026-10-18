@@ -75,8 +75,14 @@ def element_id_sort_key(eid: str) -> tuple[int, Any]:
 
     Shared by every place that iterates a set of element ids, so the output does not depend on
     PYTHONHASHSEED. isascii+isdecimal, not isdigit: "²".isdigit() is True but int("²") raises.
+    An id beyond Python's int-to-str digit limit sorts as text, with the other non-numeric ids.
     """
-    return (0, int(eid)) if eid.isascii() and eid.isdecimal() else (1, eid)
+    if eid.isascii() and eid.isdecimal():
+        try:
+            return (0, int(eid))
+        except ValueError:
+            pass
+    return (1, eid)
 
 
 # reference.type -> id prefix of the element kinds addressed by a plain "<prefix><ref_id>" id.

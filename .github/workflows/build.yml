@@ -67,11 +67,16 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # The merge commit the tests above ran on (the default checkout of a
+          # pull_request run); sonar-pr.yml scans exactly this commit so the
+          # coverage lines match the scanned source.
+          PR_MERGE_SHA: ${{ github.sha }}
         run: |
           {
             echo "PR_NUMBER=$PR_NUMBER"
             echo "PR_HEAD_REF=$PR_HEAD_REF"
             echo "PR_BASE_REF=$PR_BASE_REF"
+            echo "PR_MERGE_SHA=$PR_MERGE_SHA"
           } > pr.env
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

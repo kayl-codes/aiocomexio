@@ -474,6 +474,21 @@ async def test_webio_list_with_unexpected_entries_raises_instead_of_reporting_ab
         await logged_in.get_webio_base_info("Other")
 
 
+async def test_webio_list_error_caps_a_long_key(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    key = "k" * 1000
+    base_list = {key: {"Id": 12, "Identifier": "HA [M]"}}
+    comexio.serve_text(
+        "GET", WEBIO_ADD_PATH, f"<script>DeviceList=[]; DeviceBaseList={json.dumps(base_list)};</script>"
+    )
+
+    with pytest.raises(ComexioDataError) as excinfo:
+        await logged_in.get_webio_base_info("Other")
+
+    assert str(excinfo.value) == (
+        f"Web-IO list entry {repr(key)[:200]}... has no 'Identifier' or a different Id: {repr(base_list[key])}"
+    )
+
+
 async def test_get_webio_base_info_login_form_is_not_an_absent_class(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
@@ -715,6 +730,19 @@ async def test_get_webio_command_range_field_without_value_is_none(
     comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, '<input id="min_cmd_io_0"><input id="max_cmd_io_0" value="1">')
 
     assert await logged_in.get_webio_command_range(1324, 34) == (None, 1.0)
+
+
+async def test_get_webio_command_range_caps_a_long_non_numeric_value_in_the_warning(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    value = "a" * 1000
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, f'<input id="min_cmd_io_0" value="{value}">')
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert await logged_in.get_webio_command_range(1324, 34) == (None, None)
+
+    (warning,) = caplog.records
+    assert warning.getMessage() == f"Web-IO command 1324 has a non-numeric min value: {repr(value)[:200]}..."
 
 
 @pytest.mark.parametrize(
