@@ -978,9 +978,62 @@ _RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" val
         pytest.param('<select id="protocol"><option>1<optgroup label=x>2</select>', 1, id="optgroup-ends-the-option"),
         pytest.param('<select id="protocol"><option>1<hr>2</select>', 1, id="hr-ends-the-option"),
         pytest.param('<select id="protocol"><option>1</select>x', 1, id="text-after-the-select"),
+        # An <input> or <textarea> start tag ends an open select; a later option is outside it.
         pytest.param(
-            '<select id="protocol"><option><textarea>5</textarea>1</option></select>', 1, id="textarea-in-the-option"
+            '<select id="protocol"><option value="1"><textarea></textarea><option value="5" selected></select>',
+            1,
+            id="textarea-ends-the-select",
         ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><input><option value="5" selected></select>',
+            1,
+            id="input-ends-the-select",
+        ),
+        # Without a selected option a browser shows the first enabled one; a list box shows none.
+        pytest.param(
+            '<select id="protocol"><option value="0" disabled><option value="1"></select>', 1, id="skips-disabled"
+        ),
+        pytest.param(
+            '<select id="protocol"><optgroup disabled><option value="0"></optgroup><option value="1"></select>',
+            1,
+            id="skips-a-disabled-group",
+        ),
+        pytest.param(
+            '<select id="protocol"><optgroup disabled><option value="0"><optgroup><option value="1"></select>',
+            1,
+            id="next-group-ends-the-disabled-one",
+        ),
+        pytest.param(
+            '<select id="protocol"><optgroup disabled><option value="0"><hr><option value="1"></select>',
+            1,
+            id="hr-ends-the-disabled-group",
+        ),
+        pytest.param(
+            '<optgroup disabled><select id="protocol"><option value="0"><option value="1"></select>',
+            0,
+            id="group-outside-the-select",
+        ),
+        pytest.param(
+            '<select><optgroup disabled></select><select id="protocol"><option value="0"></select>',
+            0,
+            id="group-of-another-select",
+        ),
+        pytest.param('<select id="protocol"><option value="0" disabled></select>', None, id="only-disabled"),
+        pytest.param(
+            '<select id="protocol"><option value="0" disabled selected><option value="1"></select>',
+            0,
+            id="selected-disabled-counts",
+        ),
+        pytest.param('<select id="protocol" size="2"><option value="1"></select>', None, id="list-box"),
+        pytest.param('<select id="protocol" size=" +3rows"><option value="1"></select>', None, id="list-box-size-text"),
+        pytest.param(
+            '<select id="protocol" size="2"><option value="1" selected></select>', 1, id="list-box-with-selected"
+        ),
+        pytest.param('<select id="protocol" size="1"><option value="1"></select>', 1, id="size-one"),
+        pytest.param('<select id="protocol" size="0"><option value="1"></select>', 1, id="size-zero"),
+        pytest.param('<select id="protocol" size="001"><option value="1"></select>', 1, id="size-zero-padded-one"),
+        pytest.param('<select id="protocol" size="x"><option value="1"></select>', 1, id="size-invalid"),
+        pytest.param('<select id="protocol" size="-2"><option value="1"></select>', 1, id="size-negative"),
         # A browser ignores the slash of a start tag: <select/> and <option/> open their element.
         pytest.param('<select id="protocol"/><option value="1"></select>', 1, id="self-closing-select-opens-it"),
         pytest.param('<select id="protocol"><option/>1</select>', 1, id="self-closing-option-keeps-its-text"),
@@ -1036,6 +1089,14 @@ async def test_get_webio_command_form_non_numeric_protocol_warns(
     [
         ("", ["Web-IO command 1324 edit form has no protocol select"]),
         ('<select id="protocol"></select>', ["Web-IO command 1324 protocol select has no option"]),
+        (
+            '<select id="protocol" size="2"><option value="1"></select>',
+            ["Web-IO command 1324 protocol select is a list box without a selected option"],
+        ),
+        (
+            '<select id="protocol"><option value="1" disabled></select>',
+            ["Web-IO command 1324 protocol select has no enabled option"],
+        ),
         ('<select id="protocol"><option value="1" selected>', ["Web-IO command 1324 protocol select is not closed"]),
         (
             '<select id="protocol"><option value="0" selected><option value="1" selected></select>',

@@ -142,6 +142,10 @@ _HTML_WHITESPACE = "\t\n\f\r "
 _HTML_WHITESPACE_RE = re.compile(f"[{_HTML_WHITESPACE}]+")
 # Tags that end an open <option>, so text after them is no longer its text.
 _OPTION_ENDING_TAGS = frozenset({"option", "optgroup", "hr"})
+# Start tags that end an open <select> before a browser reads them.
+_SELECT_ENDING_TAGS = frozenset({"input", "textarea"})
+# The start of a size attribute as a browser parses a non-negative integer (whitespace, an optional "+", digits).
+_SIZE_RE = re.compile(rf"[{_HTML_WHITESPACE}]*\+?(\d+)", re.ASCII)
 # The id of the form's protocol <select>, whose options read e.g. <option value="0" selected="selected">.
 _WEBIO_PROTOCOL_SELECT_ID = "protocol"
 # A protocol is a small number; a longer digit string is none (and int() refuses one beyond 4300 digits).
@@ -1860,10 +1864,11 @@ class _ProtocolSelectParser(_FormParser):
     """The <option>s of a page's first <select id="protocol">, read as a browser does.
 
     Attribute values come unquoted with entities resolved, the first of a name wins and a bare one is "";
-    a ">" inside a quoted value does not end its tag. options holds each option's attributes and texts its text.
-    closed says the select ended (its </select>, or a nested <select> start tag, which a browser reads as one),
-    so its options are complete (a cut-off answer drops a half-read option tag); multiple says it allows several
-    selected options.
+    a ">" inside a quoted value does not end its tag. options holds each option's attributes, texts its text and
+    disabled whether it or its <optgroup> is disabled. closed says the select ended (its </select>, or a <select>,
+    <input> or <textarea> start tag, which a browser reads as one), so its options are complete (a cut-off answer
+    drops a half-read option tag); multiple says it allows several selected options and listbox that its size shows
+    more than one row, so it selects no option by default.
     """
 
     def __init__(self) -> None:
@@ -1871,11 +1876,19 @@ class _ProtocolSelectParser(_FormParser):
         self.found = False
         self.closed = False
         self.multiple = False
+        self.listbox = False
         self.options: list[dict[str, str]] = []
         self.texts: list[list[str]] = []  # the text chunks of each option, joined once at the end
+        self.disabled: list[bool] = []
         self._open = False  # any select is open; a <select> inside it only ends it
         self._inside = False  # the open select is the protocol select
         self._in_option = False
+        self._group_disabled = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self._open and self._text_only is None and tag in _SELECT_ENDING_TAGS:
+            self._end_select()
+        super().handle_starttag(tag, attrs)
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag == "select":
@@ -1887,17 +1900,23 @@ class _ProtocolSelectParser(_FormParser):
             if self._inside:
                 self.found = True
                 self.multiple = "multiple" in attributes
+                self.listbox = _shows_several_rows(attributes.get("size", ""))
         elif tag in _OPTION_ENDING_TAGS:
+            if tag != "option":  # an <optgroup> outside the protocol select does not group its options
+                self._group_disabled = self._inside and tag == "optgroup" and "disabled" in attributes
             self._in_option = tag == "option" and self._inside
             if self._in_option:
                 self.options.append(attributes)
                 self.texts.append([])
+                self.disabled.append("disabled" in attributes or self._group_disabled)
 
     def handle_form_endtag(self, tag: str) -> None:
         if tag == "select" and self._open:
             self._end_select()
         elif tag in _OPTION_ENDING_TAGS:
             self._in_option = False
+            if tag == "optgroup":
+                self._group_disabled = False
 
     def handle_data(self, data: str) -> None:
         if self._in_option and self._text_only is None:
@@ -1906,6 +1925,43 @@ class _ProtocolSelectParser(_FormParser):
     def _end_select(self) -> None:
         self.closed = self.closed or self._inside
         self._open = self._inside = self._in_option = False
+
+
+def _shows_several_rows(size: str) -> bool:
+    """Whether a select's size attribute, parsed as a browser parses it, is above 1 (a missing or bad one is 1)."""
+    if (match := _SIZE_RE.match(size)) is None:
+        return False
+    digits = match.group(1).lstrip("0")  # compared as text: int() refuses more than 4300 digits
+    return len(digits) > 1 or digits > "1"
+
+
+class _Option(NamedTuple):
+    attributes: dict[str, str]
+    text: str
+    disabled: bool
+
+
+def _chosen_option(parser: _ProtocolSelectParser, command_id: str | int) -> _Option | None:
+    """The option a single select shows: its last selected one, else its first enabled one unless it is a list box."""
+    options = [
+        _Option(attributes, "".join(chunks), disabled)
+        for attributes, chunks, disabled in zip(parser.options, parser.texts, parser.disabled, strict=True)
+    ]
+    selected = [option for option in options if "selected" in option.attributes]
+    if len(selected) > 1:
+        _LOGGER.debug(
+            "Web-IO command %r protocol select has %d selected options, the last counts", command_id, len(selected)
+        )
+    if selected:
+        return selected[-1]
+    if parser.listbox:
+        _LOGGER.debug("Web-IO command %r protocol select is a list box without a selected option", command_id)
+        return None
+    enabled = [option for option in options if not option.disabled]
+    if not enabled:
+        _LOGGER.debug("Web-IO command %r protocol select has no enabled option", command_id)
+        return None
+    return enabled[0]
 
 
 def _option_value(attributes: dict[str, str], text: str) -> str:
@@ -1918,9 +1974,9 @@ def _option_value(attributes: dict[str, str], text: str) -> str:
 def _command_protocol(html: str, command_id: str | int) -> int | None:
     """The protocol a Web-IO command edit form has chosen, as a browser shows it.
 
-    That is its last selected option (a single select keeps only the last), else its first option.
+    That is its last selected option (a single select keeps only the last), else its first enabled option.
     None means unknown — the form has no protocol select, no option, a multiple select (none or several
-    protocols) or no numeric value — never HTTP.
+    protocols), a list box or only disabled options without a selected one, or no numeric value — never HTTP.
     """
     parser = _ProtocolSelectParser()
     parser.feed(html)
@@ -1934,17 +1990,12 @@ def _command_protocol(html: str, command_id: str | int) -> int | None:
     if parser.multiple:
         _LOGGER.debug("Web-IO command %r protocol select allows several options", command_id)
         return None
-    options = [("".join(chunks), attributes) for attributes, chunks in zip(parser.options, parser.texts, strict=True)]
-    if not options:
+    if not parser.options:
         _LOGGER.debug("Web-IO command %r protocol select has no option", command_id)
         return None
-    selected = [option for option in options if "selected" in option[1]]
-    if len(selected) > 1:
-        _LOGGER.debug(
-            "Web-IO command %r protocol select has %d selected options, the last counts", command_id, len(selected)
-        )
-    text, attributes = selected[-1] if selected else options[0]
-    value = _option_value(attributes, text)
+    if (chosen := _chosen_option(parser, command_id)) is None:
+        return None
+    value = _option_value(chosen.attributes, chosen.text)
     if not _PROTOCOL_VALUE_RE.fullmatch(value):
         _LOGGER.warning("Web-IO command %r has an unknown protocol value: %s", command_id, _excerpt(value))
         return None

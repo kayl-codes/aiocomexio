@@ -302,6 +302,10 @@ def _is_yield(statement: ast.stmt) -> bool:
     return isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Yield)
 
 
+def _is_setter_call(statement: ast.stmt) -> bool:
+    return isinstance(statement, ast.Expr) and isinstance(call := statement.value, ast.Call) and _is_setter(call.func)
+
+
 def _is_restore(statement: ast.stmt, saved: set[str]) -> bool:
     """Whether the statement is a call that sets the limit to one of the saved names."""
     return (
@@ -314,12 +318,13 @@ def _is_restore(statement: ast.stmt, saved: set[str]) -> bool:
     )
 
 
-def _restores_after_yield(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """Whether the function saves the limit before its yield and always sets that value back after it.
+def _spared_setters(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.stmt]:
+    """The setter calls of a function that saves the limit before its yield and always sets it back after it.
 
     Saving, yield and restore must be statements of the function body itself, or the yield sits in a try whose
     finally restores; a restore in a branch, a loop or a nested function may not run, so it does not count. A save
-    after the first setter would keep the changed limit, so only a save before it counts.
+    after the first setter would keep the changed limit, so only a save before it counts. Only the setter calls of
+    the body before the yield and the restores are spared; any other setter in the function still counts.
     """
     body = function.body
     first_setter = next(
@@ -329,28 +334,31 @@ def _restores_after_yield(function: ast.FunctionDef | ast.AsyncFunctionDef) -> b
     for index, statement in enumerate(body):
         saved = _saved_limits(body[: min(index, first_setter)])
         if _is_yield(statement):
-            return any(_is_restore(after, saved) for after in body[index + 1 :])
-        if isinstance(statement, ast.Try) and any(_is_yield(inner) for inner in statement.body):
-            return any(_is_restore(after, saved) for after in [*statement.finalbody, *body[index + 1 :]])
-    return False
+            after = body[index + 1 :]
+        elif isinstance(statement, ast.Try) and any(_is_yield(inner) for inner in statement.body):
+            after = [*statement.finalbody, *body[index + 1 :]]
+        else:
+            continue
+        restores = [restore for restore in after if _is_restore(restore, saved)]
+        return [*filter(_is_setter_call, body[:index]), *restores] if restores else []
+    return []
 
 
-def _restoring_fixture_lines(tree: ast.AST) -> set[int]:
-    """The lines of each fixture that restores the saved limit after its yield, so the test it serves keeps none."""
+def _spared_setter_lines(tree: ast.AST) -> set[int]:
+    """The lines of the setter calls a fixture restores after its yield, so the test it serves keeps no change."""
     return {
         line
         for function in ast.walk(tree)
-        if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef)
-        and _is_fixture(function)
-        and _restores_after_yield(function)
-        for line in range(function.lineno, (function.end_lineno or function.lineno) + 1)
+        if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef) and _is_fixture(function)
+        for statement in _spared_setters(function)
+        for line in range(statement.lineno, (statement.end_lineno or statement.lineno) + 1)
     }
 
 
 def _digit_limit_setters(source: str, filename: str, *, fixtures_allowed: bool = False) -> list[str]:
     """file:line of each reference to sys.set_int_max_str_digits; fixtures_allowed spares a restoring fixture."""
     tree = ast.parse(source, filename)
-    allowed = _restoring_fixture_lines(tree) if fixtures_allowed else set()
+    allowed = _spared_setter_lines(tree) if fixtures_allowed else set()
     return [f"{filename}:{node.lineno}" for node in ast.walk(tree) if _is_setter(node) and node.lineno not in allowed]
 
 
@@ -389,7 +397,7 @@ def test_the_guard_recognises_the_real_restoring_fixture() -> None:
     (fixture,) = (
         node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "int_max_str_digits"
     )
-    assert _restores_after_yield(fixture)
+    assert len(_spared_setters(fixture)) == 2  # the setter before the yield and the restore after it
 
 
 @pytest.mark.parametrize(
@@ -456,6 +464,13 @@ _RESTORING_FIXTURE = (
             ),
             ["m.py:3", "m.py:6"],
         ),
+        (_RESTORING_FIXTURE + "    sys.set_int_max_str_digits(0)\n", ["m.py:7"]),
+        (
+            _RESTORING_FIXTURE.replace(
+                "    yield\n", "    if flag:\n        sys.set_int_max_str_digits(0)\n    yield\n"
+            ),
+            ["m.py:6"],
+        ),
     ],
     ids=[
         "restoring-fixture",
@@ -470,6 +485,8 @@ _RESTORING_FIXTURE = (
         "restore-in-a-branch",
         "restore-in-finally",
         "saves-the-limit-after-setting-it",
+        "another-setter-after-the-restore",
+        "another-setter-in-a-branch",
     ],
 )
 def test_the_guard_spares_only_a_fixture_that_restores_the_digit_limit(source: str, expected: list[str]) -> None:
