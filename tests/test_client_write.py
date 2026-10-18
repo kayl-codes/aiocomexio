@@ -779,6 +779,46 @@ _RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" val
             id="single-and-unquoted-attributes",
         ),
         pytest.param(
+            '<select id = "protocol"><option value = "0"/><option value = 5 selected/></select>',
+            5,
+            id="spaces-around-equals-and-self-closing",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="&#53;" value="0" selected>HTTPS/2</option></select>',
+            5,
+            id="entity-resolved-and-first-duplicate-wins",
+        ),
+        pytest.param(
+            '<select title="a>b" id="protocol"><option value="1">HTTPS/1.1</option>'
+            '<OPTION VALUE="5" title="x>y" SELECTED>HTTPS/2</OPTION></select>',
+            5,
+            id="quoted-gt-and-upper-case-option",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1" selected></select>'
+            '<select id="protocol"><option value="5" selected></select>',
+            1,
+            id="first-protocol-select-only",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><option value="4"></select>'
+            '<select id="x"><option value="7" selected></select><option value="9" selected>',
+            1,
+            id="options-after-the-select-do-not-count",
+        ),
+        pytest.param(
+            '<!-- <select id="protocol"><option value="5" selected></select> -->'
+            '<select id="protocol"><option value="1" selected></select>',
+            1,
+            id="commented-out-select",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="0">HTTP/1.1</option><option value="5" selected',
+            None,
+            id="cut-off-answer",
+        ),
+        pytest.param('<select id="protocol"></select><option value="3" selected>', None, id="option-after-empty"),
+        pytest.param(
             '<select id="protocol-extra"><option value="5" selected>HTTPS/2</option></select>'
             '<select id=protocol><option value="1" selected>HTTPS/1.1</option></select>',
             1,
@@ -818,6 +858,7 @@ async def test_get_webio_command_form_reads_protocol(
         ('<option value="-1" selected>', "'-1'"),
         ('<option value="" selected>', "''"),
         ("<option selected>", "None"),
+        ("<option value=1=2 selected>", "'1=2'"),  # an unquoted value keeps its "="
         # The last selected option counts, even when an earlier one has a number.
         ('<option value="0" selected>HTTP</option><option value="x" selected>', "'x'"),
     ],
@@ -842,6 +883,7 @@ async def test_get_webio_command_form_non_numeric_protocol_warns(
     [
         ("", ["Web-IO command 1324 edit form has no protocol select"]),
         ('<select id="protocol"></select>', ["Web-IO command 1324 protocol select has no option"]),
+        ('<select id="protocol"><option value="1" selected>', ["Web-IO command 1324 protocol select is not closed"]),
         (
             '<select id="protocol"><option value="0" selected><option value="1" selected></select>',
             ["Web-IO command 1324 protocol select has 2 selected options, the last counts"],

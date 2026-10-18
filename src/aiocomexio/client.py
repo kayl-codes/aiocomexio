@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from html.parser import HTMLParser
 from http import HTTPStatus
 from typing import Any, NamedTuple, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
@@ -135,13 +136,8 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 # <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
 _WEBIO_CMD_INPUT_RE = re.compile(r'<input\b[^>]*\bid="(min|max)_cmd_io_0"[^>]*>', re.IGNORECASE)
 _WEBIO_CMD_VALUE_RE = re.compile(r'\bvalue="([^"]*)"')
-# The form's <select> tags (attributes, options) and their <option> tags, e.g. <option value="0" selected="selected">.
-_SELECT_RE = re.compile(r"<select\b([^>]*)>(.*?)</select>", re.IGNORECASE | re.DOTALL)
-_OPTION_RE = re.compile(r"<option\b([^>]*)>", re.IGNORECASE)
+# The id of the form's protocol <select>, whose options read e.g. <option value="0" selected="selected">.
 _WEBIO_PROTOCOL_SELECT_ID = "protocol"
-# One attribute of a tag: its name and its value as written (double-, single- or unquoted), if it has one.
-_ATTRIBUTE_RE = re.compile(r"""([\w-]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]+))?""")
-_QUOTES = "\"'"
 _PROTOCOL_VALUE_RE = re.compile(r"\d+", re.ASCII)
 
 # Plain-text answer of fupValueData for a plan that is not running (instead of a JSON value dict).
@@ -1780,14 +1776,35 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
     return values["min"], values["max"]
 
 
-def _tag_attributes(attributes: str) -> dict[str, str]:
-    """{lower-case name: value} of a tag's attribute text; an attribute without a value maps to ""."""
-    return {match[1].lower(): _unquote(match[2] or "") for match in _ATTRIBUTE_RE.finditer(attributes)}
+class _ProtocolSelectParser(HTMLParser):
+    """The <option> attributes of a page's first <select id="protocol">, read as a browser does.
 
+    Attribute values come unquoted with entities resolved, the first of a name wins and a bare one is "";
+    a ">" inside a quoted value does not end its tag. closed says the select's </select> was read, so its
+    options are complete (a cut-off answer drops a half-read option tag).
+    """
 
-def _unquote(value: str) -> str:
-    """An attribute value without the quotes it was written in."""
-    return value[1:-1] if value and value[0] in _QUOTES else value
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.found = False
+        self.closed = False
+        self.options: list[dict[str, str]] = []
+        self._inside = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes: dict[str, str] = {}
+        for name, value in attrs:
+            attributes.setdefault(name, value or "")
+        if tag == "select":
+            self._inside = not self.found and attributes.get("id") == _WEBIO_PROTOCOL_SELECT_ID
+            self.found = self.found or self._inside
+        elif tag == "option" and self._inside:
+            self.options.append(attributes)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "select":
+            self.closed = self.closed or self._inside
+            self._inside = False
 
 
 def _command_protocol(html: str, command_id: str | int) -> int | None:
@@ -1796,18 +1813,16 @@ def _command_protocol(html: str, command_id: str | int) -> int | None:
     That is its last selected option (a single select keeps only the last), else its first option.
     None means unknown — the form has no protocol select, no option or no numeric value — never HTTP.
     """
-    select = next(
-        (
-            match
-            for match in _SELECT_RE.finditer(html)
-            if _tag_attributes(match[1]).get("id") == _WEBIO_PROTOCOL_SELECT_ID
-        ),
-        None,
-    )
-    if select is None:
+    parser = _ProtocolSelectParser()
+    parser.feed(html)
+    parser.close()
+    if not parser.found:
         _LOGGER.debug("Web-IO command %r edit form has no protocol select", command_id)
         return None
-    options = [_tag_attributes(attributes) for attributes in _OPTION_RE.findall(select[2])]
+    if not parser.closed:
+        _LOGGER.debug("Web-IO command %r protocol select is not closed", command_id)
+        return None
+    options = parser.options
     if not options:
         _LOGGER.debug("Web-IO command %r protocol select has no option", command_id)
         return None
