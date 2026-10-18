@@ -951,6 +951,36 @@ _RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" val
             1,
             id="select-written-into-a-textarea",
         ),
+        pytest.param('<select id="protocol"><option selected>\n 5 </option></select>', 5, id="text-as-value"),
+        pytest.param(
+            '<select id="protocol"><option>1</option><option>5</option></select>', 1, id="text-of-first-option"
+        ),
+        pytest.param(
+            '<select id="protocol" multiple><option value="1" selected><option value="5" selected></select>',
+            None,
+            id="multiple-select",
+        ),
+        pytest.param('<select id="protocol" multiple><option value="1"></select>', None, id="multiple-none-selected"),
+        pytest.param(
+            '<select id="protocol"><option value="1" selected><select id="x"><option value="5" selected>',
+            1,
+            id="nested-select-ends-it",
+        ),
+        pytest.param(
+            '<select id="a"><option>1<select id="protocol"><option value="5" selected></select>',
+            None,
+            id="protocol-select-inside-another-select-is-ignored",
+        ),
+        pytest.param('<select id="protocol"><option>1 5</option></select>', None, id="inner-whitespace-is-kept"),
+        pytest.param('<select id="protocol"><option>&nbsp;5</option></select>', None, id="nbsp-is-no-whitespace"),
+        pytest.param('<select id="protocol"><option>1<!-- x -->5</option></select>', 15, id="text-in-parts"),
+        pytest.param('<select id="protocol"><option>1</option>x</select>', 1, id="text-after-the-option"),
+        pytest.param('<select id="protocol"><option>1<optgroup label=x>2</select>', 1, id="optgroup-ends-the-option"),
+        pytest.param('<select id="protocol"><option>1<hr>2</select>', 1, id="hr-ends-the-option"),
+        pytest.param('<select id="protocol"><option>1</select>x', 1, id="text-after-the-select"),
+        pytest.param(
+            '<select id="protocol"><option><textarea>5</textarea>1</option></select>', 1, id="textarea-in-the-option"
+        ),
     ],
 )
 async def test_get_webio_command_form_reads_protocol(
@@ -974,7 +1004,7 @@ async def test_get_webio_command_form_reads_protocol(
         ('<option value="٣" selected>', "'٣'"),
         ('<option value="-1" selected>', "'-1'"),
         ('<option value="" selected>', "''"),
-        ("<option selected>", "None"),
+        ("<option selected>", "'HTTPS'"),  # without a value attribute the option's text is its value
         ("<option value=1=2 selected>", "'1=2'"),  # an unquoted value keeps its "="
         # The last selected option counts, even when an earlier one has a number.
         ('<option value="0" selected>HTTP</option><option value="x" selected>', "'x'"),

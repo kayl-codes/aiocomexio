@@ -137,6 +137,11 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 _WEBIO_RANGE_INPUT_IDS = {"min_cmd_io_0": "min", "max_cmd_io_0": "max"}
 # Elements whose content a browser reads as text, so markup inside them is no form field.
 _TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title"})
+# The ASCII whitespace a browser strips from and collapses in an option text it uses as the value.
+_HTML_WHITESPACE = "\t\n\f\r "
+_HTML_WHITESPACE_RE = re.compile(f"[{_HTML_WHITESPACE}]+")
+# Tags that end an open <option>, so text after them is no longer its text.
+_OPTION_ENDING_TAGS = frozenset({"option", "optgroup", "hr"})
 # The id of the form's protocol <select>, whose options read e.g. <option value="0" selected="selected">.
 _WEBIO_PROTOCOL_SELECT_ID = "protocol"
 _PROTOCOL_VALUE_RE = re.compile(r"\d+", re.ASCII)
@@ -1853,38 +1858,70 @@ class _CommandRangeParser(_FormParser):
 
 
 class _ProtocolSelectParser(_FormParser):
-    """The <option> attributes of a page's first <select id="protocol">, read as a browser does.
+    """The <option>s of a page's first <select id="protocol">, read as a browser does.
 
     Attribute values come unquoted with entities resolved, the first of a name wins and a bare one is "";
-    a ">" inside a quoted value does not end its tag. closed says the select's </select> was read, so its
-    options are complete (a cut-off answer drops a half-read option tag).
+    a ">" inside a quoted value does not end its tag. options holds each option's attributes and texts its text.
+    closed says the select ended (its </select>, or a nested <select> start tag, which a browser reads as one),
+    so its options are complete (a cut-off answer drops a half-read option tag); multiple says it allows several
+    selected options.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.found = False
         self.closed = False
+        self.multiple = False
         self.options: list[dict[str, str]] = []
-        self._inside = False
+        self.texts: list[str] = []
+        self._open = False  # any select is open; a <select> inside it only ends it
+        self._inside = False  # the open select is the protocol select
+        self._in_option = False
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag == "select":
+            if self._open:
+                self._end_select()
+                return
+            self._open = True
             self._inside = not self.found and attributes.get("id") == _WEBIO_PROTOCOL_SELECT_ID
-            self.found = self.found or self._inside
-        elif tag == "option" and self._inside:
-            self.options.append(attributes)
+            if self._inside:
+                self.found = True
+                self.multiple = "multiple" in attributes
+        elif tag in _OPTION_ENDING_TAGS:
+            self._in_option = tag == "option" and self._inside
+            if self._in_option:
+                self.options.append(attributes)
+                self.texts.append("")
 
     def handle_form_endtag(self, tag: str) -> None:
-        if tag == "select":
-            self.closed = self.closed or self._inside
-            self._inside = False
+        if tag == "select" and self._open:
+            self._end_select()
+        elif tag in _OPTION_ENDING_TAGS:
+            self._in_option = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_option and self._text_only is None:
+            self.texts[-1] += data
+
+    def _end_select(self) -> None:
+        self.closed = self.closed or self._inside
+        self._open = self._inside = self._in_option = False
+
+
+def _option_value(attributes: dict[str, str], text: str) -> str:
+    """An option's value as a browser submits it: its value attribute, else its text with whitespace collapsed."""
+    if "value" in attributes:
+        return attributes["value"]
+    return _HTML_WHITESPACE_RE.sub(" ", text).strip(_HTML_WHITESPACE)
 
 
 def _command_protocol(html: str, command_id: str | int) -> int | None:
     """The protocol a Web-IO command edit form has chosen, as a browser shows it.
 
     That is its last selected option (a single select keeps only the last), else its first option.
-    None means unknown — the form has no protocol select, no option or no numeric value — never HTTP.
+    None means unknown — the form has no protocol select, no option, a multiple select (none or several
+    protocols) or no numeric value — never HTTP.
     """
     parser = _ProtocolSelectParser()
     parser.feed(html)
@@ -1895,18 +1932,20 @@ def _command_protocol(html: str, command_id: str | int) -> int | None:
     if not parser.closed:
         _LOGGER.debug("Web-IO command %r protocol select is not closed", command_id)
         return None
-    options = parser.options
+    if parser.multiple:
+        _LOGGER.debug("Web-IO command %r protocol select allows several options", command_id)
+        return None
+    options = list(zip(parser.options, parser.texts, strict=True))
     if not options:
         _LOGGER.debug("Web-IO command %r protocol select has no option", command_id)
         return None
-    selected = [option for option in options if "selected" in option]
+    selected = [option for option in options if "selected" in option[0]]
     if len(selected) > 1:
         _LOGGER.debug(
             "Web-IO command %r protocol select has %d selected options, the last counts", command_id, len(selected)
         )
-    chosen = selected[-1] if selected else options[0]
-    value = chosen.get("value")
-    if value is None or not _PROTOCOL_VALUE_RE.fullmatch(value):
+    value = _option_value(*(selected[-1] if selected else options[0]))
+    if not _PROTOCOL_VALUE_RE.fullmatch(value):
         _LOGGER.warning("Web-IO command %r has a non-numeric protocol value: %r", command_id, value)
         return None
     return int(value)

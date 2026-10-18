@@ -12,7 +12,7 @@ from __future__ import annotations
 import ast
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -27,59 +27,84 @@ _PACKAGE = _TESTS.parent / "src" / "aiocomexio"
 _CONVERSIONS = frozenset({"int", "float"})
 # Names whose handler also catches OverflowError.
 _COVERS_OVERFLOW = frozenset({"OverflowError", "ArithmeticError", "Exception", "BaseException"})
+# Names whose handler also catches ValueError.
+_CATCHES_VALUE_ERROR = frozenset({"ValueError", "Exception", "BaseException"})
 _DIGIT_LIMIT_SETTER = "set_int_max_str_digits"
 _DIGIT_LIMIT_GETTER = "get_int_max_str_digits"
 
 
-def _caught(handler: ast.ExceptHandler) -> set[str]:
-    """The exception names a handler catches; a bare except catches everything.
+class _Builtins:
+    """Which names of a module stand for which builtins: the module itself and its import aliases."""
 
-    builtins.ValueError counts as ValueError; a handler naming a tuple constant is not resolved.
+    def __init__(self, tree: ast.AST) -> None:
+        imports = [node for node in ast.walk(tree) if isinstance(node, ast.Import | ast.ImportFrom)]
+        self.modules = {"builtins"}.union(
+            alias.asname
+            for node in imports
+            if isinstance(node, ast.Import)
+            for alias in node.names
+            if alias.name == "builtins" and alias.asname
+        )
+        self.aliases = {
+            alias.asname: alias.name
+            for node in imports
+            if isinstance(node, ast.ImportFrom) and node.module == "builtins"
+            for alias in node.names
+            if alias.asname
+        }
+
+    def name(self, node: ast.expr) -> str | None:
+        """The builtin a name or builtins attribute stands for; None for anything else (e.g. errors.ValueError)."""
+        if isinstance(node, ast.Name):
+            return self.aliases.get(node.id, node.id)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in self.modules:
+            return node.attr
+        return None
+
+
+def _caught(handler: ast.ExceptHandler, builtins: _Builtins) -> set[str]:
+    """The builtin exceptions a handler catches; a bare except catches everything.
+
+    A handler naming a tuple constant is not resolved.
     """
     if handler.type is None:
         return {"BaseException"}
     types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
-    return {node.attr if isinstance(node, ast.Attribute) else ast.unparse(node) for node in types}
+    return {name for node in types if (name := builtins.name(node)) is not None}
 
 
-def _conversion_names(tree: ast.AST) -> set[str]:
-    """int, float and every alias a "from builtins import int as ..." gives them in the module."""
-    return set(_CONVERSIONS).union(
-        alias.asname
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module == "builtins"
-        for alias in node.names
-        if alias.name in _CONVERSIONS and alias.asname
-    )
+def _catches_value_error(node: ast.Try | ast.TryStar, builtins: _Builtins) -> bool:
+    return any(_caught(handler, builtins) & _CATCHES_VALUE_ERROR for handler in node.handlers)
 
 
-def _builtins_names(tree: ast.AST) -> set[str]:
-    """builtins and every name an "import builtins as ..." gives it in the module."""
-    return {"builtins"}.union(
-        alias.asname
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-        if alias.name == "builtins" and alias.asname
-    )
+def _guarded_nodes(statements: list[ast.stmt], builtins: _Builtins) -> Iterator[ast.AST]:
+    """The nodes a try body runs under its handlers.
+
+    Not the bodies of nested functions and lambdas (they run later; their decorators and defaults run now, and
+    a class body runs now too), nor the body of a nested try that catches ValueError itself (that try is checked
+    on its own).
+    """
+    stack: list[ast.AST] = list(statements)
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            if not isinstance(node, ast.Lambda):
+                stack.extend(node.decorator_list)
+            stack.extend([*node.args.defaults, *(default for default in node.args.kw_defaults if default)])
+            continue
+        if isinstance(node, ast.Try | ast.TryStar) and _catches_value_error(node, builtins):
+            stack.extend([*node.handlers, *node.orelse, *node.finalbody])
+            continue
+        stack.extend(ast.iter_child_nodes(node))
 
 
-def _is_conversion(node: ast.AST, names: set[str], modules: set[str]) -> bool:
-    """Whether node calls int() or float() by its name, an alias of it or as an attribute of builtins.
+def _is_conversion(node: ast.AST, builtins: _Builtins) -> bool:
+    """Whether node calls int() or float() by its name, an import alias of it or as an attribute of builtins.
 
     A conversion bound to another name at runtime (to_int = int) is not seen.
     """
-    if not isinstance(node, ast.Call):
-        return False
-    func = node.func
-    if isinstance(func, ast.Name):
-        return func.id in names
-    return (
-        isinstance(func, ast.Attribute)
-        and func.attr in _CONVERSIONS
-        and isinstance(func.value, ast.Name)
-        and func.value.id in modules
-    )
+    return isinstance(node, ast.Call) and builtins.name(node.func) in _CONVERSIONS
 
 
 def _violations(source: str, filename: str) -> list[str]:
@@ -88,23 +113,25 @@ def _violations(source: str, filename: str) -> list[str]:
     Only conversions called in the try body itself count; one inside a called helper is not seen.
     """
     tree = ast.parse(source, filename)
-    names, modules = _conversion_names(tree), _builtins_names(tree)
+    builtins = _Builtins(tree)
     found = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Try | ast.TryStar) or not any(
-            _is_conversion(inner, names, modules) for statement in node.body for inner in ast.walk(statement)
+            _is_conversion(inner, builtins) for inner in _guarded_nodes(node.body, builtins)
         ):
             continue
-        caught = set().union(*(_caught(handler) for handler in node.handlers))
+        caught = set().union(*(_caught(handler, builtins) for handler in node.handlers))
         if "ValueError" in caught and not caught & _COVERS_OVERFLOW:
             found.append(f"{filename}:{node.lineno}")
     return found
 
 
 def test_value_error_handlers_around_conversions_also_catch_overflow_error() -> None:
+    paths = sorted(_PACKAGE.rglob("*.py"))
+    assert _PACKAGE / "client.py" in paths  # the scan reaches the package, so an empty result means something
     violations = [
         violation
-        for path in sorted(_PACKAGE.rglob("*.py"))
+        for path in paths
         for violation in _violations(path.read_text(encoding="utf-8"), path.relative_to(_PACKAGE.parent).as_posix())
     ]
     assert not violations, "except ValueError around int()/float() without OverflowError: " + ", ".join(violations)
@@ -121,6 +148,34 @@ def test_value_error_handlers_around_conversions_also_catch_overflow_error() -> 
         ("try:\n    builtins.float(x)\nexcept ValueError:\n    pass\n", ["m.py:1"]),
         ("import builtins as b\ntry:\n    b.int(x)\nexcept ValueError:\n    pass\n", ["m.py:2"]),
         ("from builtins import int as to_int\ntry:\n    to_int(x)\nexcept ValueError:\n    pass\n", ["m.py:2"]),
+        ("from builtins import ValueError as VE\ntry:\n    int(x)\nexcept VE:\n    pass\n", ["m.py:2"]),
+        ("try:\n    int(x)\nexcept errors.ValueError:\n    pass\n", []),  # not the builtin
+        ("try:\n    def f():\n        int(x)\nexcept ValueError:\n    pass\n", []),  # f runs later
+        (
+            "try:\n    try:\n        int(x)\n    except (ValueError, OverflowError):\n        pass\n"
+            "except ValueError:\n    pass\n",
+            [],
+        ),
+        (
+            "try:\n    try:\n        int(x)\n    except TypeError:\n        pass\nexcept ValueError:\n    pass\n",
+            ["m.py:1"],
+        ),
+        ("try:\n    try:\n        int(x)\n    except Exception:\n        pass\nexcept ValueError:\n    pass\n", []),
+        (
+            "try:\n    try:\n        pass\n    except ValueError:\n        int(x)\nexcept ValueError:\n    pass\n",
+            ["m.py:1"],
+        ),
+        (
+            "try:\n    try:\n        pass\n    except ValueError:\n        pass\n    finally:\n        int(x)\n"
+            "except ValueError:\n    pass\n",
+            ["m.py:1"],
+        ),
+        ("try:\n    class A:\n        y = int(x)\nexcept ValueError:\n    pass\n", ["m.py:1"]),
+        ("try:\n    def f(a=int(x)):\n        pass\nexcept ValueError:\n    pass\n", ["m.py:1"]),
+        ("try:\n    async def f():\n        int(x)\nexcept ValueError:\n    pass\n", []),
+        ("try:\n    f = lambda: int(x)\nexcept ValueError:\n    pass\n", []),
+        ("import os as b\ntry:\n    b.int(x)\nexcept ValueError:\n    pass\n", []),
+        ("from errors import ValueError as VE\ntry:\n    int(x)\nexcept VE:\n    pass\n", []),
         ("try:\n    int(x)\nexcept (ValueError, OverflowError):\n    pass\n", []),
         ("try:\n    int(x)\nexcept ValueError:\n    pass\nexcept OverflowError:\n    pass\n", []),
         ("try:\n    int(x)\nexcept ArithmeticError:\n    pass\nexcept ValueError:\n    pass\n", []),
@@ -139,6 +194,20 @@ def test_value_error_handlers_around_conversions_also_catch_overflow_error() -> 
         "qualified-conversion",
         "aliased-builtins-module",
         "aliased-conversion",
+        "aliased-exception",
+        "foreign-value-error",
+        "conversion-in-a-nested-function",
+        "inner-try-handles-it",
+        "inner-try-without-value-error",
+        "inner-try-catches-everything",
+        "conversion-in-the-inner-handler",
+        "conversion-in-the-inner-finally",
+        "class-body-runs-now",
+        "default-argument-runs-now",
+        "conversion-in-a-nested-async-function",
+        "conversion-in-a-lambda",
+        "other-module-alias",
+        "foreign-import-alias",
         "tuple-with-overflow",
         "separate-overflow-handler",
         "arithmetic-error",
@@ -200,32 +269,49 @@ def _is_fixture(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     )
 
 
-def _saved_limits(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-    """The names a function assigns the result of sys.get_int_max_str_digits() to."""
+def _saved_limits(statements: list[ast.stmt]) -> set[str]:
+    """The names these statements (not nested ones) assign the result of sys.get_int_max_str_digits() to."""
     return {
         target.id
-        for node in ast.walk(function)
-        if isinstance(node, ast.Assign)
-        and isinstance(node.value, ast.Call)
-        and ast.unparse(node.value.func).endswith(_DIGIT_LIMIT_GETTER)
-        for target in node.targets
+        for statement in statements
+        if isinstance(statement, ast.Assign)
+        and isinstance(statement.value, ast.Call)
+        and ast.unparse(statement.value.func).endswith(_DIGIT_LIMIT_GETTER)
+        for target in statement.targets
         if isinstance(target, ast.Name)
     }
 
 
-def _restores_after_yield(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """Whether the function, after its first yield, sets the limit back to a value it saved before."""
-    yields = [node.lineno for node in ast.walk(function) if isinstance(node, ast.Yield)]
-    saved = _saved_limits(function)
-    return bool(yields) and any(
-        isinstance(node, ast.Call)
-        and _is_setter(node.func)
-        and node.lineno > min(yields)
-        and len(node.args) == 1
-        and isinstance(node.args[0], ast.Name)
-        and node.args[0].id in saved
-        for node in ast.walk(function)
+def _is_yield(statement: ast.stmt) -> bool:
+    return isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Yield)
+
+
+def _is_restore(statement: ast.stmt, saved: set[str]) -> bool:
+    """Whether the statement is a call that sets the limit to one of the saved names."""
+    return (
+        isinstance(statement, ast.Expr)
+        and isinstance(call := statement.value, ast.Call)
+        and _is_setter(call.func)
+        and len(call.args) == 1
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id in saved
     )
+
+
+def _restores_after_yield(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether the function saves the limit before its yield and always sets that value back after it.
+
+    Saving, yield and restore must be statements of the function body itself, or the yield sits in a try whose
+    finally restores; a restore in a branch, a loop or a nested function may not run, so it does not count.
+    """
+    body = function.body
+    for index, statement in enumerate(body):
+        saved = _saved_limits(body[:index])
+        if _is_yield(statement):
+            return any(_is_restore(after, saved) for after in body[index + 1 :])
+        if isinstance(statement, ast.Try) and any(_is_yield(inner) for inner in statement.body):
+            return any(_is_restore(after, saved) for after in [*statement.finalbody, *body[index + 1 :]])
+    return False
 
 
 def _restoring_fixture_lines(tree: ast.AST) -> set[int]:
@@ -277,6 +363,15 @@ def test_the_guard_spares_the_top_conftest_fixture_only(tmp_path: Path) -> None:
     assert _digit_limit_callers(tmp_path) == ["sub/conftest.py:4", "sub/conftest.py:6"]
 
 
+def test_the_guard_recognises_the_real_restoring_fixture() -> None:
+    """Without this, a guard that no longer sees the fixture would only show up as a failing scan."""
+    tree = ast.parse((_TESTS / "conftest.py").read_text(encoding="utf-8"))
+    (fixture,) = (
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "int_max_str_digits"
+    )
+    assert _restores_after_yield(fixture)
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
@@ -315,6 +410,25 @@ _RESTORING_FIXTURE = (
         (_RESTORING_FIXTURE + "sys.set_int_max_str_digits(0)\n", ["m.py:7"]),
         (_RESTORING_FIXTURE.replace("def limit", "async def limit"), []),
         (_RESTORING_FIXTURE.replace("digits(previous)", "digits(0)"), ["m.py:4", "m.py:6"]),
+        (
+            "@pytest.fixture\ndef limit():\n    sys.set_int_max_str_digits(4300)\n    yield\n"
+            "    previous = sys.get_int_max_str_digits()\n    sys.set_int_max_str_digits(previous)\n",
+            ["m.py:3", "m.py:6"],
+        ),
+        (
+            _RESTORING_FIXTURE.replace(
+                "    sys.set_int_max_str_digits(previous)\n",
+                "    if flag:\n        sys.set_int_max_str_digits(previous)\n",
+            ),
+            ["m.py:4", "m.py:7"],
+        ),
+        (
+            _RESTORING_FIXTURE.replace(
+                "    yield\n    sys.set_int_max_str_digits(previous)\n",
+                "    try:\n        yield\n    finally:\n        sys.set_int_max_str_digits(previous)\n",
+            ),
+            [],
+        ),
     ],
     ids=[
         "restoring-fixture",
@@ -325,6 +439,9 @@ _RESTORING_FIXTURE = (
         "outside-the-fixture",
         "async-restoring-fixture",
         "sets-another-value-after-yield",
+        "saves-the-limit-after-yield",
+        "restore-in-a-branch",
+        "restore-in-finally",
     ],
 )
 def test_the_guard_spares_only_a_fixture_that_restores_the_digit_limit(source: str, expected: list[str]) -> None:
