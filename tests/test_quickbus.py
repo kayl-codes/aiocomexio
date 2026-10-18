@@ -823,6 +823,14 @@ def test_plain_io_id_string_is_canonical() -> None:
     assert (ios["11"]["id"], ios["11"]["value"], ios["11"]["quickbus"]) == ("11", 1, None)
 
 
+def _repeat_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "IO ids repeat" in r.getMessage()]
+
+
+def _active_ids_without(*io_ids: str) -> list[str]:
+    return [io["id"] for io in _parse()["io"] if io["id"] not in io_ids]
+
+
 def test_ios_whose_ids_repeat_once_canonical_are_left_out(caplog: pytest.LogCaptureFixture) -> None:
     """ "211" and "00211" would share one live state and one pushed id — neither of them is meant."""
     conf = load_json_fixture("config_quickbus.json")
@@ -831,13 +839,10 @@ def test_ios_whose_ids_repeat_once_canonical_are_left_out(caplog: pytest.LogCapt
     with caplog.at_level(logging.WARNING):
         result = _parse(conf)
 
-    active_ids = [io["id"] for io in result["io"]]
-    assert "211" not in active_ids
-    assert {"201", "203", "213"} <= set(active_ids)
-    assert (
-        "1 IO ids repeat, their 2 IOs are left out of the active IOs (no entity, no Web-IO command): 211 (ext 1)"
-        in caplog.text
-    )
+    assert [io["id"] for io in result["io"]] == _active_ids_without("202", "211")
+    assert _repeat_warnings(caplog) == [
+        "1 IO ids repeat, their 2 active IOs are left out of the active IOs (no entity, no Web-IO command): 211 (ext 1)"
+    ]
 
 
 def test_ios_whose_ids_repeat_across_extensions_are_left_out(caplog: pytest.LogCaptureFixture) -> None:
@@ -848,14 +853,25 @@ def test_ios_whose_ids_repeat_across_extensions_are_left_out(caplog: pytest.LogC
     with caplog.at_level(logging.WARNING):
         result = _parse(conf)
 
-    active_ids = [io["id"] for io in result["io"]]
-    assert "211" not in active_ids
-    assert {"201", "213"} <= set(active_ids)
+    assert [io["id"] for io in result["io"]] == _active_ids_without("301", "211")
     assert [io["ext_id"] for io in result["io_all"] if io["id"] == "211"] == ["1", "2"]
-    assert (
-        "1 IO ids repeat, their 2 IOs are left out of the active IOs (no entity, no Web-IO command): 211 (ext 1, 2)"
-        in caplog.text
-    )
+    assert _repeat_warnings(caplog) == [
+        "1 IO ids repeat, their 2 active IOs are left out of the active IOs (no entity, no Web-IO command): "
+        "211 (ext 1, 2)"
+    ]
+
+
+def test_inactive_io_repeating_an_id_is_no_conflict(caplog: pytest.LogCaptureFixture) -> None:
+    """An inactive IO is neither polled nor pushed, so it must not knock out the active one."""
+    conf = load_json_fixture("config_quickbus.json")
+    conf["FubModules"]["1"]["2"]["inoutput"]["301"]["Id"] = "0211"
+    conf["FubModules"]["1"]["2"]["inoutput"]["301"]["Active"] = 0
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    assert [io["id"] for io in result["io"]] == _active_ids_without("301")
+    assert _repeat_warnings(caplog) == []
 
 
 def test_unnamed_device_gets_a_fallback_name() -> None:
@@ -1099,6 +1115,17 @@ def test_malformed_marker_and_knx_ids_do_not_abort_the_build(bad_id: Any) -> Non
 
     assert {"HA M Kaputt", "HA K Kaputt"} <= set(names)
     assert quickbus == build_webio_commands(_HOOK, _parse(), WebioClass.QUICKBUS)
+
+
+@pytest.mark.parametrize("item_id", [7, "7", "007"])
+def test_ignored_ids_match_by_value(item_id: Any) -> None:
+    result = _parse()
+    result["markers"] = [{"id": item_id, "name": "M Ignoriert", "type": "digital"}]
+    result["knx"] = [{"id": item_id, "name": "K Ignoriert", "type": "digital"}]
+
+    names = {cmd["Name"] for cmd in build_webio_commands(_HOOK, result, None, {7}, {7})}
+
+    assert not {"HA M Ignoriert", "HA K Ignoriert"} & names
 
 
 def test_ignored_items_do_not_collide(caplog: pytest.LogCaptureFixture) -> None:

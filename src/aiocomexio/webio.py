@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Collection, Mapping
 from typing import Any
 
-from .config import TYPE_ANALOG, _strict_id, log_excerpt
+from .config import TYPE_ANALOG, log_excerpt
 from .const import (
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_INT16_DANGER_ZONE,
@@ -338,14 +338,18 @@ def build_webio_commands(
 
 
 def _is_ignored(item_id: Any, ignored_ids: Collection[int] | None) -> bool:
-    """Whether item_id is one of ignored_ids; an id _strict_id rejects is never ignored.
+    """Whether item_id is one of ignored_ids; an id int() cannot read is never ignored.
 
     parse_config keeps a marker/KNX id as it comes, so a malformed one must not abort the whole
-    build (and with it a per-class upload of an unrelated class).
+    build (and with it a per-class upload of an unrelated class). int() also raises ValueError for
+    a digit string beyond Python's int-to-str limit.
     """
     if not ignored_ids:
         return False
-    return (strict_id := _strict_id(item_id)) is not None and int(strict_id) in ignored_ids
+    try:
+        return int(item_id) in ignored_ids
+    except (TypeError, ValueError):
+        return False
 
 
 def _without_colliding_names(

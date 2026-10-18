@@ -1055,25 +1055,25 @@ def _ambiguous_ios(ext_id: str, entries: list[dict[str, Any]]) -> set[int]:
     return {pos for positions in repeated for pos in positions}
 
 
-def _repeated_io_ids(entries: list[dict[str, Any]]) -> set[str]:
-    """The canonical IO "Id"s more than one IO has, across all extensions ("211" and "00211").
+def _repeated_io_ids(active: list[dict[str, Any]]) -> set[str]:
+    """The canonical IO "Id"s more than one active IO has, across all extensions ("211" and "00211").
 
     The Id keys the live states and the Quickbus payload (ComexioClient.get_io_live_states even
     refuses one IO id under two extension ids), so the IOs would read and push each other's
-    values — all of them are left out. Comexio should never list such a pair.
+    values — all of them are left out. Only active IOs count: an inactive one is neither polled
+    nor pushed. Comexio should never list such a pair.
     """
     by_id: dict[str, list[str]] = {}
-    for entry in entries:
+    for entry in active:
         by_id.setdefault(entry["id"], []).append(entry["ext_id"])
     repeated = {io_id: ext_ids for io_id, ext_ids in by_id.items() if len(ext_ids) > 1}
     if repeated:
+        labels = [f"{io_id} (ext {', '.join(dict.fromkeys(repeated[io_id]))})" for io_id in sorted(repeated, key=int)]
         _LOGGER.warning(
-            "%d IO ids repeat, their %d IOs are left out of the active IOs (no entity, no Web-IO command): %s",
+            "%d IO ids repeat, their %d active IOs are left out of the active IOs (no entity, no Web-IO command): %s",
             len(repeated),
             sum(map(len, repeated.values())),
-            log_excerpt(
-                [f"{io_id} (ext {', '.join(dict.fromkeys(ext_ids))})" for io_id, ext_ids in sorted(repeated.items())]
-            ),
+            log_excerpt(labels),
         )
     return set(repeated)
 
@@ -1174,7 +1174,7 @@ def _process_ios(
         data[_KEY_QUICKBUS_DEVICES].update(qb_devices)
         qb_map = _quickbus_io_map(ext_id, ext_content, qb_devices, qb_dropped)
         _process_extension_ios(data, ext_id, ext_content, builder, _QuickbusContext(ext_id, qb_devices, qb_map))
-    if repeated := _repeated_io_ids(data["io_all"]):
+    if repeated := _repeated_io_ids(data["io"]):
         data["io"] = [entry for entry in data["io"] if entry["id"] not in repeated]
 
 
