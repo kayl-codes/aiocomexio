@@ -72,7 +72,8 @@ published on PyPI and consumed by the Home Assistant integration
   `<select>` (no `multiple`) the last of several `selected` options counts, and without one the first; a
   `<select multiple>` keeps every selected option and none when none is selected, so a field that holds one value
   reads it as unknown. An `<option>` without a `value` attribute has its text (whitespace collapsed) as value, and a
-  `<select>` start tag inside an open select ends that select. A cut-off answer — a `<select>`
+  `<select>` start tag inside an open select ends that select. The slash of a start tag is ignored: `<select/>`
+  and `<option/>` open their element. A cut-off answer — a `<select>`
   without its `</select>`, so its options may be incomplete — reads as unknown, never as the first option: that
   would be a plausible-looking but wrong value. Void elements such as `<input>` have no end tag and are read as
   they are; a cut-off `<input>` tag is dropped, so its field reads as unknown too. A regex that tries to cover these cases outgrows

@@ -981,6 +981,9 @@ _RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" val
         pytest.param(
             '<select id="protocol"><option><textarea>5</textarea>1</option></select>', 1, id="textarea-in-the-option"
         ),
+        # A browser ignores the slash of a start tag: <select/> and <option/> open their element.
+        pytest.param('<select id="protocol"/><option value="1"></select>', 1, id="self-closing-select-opens-it"),
+        pytest.param('<select id="protocol"><option/>1</select>', 1, id="self-closing-option-keeps-its-text"),
     ],
 )
 async def test_get_webio_command_form_reads_protocol(
@@ -1008,6 +1011,9 @@ async def test_get_webio_command_form_reads_protocol(
         ("<option value=1=2 selected>", "'1=2'"),  # an unquoted value keeps its "="
         # The last selected option counts, even when an earlier one has a number.
         ('<option value="0" selected>HTTP</option><option value="x" selected>', "'x'"),
+        ('<option value="1234567890" selected>', "'1234567890'"),  # no protocol is that large
+        # int() refuses more than 4300 digits; the value is shown capped.
+        ('<option value="' + "9" * 5000 + '" selected>', "'" + "9" * 199 + "..."),
     ],
 )
 async def test_get_webio_command_form_non_numeric_protocol_warns(
@@ -1021,7 +1027,7 @@ async def test_get_webio_command_form_non_numeric_protocol_warns(
 
     assert form == WebioCommandForm(min=0.0, max=1.0, protocol=None)
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.WARNING, f"Web-IO command 1324 has a non-numeric protocol value: {shown}")
+        (logging.WARNING, f"Web-IO command 1324 has an unknown protocol value: {shown}")
     ]
 
 

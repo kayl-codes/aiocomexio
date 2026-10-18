@@ -29,8 +29,9 @@ _CONVERSIONS = frozenset({"int", "float"})
 _COVERS_OVERFLOW = frozenset({"OverflowError", "ArithmeticError", "Exception", "BaseException"})
 # Names whose handler also catches ValueError.
 _CATCHES_VALUE_ERROR = frozenset({"ValueError", "Exception", "BaseException"})
-_DIGIT_LIMIT_SETTER = "set_int_max_str_digits"
 _DIGIT_LIMIT_GETTER = "get_int_max_str_digits"
+# Derived, not written out: this file is scanned too, and the literal would count as a reference to the setter.
+_DIGIT_LIMIT_SETTER = _DIGIT_LIMIT_GETTER.replace("get_", "set_", 1)
 
 
 class _Builtins:
@@ -80,9 +81,9 @@ def _catches_value_error(node: ast.Try | ast.TryStar, builtins: _Builtins) -> bo
 def _guarded_nodes(statements: list[ast.stmt], builtins: _Builtins) -> Iterator[ast.AST]:
     """The nodes a try body runs under its handlers.
 
-    Not the bodies of nested functions and lambdas (they run later; their decorators and defaults run now, and
-    a class body runs now too), nor the body of a nested try that catches ValueError itself (that try is checked
-    on its own).
+    Not the bodies of nested functions and lambdas (they run later; their decorators, defaults and annotations
+    run now, and a class body runs now too), nor the body of a nested try that catches ValueError itself (that
+    try is checked on its own).
     """
     stack: list[ast.AST] = list(statements)
     while stack:
@@ -90,7 +91,10 @@ def _guarded_nodes(statements: list[ast.stmt], builtins: _Builtins) -> Iterator[
         yield node
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
             if not isinstance(node, ast.Lambda):
-                stack.extend(node.decorator_list)
+                stack.extend([*node.decorator_list, *([node.returns] if node.returns else [])])
+            arguments = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+            arguments += [argument for argument in (node.args.vararg, node.args.kwarg) if argument]
+            stack.extend(argument.annotation for argument in arguments if argument.annotation)
             stack.extend([*node.args.defaults, *(default for default in node.args.kw_defaults if default)])
             continue
         if isinstance(node, ast.Try | ast.TryStar) and _catches_value_error(node, builtins):
@@ -172,6 +176,12 @@ def test_value_error_handlers_around_conversions_also_catch_overflow_error() -> 
         ),
         ("try:\n    class A:\n        y = int(x)\nexcept ValueError:\n    pass\n", ["m.py:1"]),
         ("try:\n    def f(a=int(x)):\n        pass\nexcept ValueError:\n    pass\n", ["m.py:1"]),
+        ("try:\n    def f(a: int(x)):\n        pass\nexcept ValueError:\n    pass\n", ["m.py:1"]),
+        ("try:\n    def f(*, a: int(x)):\n        pass\nexcept ValueError:\n    pass\n", ["m.py:1"]),
+        ("try:\n    def f(a: int(x), /):\n        pass\nexcept ValueError:\n    pass\n", ["m.py:1"]),
+        ("try:\n    def f(*a: int(x)):\n        pass\nexcept ValueError:\n    pass\n", ["m.py:1"]),
+        ("try:\n    def f(**a: int(x)):\n        pass\nexcept ValueError:\n    pass\n", ["m.py:1"]),
+        ("try:\n    def f() -> int(x):\n        pass\nexcept ValueError:\n    pass\n", ["m.py:1"]),
         ("try:\n    async def f():\n        int(x)\nexcept ValueError:\n    pass\n", []),
         ("try:\n    f = lambda: int(x)\nexcept ValueError:\n    pass\n", []),
         ("import os as b\ntry:\n    b.int(x)\nexcept ValueError:\n    pass\n", []),
@@ -204,6 +214,12 @@ def test_value_error_handlers_around_conversions_also_catch_overflow_error() -> 
         "conversion-in-the-inner-finally",
         "class-body-runs-now",
         "default-argument-runs-now",
+        "annotation-runs-now",
+        "keyword-only-annotation-runs-now",
+        "positional-only-annotation-runs-now",
+        "varargs-annotation-runs-now",
+        "kwargs-annotation-runs-now",
+        "return-annotation-runs-now",
         "conversion-in-a-nested-async-function",
         "conversion-in-a-lambda",
         "other-module-alias",
@@ -302,11 +318,16 @@ def _restores_after_yield(function: ast.FunctionDef | ast.AsyncFunctionDef) -> b
     """Whether the function saves the limit before its yield and always sets that value back after it.
 
     Saving, yield and restore must be statements of the function body itself, or the yield sits in a try whose
-    finally restores; a restore in a branch, a loop or a nested function may not run, so it does not count.
+    finally restores; a restore in a branch, a loop or a nested function may not run, so it does not count. A save
+    after the first setter would keep the changed limit, so only a save before it counts.
     """
     body = function.body
+    first_setter = next(
+        (index for index, statement in enumerate(body) if any(_is_setter(node) for node in ast.walk(statement))),
+        len(body),
+    )
     for index, statement in enumerate(body):
-        saved = _saved_limits(body[:index])
+        saved = _saved_limits(body[: min(index, first_setter)])
         if _is_yield(statement):
             return any(_is_restore(after, saved) for after in body[index + 1 :])
         if isinstance(statement, ast.Try) and any(_is_yield(inner) for inner in statement.body):
@@ -333,12 +354,11 @@ def _digit_limit_setters(source: str, filename: str, *, fixtures_allowed: bool =
     return [f"{filename}:{node.lineno}" for node in ast.walk(tree) if _is_setter(node) and node.lineno not in allowed]
 
 
-def _digit_limit_callers(root: Path, skip: Path | None = None) -> list[str]:
+def _digit_limit_callers(root: Path) -> list[str]:
     """Each setter reference under root; only a restoring fixture in root/conftest.py is spared, not a nested one."""
     return [
         caller
         for path in sorted(root.rglob("*.py"))
-        if path != skip
         for caller in _digit_limit_setters(
             path.read_text(encoding="utf-8"),
             path.relative_to(root).as_posix(),
@@ -349,7 +369,7 @@ def _digit_limit_callers(root: Path, skip: Path | None = None) -> list[str]:
 
 def test_only_a_conftest_fixture_changes_the_int_digit_limit() -> None:
     """The limit is global to the interpreter: a test that sets it without restoring it changes every later test."""
-    callers = _digit_limit_callers(_TESTS, skip=Path(__file__).resolve())
+    callers = _digit_limit_callers(_TESTS)
     assert not callers, "use the int_max_str_digits fixture instead of sys.set_int_max_str_digits: " + ", ".join(
         callers
     )
@@ -429,6 +449,13 @@ _RESTORING_FIXTURE = (
             ),
             [],
         ),
+        (
+            _RESTORING_FIXTURE.replace(
+                "    previous = sys.get_int_max_str_digits()\n    sys.set_int_max_str_digits(4300)\n",
+                "    sys.set_int_max_str_digits(4300)\n    previous = sys.get_int_max_str_digits()\n",
+            ),
+            ["m.py:3", "m.py:6"],
+        ),
     ],
     ids=[
         "restoring-fixture",
@@ -442,6 +469,7 @@ _RESTORING_FIXTURE = (
         "saves-the-limit-after-yield",
         "restore-in-a-branch",
         "restore-in-finally",
+        "saves-the-limit-after-setting-it",
     ],
 )
 def test_the_guard_spares_only_a_fixture_that_restores_the_digit_limit(source: str, expected: list[str]) -> None:

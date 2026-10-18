@@ -144,7 +144,8 @@ _HTML_WHITESPACE_RE = re.compile(f"[{_HTML_WHITESPACE}]+")
 _OPTION_ENDING_TAGS = frozenset({"option", "optgroup", "hr"})
 # The id of the form's protocol <select>, whose options read e.g. <option value="0" selected="selected">.
 _WEBIO_PROTOCOL_SELECT_ID = "protocol"
-_PROTOCOL_VALUE_RE = re.compile(r"\d+", re.ASCII)
+# A protocol is a small number; a longer digit string is none (and int() refuses one beyond 4300 digits).
+_PROTOCOL_VALUE_RE = re.compile(r"\d{1,9}", re.ASCII)
 
 # Plain-text answer of fupValueData for a plan that is not running (instead of a JSON value dict).
 _JSON_START_CHARS = ("{", "[")
@@ -1821,11 +1822,9 @@ class _FormParser(HTMLParser):
             self.handle_form_tag(tag, _first_attributes(attrs))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # A browser ignores the slash of <textarea/> and <title/>: what follows is still their text.
-        if tag in _TEXT_ONLY_ELEMENTS:
-            self.handle_starttag(tag, attrs)
-        else:
-            super().handle_startendtag(tag, attrs)
+        # A browser ignores the slash of an HTML start tag: <select/> opens a select and what follows <textarea/>
+        # is still its text. A void element such as <input/> has no end tag either way.
+        self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
         if self._text_only is None:
@@ -1873,7 +1872,7 @@ class _ProtocolSelectParser(_FormParser):
         self.closed = False
         self.multiple = False
         self.options: list[dict[str, str]] = []
-        self.texts: list[str] = []
+        self.texts: list[list[str]] = []  # the text chunks of each option, joined once at the end
         self._open = False  # any select is open; a <select> inside it only ends it
         self._inside = False  # the open select is the protocol select
         self._in_option = False
@@ -1892,7 +1891,7 @@ class _ProtocolSelectParser(_FormParser):
             self._in_option = tag == "option" and self._inside
             if self._in_option:
                 self.options.append(attributes)
-                self.texts.append("")
+                self.texts.append([])
 
     def handle_form_endtag(self, tag: str) -> None:
         if tag == "select" and self._open:
@@ -1902,7 +1901,7 @@ class _ProtocolSelectParser(_FormParser):
 
     def handle_data(self, data: str) -> None:
         if self._in_option and self._text_only is None:
-            self.texts[-1] += data
+            self.texts[-1].append(data)
 
     def _end_select(self) -> None:
         self.closed = self.closed or self._inside
@@ -1935,18 +1934,19 @@ def _command_protocol(html: str, command_id: str | int) -> int | None:
     if parser.multiple:
         _LOGGER.debug("Web-IO command %r protocol select allows several options", command_id)
         return None
-    options = list(zip(parser.options, parser.texts, strict=True))
+    options = [("".join(chunks), attributes) for attributes, chunks in zip(parser.options, parser.texts, strict=True)]
     if not options:
         _LOGGER.debug("Web-IO command %r protocol select has no option", command_id)
         return None
-    selected = [option for option in options if "selected" in option[0]]
+    selected = [option for option in options if "selected" in option[1]]
     if len(selected) > 1:
         _LOGGER.debug(
             "Web-IO command %r protocol select has %d selected options, the last counts", command_id, len(selected)
         )
-    value = _option_value(*(selected[-1] if selected else options[0]))
+    text, attributes = selected[-1] if selected else options[0]
+    value = _option_value(attributes, text)
     if not _PROTOCOL_VALUE_RE.fullmatch(value):
-        _LOGGER.warning("Web-IO command %r has a non-numeric protocol value: %r", command_id, value)
+        _LOGGER.warning("Web-IO command %r has an unknown protocol value: %s", command_id, _excerpt(value))
         return None
     return int(value)
 
