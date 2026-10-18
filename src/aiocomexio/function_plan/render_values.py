@@ -44,8 +44,10 @@ def _element_analog(
         source = (markers_by_id if etype == 2 else knx_by_id or {}).get(ref_id)
         return None if source is None else source.get("type") == "analog"
     if etype == 1:
+        # is_binary None: an untyped Quickbus IO, kept in io_all for its label only.
         io = ios_by_id.get(ref_id)
-        return None if io is None else not io.get("is_binary", False)
+        binary = None if io is None else io.get("is_binary", False)
+        return None if binary is None else not binary
     if etype == 10:
         webio = webio_by_id.get(ref_id)
         return None if webio is None else bool(webio.get("analog"))

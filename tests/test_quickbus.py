@@ -16,7 +16,7 @@ from aiocomexio import config as config_module
 from aiocomexio.config import ParseOptions, parse_config
 from aiocomexio.const import WebioClass
 from aiocomexio.function_plan.render_geometry import _apply_geometry_target_fields
-from aiocomexio.function_plan.render_values import _pill_parts_io, element_search_id, io_owner
+from aiocomexio.function_plan.render_values import _element_analog, _pill_parts_io, element_search_id, io_owner
 from aiocomexio.webio import build_io_webio_command, build_webio_commands, generate_webio_json
 from tests.common import load_json_fixture
 
@@ -534,6 +534,13 @@ def test_quickbus_ios_without_a_type_row_are_left_out(caplog: pytest.LogCaptureF
     active = {io["id"] for io in result["io"]}
     assert {"201", "202", "211"}.isdisjoint(active)
     assert {"201", "202", "211"} <= _io_all(result).keys()
+    # Kept for plan labels, but a plan must not draw analog pins for an IO of unknown kind.
+    ios_by_id = _io_all(result)
+    assert {ios_by_id[io_id]["is_binary"] for io_id in ("201", "202", "211")} == {None}
+    pill = {"reference": {"type": 1, "ref_id": "201"}}
+    assert _element_analog(pill, {}, {}, ios_by_id) is None
+    assert _element_analog({"reference": {"type": 1, "ref_id": "203"}}, {}, {}, ios_by_id) is True
+    assert _element_analog({"reference": {"type": 1, "ref_id": "11"}}, {}, {}, ios_by_id) is False
     # Typed Quickbus IOs and the plain IO stay.
     assert {"11", "203", "204", "213"} <= active
     assert (
@@ -560,6 +567,7 @@ def test_missing_type_table_keeps_quickbus_ios(io_types: Any, caplog: pytest.Log
         "302",
     }
     assert "no row in the IO type table" not in caplog.text
+    assert all(isinstance(io["is_binary"], bool) for io in result["io_all"])
 
 
 def test_inactive_or_plain_ios_without_a_type_row_give_no_type_warning(caplog: pytest.LogCaptureFixture) -> None:

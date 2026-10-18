@@ -319,7 +319,8 @@ def parse_config(
     addressed by its unique "id" only — its ext_name/identifier pair repeats across devices, so
     ComexioClient.set_io_value cannot reach it: treat it as read-only even when is_input is False.
     Active IOs that repeat an identifier of their own device (Quickbus device or extension), and
-    active Quickbus IOs whose type has no row in a non-empty io_types, land only in "io_all".
+    active Quickbus IOs whose type has no row in a non-empty io_types, land only in "io_all" —
+    the latter with "is_binary" None (kind unknown).
     IOs whose canonical id repeats are left out of "io" (when two active ones share it) and of
     "io_all" (when any two IOs share it, inactive and left-out ones included: a label looked up
     by that id would be arbitrary) — then an active IO can keep its entity but lose its label.
@@ -1211,7 +1212,10 @@ def _process_extension_ios(
             "Skipping %d IO entries of extension %s without a valid Id: %s", len(bad_ids), ext_id, log_excerpt(bad_ids)
         )
     qb.report()
-    left_out = _ambiguous_ios(ext_id, entries) | _untyped_quickbus_ios(ext_id, entries, type_ids, builder.io_types)
+    untyped = _untyped_quickbus_ios(ext_id, entries, type_ids, builder.io_types)
+    for pos in untyped:
+        entries[pos]["is_binary"] = None  # unknown kind: a plan renders its pins as unknown, not analog
+    left_out = _ambiguous_ios(ext_id, entries) | untyped
     data["io_all"].extend(entries)
     data["io"].extend(e for pos, e in enumerate(entries) if not e["inactive"] and pos not in left_out)
 
