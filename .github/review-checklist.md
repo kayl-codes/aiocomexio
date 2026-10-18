@@ -47,6 +47,9 @@ published on PyPI and consumed by the Home Assistant integration
   The documented fallbacks — the generic KNX range when the DPT chain or its `KNX_DPT_ANALOG_RANGES` entry is
   missing, and the identifier-based IO classification when the type row is missing — are intentional and not
   findings unless the diff changes them.
+- **One bad entry does not stop the other classes:** a filter or conversion that runs over every class (markers,
+  IOs, KNX objects) must not fail on malformed data of one class: an invalid value falls back to a default with a
+  warning instead of aborting the upload or build of all the others.
 - **Public API:** fully typed; flag breaking changes to public names or signatures that are not called out in the PR.
 - **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776); no duplicated string literals — extract
   constants (S1192).
@@ -56,6 +59,8 @@ published on PyPI and consumed by the Home Assistant integration
 
 - **Numbers from outside:** a float from Comexio or the caller is checked with `math.isfinite` before use; `nan`
   and `inf` pass every `isinstance` check and every `<`/`>` range check (a comparison with `nan` is always false).
+  A handler that catches `ValueError` around `int()`/`float()` also catches `OverflowError`: `int(float("inf"))`
+  and `float(10**400)` raise it, not `ValueError` (`tests/test_conventions.py` enforces this).
 - **Digits in protocol regexes:** write `\d` (SonarQube S6353 wants it instead of `[0-9]`) and compile with
   `re.ASCII`; without it `\d` also matches non-ASCII digits such as `٣`, which Comexio never sends.
 - **HTML forms are read with `html.parser`, not regexes:** a form field (a `<select>`, its `<option>`s, an
@@ -107,6 +112,10 @@ published on PyPI and consumed by the Home Assistant integration
   present where the contract keeps it (e.g. an inactive IO leaves `io` but stays in `io_all` for labels). A test
   that asserts entries are kept compares the complete expected result — `==` on a list, a sorted list or a
   `collections.Counter`, not on a `set`, which hides duplicates — not a subset or a single member.
+- **Global interpreter settings are restored:** a test that changes one (e.g. `sys.set_int_max_str_digits`) does it
+  in a fixture or `try`/`finally`, never bare; the digit limit goes through the `int_max_str_digits` fixture in
+  `conftest.py` (`tests/test_conventions.py` enforces this). A `pytest.mark.parametrize` with an int beyond 4300
+  digits gets explicit `ids=`: `str()`/`repr()` of it raise `ValueError`.
 
 ## GitHub Actions
 

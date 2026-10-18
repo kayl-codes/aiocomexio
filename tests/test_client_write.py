@@ -752,6 +752,19 @@ async def test_get_webio_command_range_field_without_value_is_none(
     assert await logged_in.get_webio_command_range(1324, 34) == (None, 1.0)
 
 
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e999"])
+async def test_get_webio_command_range_rejects_a_value_that_is_not_finite(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, value: str
+) -> None:
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, f'<input id="min_cmd_io_0" value="{value}">')
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert await logged_in.get_webio_command_range(1324, 34) == (None, None)
+
+    (warning,) = caplog.records
+    assert warning.getMessage() == f"Web-IO command 1324 has a non-numeric min value: {value!r}"
+
+
 async def test_get_webio_command_range_caps_a_long_non_numeric_value_in_the_warning(
     logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -945,7 +958,12 @@ async def test_create_marker(logged_in: ComexioClient, comexio: FakeComexio, bin
 
 @pytest.mark.parametrize(
     ("answer", "error"),
-    [({"ok": False}, ComexioRequestRejectedError), ({"ok": True}, ComexioDataError), ("x", ComexioDataError)],
+    [
+        ({"ok": False}, ComexioRequestRejectedError),
+        ({"ok": True}, ComexioDataError),
+        ("x", ComexioDataError),
+        ({"ok": True, "saved": math.inf}, ComexioDataError),  # int() raises OverflowError, not ValueError
+    ],
 )
 async def test_create_marker_without_id_raises(
     logged_in: ComexioClient, comexio: FakeComexio, answer: Any, error: type[Exception]

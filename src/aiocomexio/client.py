@@ -323,7 +323,7 @@ class ComexioClient:
             salt = base64.b64decode(keys["salt"]).decode(_LOGIN_ENCODING)
             modulus, exponent = int(keys["modulus"], 16), int(keys["exponent"], 16)
             public_key = rsa.RSAPublicNumbers(exponent, modulus).public_key()
-        except (KeyError, TypeError, ValueError) as err:
+        except (KeyError, TypeError, ValueError, OverflowError) as err:
             raise ComexioDataError("Login key response carries no usable RSA key") from err
         nonce = "".join(secrets.choice("0123456789ABCDEF") for _ in range(_LOGIN_NONCE_LENGTH))
         without_password = (salt + nonce).encode(_LOGIN_ENCODING)
@@ -561,7 +561,7 @@ class ComexioClient:
         for marker_id, marker in iter_group(config.variables["FubModules"].get("2")):
             try:
                 titles[int(marker_id)] = str((marker or {}).get("Name") or "")
-            except (AttributeError, TypeError, ValueError):
+            except (AttributeError, TypeError, ValueError, OverflowError):
                 _LOGGER.warning("Skipping malformed marker entry %s", _excerpt(marker_id))
         return titles
 
@@ -949,7 +949,7 @@ class ComexioClient:
             raise ComexioRequestRejectedError(f"{what} was refused: {_excerpt(result)}")
         try:
             marker_id = int(result["saved"])
-        except (KeyError, TypeError, ValueError) as err:
+        except (KeyError, TypeError, ValueError, OverflowError) as err:
             raise ComexioDataError(f"{what}: answer carries no marker id: {_excerpt(result)}") from err
         _LOGGER.debug("Created marker M%s (binary=%s)", marker_id, binary)
         return marker_id
@@ -1727,7 +1727,7 @@ def _positive_id(value: Any) -> int | None:
     if isinstance(value, str) and value.isascii() and value.isdigit():
         try:
             value = int(value)
-        except ValueError:  # beyond Python's int-to-str digit limit
+        except (ValueError, OverflowError):  # beyond Python's int-to-str digit limit
             return None
     return value if _is_int(value) and value > 0 else None
 
@@ -1773,8 +1773,13 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
         if not (value_match := _WEBIO_CMD_VALUE_RE.search(tag_match[0])):
             continue
         try:
-            values[field] = float(value_match[1])
-        except ValueError:
+            number = float(value_match[1])
+        except (ValueError, OverflowError):
+            number = math.nan
+        # float() reads "inf", "nan" and "1e999" without an error, but no Comexio range is one.
+        if math.isfinite(number):
+            values[field] = number
+        else:
             _LOGGER.warning(
                 "Web-IO command %s has a non-numeric %s value: %s", command_id, field, _excerpt(value_match[1])
             )
@@ -1961,7 +1966,7 @@ def _bulk_plan_entry(
     """
     try:
         fub_id = int(fid_str)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         _LOGGER.warning("Skipping bulk function plan entry with non-numeric id %s", _excerpt(fid_str))
         return None
     if fub_id in seen:

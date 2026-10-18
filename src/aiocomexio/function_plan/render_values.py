@@ -88,7 +88,7 @@ def element_id_sort_key(eid: str) -> tuple[int, Any]:
     if eid.isascii() and eid.isdecimal():
         try:
             return (0, int(eid))
-        except ValueError:
+        except (ValueError, OverflowError):
             pass
     return (1, eid)
 
@@ -124,7 +124,7 @@ def _is_high(value: Any) -> bool:
     """
     try:
         return abs(float(value) - 1.0) < 1e-9
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
@@ -134,6 +134,8 @@ def _fmt_value(value: Any) -> str:
         return ""
     try:
         return f"{float(value):g}".replace(".", ",")
+    except OverflowError:
+        return ""  # an int beyond the float range is no Comexio value, and str() of it can exceed the digit limit
     except (TypeError, ValueError):
         return str(value)
 

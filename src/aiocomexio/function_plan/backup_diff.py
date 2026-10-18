@@ -58,7 +58,7 @@ def _is_ascii_int(text: str) -> bool:
         return False
     try:
         int(text)
-    except ValueError:  # beyond Python's int-to-str digit limit
+    except (ValueError, OverflowError):  # beyond Python's int-to-str digit limit
         return False
     return True
 
