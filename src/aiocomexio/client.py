@@ -538,7 +538,7 @@ class ComexioClient:
             try:
                 titles[int(marker_id)] = str((marker or {}).get("Name") or "")
             except (AttributeError, TypeError, ValueError):
-                _LOGGER.warning("Skipping malformed marker entry %r", marker_id)
+                _LOGGER.warning("Skipping malformed marker entry %s", _excerpt(marker_id))
         return titles
 
     async def is_logged_in(self) -> bool:
@@ -1667,7 +1667,9 @@ def _find_by_label(entries: Mapping[str, Any], field: str, label: str) -> str | 
     for key, entry in iter_group(entries):
         value = entry.get(field) if isinstance(entry, Mapping) else None
         if not isinstance(value, str) or str(entry.get(_WEBIO_LIST_ID_FIELD, key)) != key:
-            raise ComexioDataError(f"Web-IO list entry {key!r} has no {field!r} or a different Id: {_excerpt(entry)}")
+            raise ComexioDataError(
+                f"Web-IO list entry {_excerpt(key)} has no {field!r} or a different Id: {_excerpt(entry)}"
+            )
         candidates.append((key, value))
     exact = [key for key, value in candidates if value == label]
     folded = [key for key, value in candidates if value.casefold() == label.casefold()]
@@ -1739,7 +1741,9 @@ def _command_range(html: str, command_id: str | int) -> tuple[float | None, floa
         try:
             values[field] = float(value_match[1])
         except ValueError:
-            _LOGGER.warning("Web-IO command %s has a non-numeric %s value: %r", command_id, field, value_match[1])
+            _LOGGER.warning(
+                "Web-IO command %s has a non-numeric %s value: %s", command_id, field, _excerpt(value_match[1])
+            )
     if not matched:
         raise _missing_data_error(html, f"Web-IO command {command_id} edit form has no min/max fields")
     return values["min"], values["max"]
@@ -1861,7 +1865,7 @@ def _bulk_plan_entry(
     try:
         fub_id = int(fid_str)
     except (TypeError, ValueError):
-        _LOGGER.warning("Skipping bulk function plan entry with non-numeric id %r", fid_str)
+        _LOGGER.warning("Skipping bulk function plan entry with non-numeric id %s", _excerpt(fid_str))
         return None
     if fub_id in seen:
         raise ComexioDataError(f"Bulk function plan payload lists plan {fub_id} twice")
