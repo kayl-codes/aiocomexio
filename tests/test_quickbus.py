@@ -795,6 +795,24 @@ def test_device_id_string_is_canonical() -> None:
     assert _io_all(result)["211"]["quickbus"] == {"device_id": "2", "name": "MT Bad"}
 
 
+def test_io_id_string_is_canonical() -> None:
+    """The entry id, the live-state key and the pushed id use the canonical form the mapping uses."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["211"]["Id"] = "00211"
+    _base_ext(conf)["inoutput"]["213"]["Id"] = "00213"
+    del _base_ext(conf)["inoutput"]["213"]["Identifier"]
+
+    result = _parse(conf, io_live_states={"211": "1"})
+
+    ios = _io_all(result)
+    assert "00211" not in ios
+    assert (ios["211"]["quickbus"], ios["211"]["value"]) == ({"device_id": "2", "name": "MT Bad"}, 1)
+    # Without an identifier the id stands in for it, canonical as well.
+    assert (ios["213"]["identifier"], ios["213"]["name"]) == ("213", "MT Bad 213")
+    commands = {cmd["Name"]: cmd for cmd in build_webio_commands(_HOOK, result, WebioClass.QUICKBUS)}
+    assert 'id="211"' in commands["HA QB2 MT Bad G1"]["Data"]
+
+
 def test_unnamed_device_gets_a_fallback_name() -> None:
     conf = load_json_fixture("config_quickbus.json")
     _base_ext(conf)["lowcan"]["2"]["Name"] = ""

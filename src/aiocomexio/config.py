@@ -1109,12 +1109,12 @@ def _process_extension_ios(
                 "Skipping empty/non-dict IO entry %s of extension %s: %s", io_id, ext_id, _short_repr(io_item)
             )
             continue
-        if _strict_id(io_item.get("Id")) is None:
+        if (strict_id := _strict_id(io_item.get("Id"))) is None:
             # The Id feeds unique_id/entity_id and the Quickbus payload; str() of a huge int even raises.
             bad_ids.append(f"{io_id}: {_short_repr(io_item.get('Id'))}")
             continue
         qb_device, is_input = qb.resolve(io_item)
-        entry = builder.build(io_item, ext_name, qb_device, is_input)
+        entry = builder.build(io_item, strict_id, ext_name, qb_device, is_input)
         entry["offline"] = ext_offline
         # The extension group key; ComexioClient.get_io_live_states needs it as "ExtId".
         entry["ext_id"] = ext_id
@@ -1179,10 +1179,16 @@ class _IoEntryBuilder:
     io_live_states: Mapping[str, Any]
 
     def build(
-        self, io_item: Mapping[str, Any], ext_name: str, qb_device: Mapping[str, Any] | None, is_input: bool | None
+        self,
+        io_item: Mapping[str, Any],
+        io_id: str,
+        ext_name: str,
+        qb_device: Mapping[str, Any] | None,
+        is_input: bool | None,
     ) -> dict[str, Any]:
         return _build_io_entry(
             io_item,
+            io_id,
             ext_name,
             self.io_types,
             self.io_input_types,
@@ -1195,6 +1201,7 @@ class _IoEntryBuilder:
 
 def _build_io_entry(
     io_item: Mapping[str, Any],
+    io_id: str,
     ext_name: str,
     io_types: Mapping[str, Any],
     io_input_types: Mapping[str, Any],
@@ -1206,13 +1213,16 @@ def _build_io_entry(
 ) -> dict[str, Any]:
     """Build one IO entry (without the extension's offline flag).
 
+    io_id is the IO's "Id" in _strict_id's canonical form ("00211" -> "211"), the key the Quickbus
+    mapping and the live states use as well.
+
     An IO of a Quickbus device (qb_device) is labelled with the device name instead of the
     extension name, like Comexio Studio's "MT1 # G20"; the {ExtName} schema placeholder then
     renders that device name as well. is_input overrides the direction derived from the
     identifier and $IOInputTypes (a Quickbus IO brings its own, see _quickbus_io_direction).
     """
     # A numeric identifier is stringified, not replaced — it feeds unique_id/entity_id.
-    ident = _label(io_item.get("Identifier")) or str(io_item.get("Id", "unknown"))
+    ident = _label(io_item.get("Identifier")) or io_id
     raw_desc = io_item.get("Description")
     description = _io_description(raw_desc if isinstance(raw_desc, str) else "", ident)
     type_info = _table_entry(io_types, io_item.get("InOutputTypeId"))
@@ -1248,7 +1258,6 @@ def _build_io_entry(
     )
     if is_input is None:
         is_input = _io_direction(ident_upper, type_id_raw, io_input_types)
-    io_id = str(io_item.get("Id"))
     return {
         "id": io_id,
         "ext_name": ext_name,
