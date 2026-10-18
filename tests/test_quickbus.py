@@ -1184,6 +1184,10 @@ def test_unusable_type_bounds_give_the_default_range(v_min: Any, v_max: Any, cap
         result = _with_type_bounds(v_min, v_max)
 
     assert {(io["min"], io["max"]) for io in result["io_all"]} == {(None, None)}
+    # A bad bound must not drop an IO, or the range checks below would pass on fewer (or no) IOs.
+    assert result["io"]
+    assert [io["id"] for io in result["io"]] == [io["id"] for io in _parse()["io"]]
+    assert {io["is_binary"] for io in result["io"]} == {True, False}
     for io in result["io"]:
         command = build_io_webio_command(io, _HOOK)
         actual_range = (command["Min"], command["Max"])
