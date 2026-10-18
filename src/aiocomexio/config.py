@@ -308,7 +308,7 @@ def parse_config(
     that — no knx_composite tags either. A consumer that builds entities from those tags should
     keep passing its last good catalog when a catalog fetch fails, or the pairs fall apart.
 
-    Returns a dict with the keys markers, io (active IOs), io_all (every IO, for labels), knx,
+    Returns a dict with the keys markers, io (active IOs), io_all (every IO, for labels; see below), knx,
     webio_commands (the consumer's own classes, keyed by command name), webio_command_duplicates
     (the further stored commands of a name webio_commands already holds, same fields plus "name";
     the first one of a name wins, in WebioClass order — a consumer can delete the others by
@@ -320,6 +320,9 @@ def parse_config(
     ComexioClient.set_io_value cannot reach it: treat it as read-only even when is_input is False.
     Active IOs that repeat an identifier of their own device (Quickbus device or extension), and
     active Quickbus IOs whose type has no row in a non-empty io_types, land only in "io_all".
+    IOs whose canonical id repeats are left out of "io" (when two active ones share it) and of
+    "io_all" (when any two IOs share it, inactive and left-out ones included: a label looked up
+    by that id would be arbitrary) — then an active IO can keep its entity but lose its label.
     """
     options = options or ParseOptions()
     fub_modules = conf.get("FubModules")
@@ -1063,19 +1066,45 @@ def _repeated_io_ids(active: list[dict[str, Any]]) -> set[str]:
     values — all of them are left out. Only active IOs count: an inactive one is neither polled
     nor pushed. Comexio should never list such a pair.
     """
-    by_id: dict[str, list[str]] = {}
-    for entry in active:
-        by_id.setdefault(entry["id"], []).append(entry["ext_id"])
-    repeated = {io_id: ext_ids for io_id, ext_ids in by_id.items() if len(ext_ids) > 1}
+    repeated = _ext_ids_of_repeated_ids(active)
     if repeated:
-        labels = [f"{io_id} (ext {', '.join(dict.fromkeys(repeated[io_id]))})" for io_id in sorted(repeated, key=int)]
         _LOGGER.warning(
-            "%d IO ids repeat, their %d active IOs are left out of the active IOs (no entity, no Web-IO command): %s",
+            "%d IO ids repeat, their %d active IOs are left out (no entity, no Web-IO command, no plan label): %s",
             len(repeated),
             sum(map(len, repeated.values())),
-            log_excerpt(labels),
+            _repeat_labels(repeated),
         )
     return set(repeated)
+
+
+def _unlabelled_io_ids(every_io: list[dict[str, Any]], warned: set[str]) -> set[str]:
+    """The canonical IO "Id"s more than one IO has, inactive and left-out ones included; no plan label.
+
+    A plan renderer looks an IO up by its id alone, so it would show an arbitrary one of them —
+    the plan falls back to its bare reference instead. Ids _repeated_io_ids already warned about
+    are not logged again.
+    """
+    repeated = _ext_ids_of_repeated_ids(every_io)
+    if unwarned := {io_id: ext_ids for io_id, ext_ids in repeated.items() if io_id not in warned}:
+        _LOGGER.warning(
+            "%d IO ids repeat among all IOs (inactive and left-out ones included), none of them gets a plan label: %s",
+            len(unwarned),
+            _repeat_labels(unwarned),
+        )
+    return set(repeated)
+
+
+def _ext_ids_of_repeated_ids(entries: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Canonical IO id -> the extension ids of its IOs, for every id more than one entry has."""
+    by_id: dict[str, list[str]] = {}
+    for entry in entries:
+        by_id.setdefault(entry["id"], []).append(entry["ext_id"])
+    return {io_id: ext_ids for io_id, ext_ids in by_id.items() if len(ext_ids) > 1}
+
+
+def _repeat_labels(repeated: dict[str, list[str]]) -> str:
+    labels = [f"{io_id} (ext {', '.join(dict.fromkeys(repeated[io_id]))})" for io_id in sorted(repeated, key=int)]
+    return log_excerpt(labels)
 
 
 def _untyped_quickbus_ios(
@@ -1176,6 +1205,8 @@ def _process_ios(
         _process_extension_ios(data, ext_id, ext_content, builder, _QuickbusContext(ext_id, qb_devices, qb_map))
     if repeated := _repeated_io_ids(data["io"]):
         data["io"] = [entry for entry in data["io"] if entry["id"] not in repeated]
+    if unlabelled := _unlabelled_io_ids(data["io_all"], repeated):
+        data["io_all"] = [entry for entry in data["io_all"] if entry["id"] not in unlabelled]
 
 
 def _io_direction(ident_upper: str, type_id_raw: int, io_input_types: Mapping[str, Any]) -> bool:

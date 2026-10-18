@@ -342,13 +342,13 @@ def _is_ignored(item_id: Any, ignored_ids: Collection[int] | None) -> bool:
 
     parse_config keeps a marker/KNX id as it comes, so a malformed one must not abort the whole
     build (and with it a per-class upload of an unrelated class). int() also raises ValueError for
-    a digit string beyond Python's int-to-str limit.
+    a digit string beyond Python's int-to-str limit, and OverflowError for an infinite float.
     """
     if not ignored_ids:
         return False
     try:
         return int(item_id) in ignored_ids
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
