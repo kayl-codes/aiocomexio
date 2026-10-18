@@ -132,10 +132,9 @@ _MARKER_TYPE_BINARY = "1"
 _MARKER_TYPE_ANALOG = "2"
 # The Web-IO delete answer carries a jQuery UI error box when the device is still used in a plan.
 _WEBIO_IN_USE_MARKER = "ui-state-error"
-# The min/max <input> tags on a Web-IO command's edit form, e.g.
+# The ids of the min/max <input> tags on a Web-IO command's edit form and the field each fills, e.g.
 # <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
-_WEBIO_CMD_INPUT_RE = re.compile(r'<input\b[^>]*\bid="(min|max)_cmd_io_0"[^>]*>', re.IGNORECASE)
-_WEBIO_CMD_VALUE_RE = re.compile(r'\bvalue="([^"]*)"')
+_WEBIO_RANGE_INPUT_IDS = {"min_cmd_io_0": "min", "max_cmd_io_0": "max"}
 # The id of the form's protocol <select>, whose options read e.g. <option value="0" selected="selected">.
 _WEBIO_PROTOCOL_SELECT_ID = "protocol"
 _PROTOCOL_VALUE_RE = re.compile(r"\d+", re.ASCII)
@@ -1765,27 +1764,53 @@ def _command_ref(command_id: str | int | None) -> str:
 
 def _command_range(html: str, command_id: str | int) -> tuple[float | None, float | None]:
     """(Min, Max) from a Web-IO command edit form; see ComexioClient.get_webio_command_range."""
+    parser = _CommandRangeParser()
+    parser.feed(html)
+    parser.close()
+    if not parser.fields:
+        raise _missing_data_error(html, f"Web-IO command {command_id} edit form has no min/max fields")
     values: dict[str, float | None] = {"min": None, "max": None}
-    matched = False
-    for tag_match in _WEBIO_CMD_INPUT_RE.finditer(html):
-        matched = True
-        field = tag_match[1].lower()
-        if not (value_match := _WEBIO_CMD_VALUE_RE.search(tag_match[0])):
+    for field, text in parser.fields.items():
+        if text is None:
             continue
         try:
-            number = float(value_match[1])
+            number = float(text)
         except (ValueError, OverflowError):
             number = math.nan
         # float() reads "inf", "nan" and "1e999" without an error, but no Comexio range is one.
         if math.isfinite(number):
             values[field] = number
         else:
-            _LOGGER.warning(
-                "Web-IO command %s has a non-numeric %s value: %s", command_id, field, _excerpt(value_match[1])
-            )
-    if not matched:
-        raise _missing_data_error(html, f"Web-IO command {command_id} edit form has no min/max fields")
+            _LOGGER.warning("Web-IO command %s has a non-numeric %s value: %s", command_id, field, _excerpt(text))
     return values["min"], values["max"]
+
+
+def _first_attributes(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
+    """A tag's attributes as a browser keeps them: the first of a name wins and a bare one is ""."""
+    attributes: dict[str, str] = {}
+    for name, value in attrs:
+        attributes.setdefault(name, value or "")
+    return attributes
+
+
+class _CommandRangeParser(HTMLParser):
+    """The value of each min/max <input> on a Web-IO command edit form, read as a browser does.
+
+    Attribute values come unquoted with entities resolved and a ">" inside a quoted value does not end its tag.
+    The first input of an id counts, as getElementById finds it; the id is compared case-insensitively.
+    fields maps "min"/"max" to the value, or None if the input has no value attribute.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.fields: dict[str, str | None] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "input":
+            return
+        attributes = _first_attributes(attrs)
+        if (field := _WEBIO_RANGE_INPUT_IDS.get(attributes.get("id", "").lower())) is not None:
+            self.fields.setdefault(field, attributes.get("value"))
 
 
 class _ProtocolSelectParser(HTMLParser):
@@ -1804,9 +1829,7 @@ class _ProtocolSelectParser(HTMLParser):
         self._inside = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes: dict[str, str] = {}
-        for name, value in attrs:
-            attributes.setdefault(name, value or "")
+        attributes = _first_attributes(attrs)
         if tag == "select":
             self._inside = not self.found and attributes.get("id") == _WEBIO_PROTOCOL_SELECT_ID
             self.found = self.found or self._inside

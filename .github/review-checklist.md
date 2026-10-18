@@ -66,9 +66,12 @@ published on PyPI and consumed by the Home Assistant integration
 - **HTML forms are read with `html.parser`, not regexes:** a form field (a `<select>`, its `<option>`s, an
   `<input>`) is read as a browser reads it: attribute values unquoted and entities resolved, the first of two
   equal attribute names wins, a bare attribute is `""`, a `>` inside a quoted value does not end the tag. An
-  element is matched by its exact `id`/`name`, not a prefix; of several `selected` options the last one counts, and
-  without one the first. A cut-off answer (an element without its end tag) reads as unknown, never as the first
-  option — that would be a plausible-looking but wrong value. A regex that tries to cover these cases outgrows
+  element is matched by its exact `id`/`name`, not a prefix, and the first element of an id counts. In a single
+  `<select>` (no `multiple`) the last of several `selected` options counts, and without one the first; a
+  `<select multiple>` keeps every selected option and none when none is selected. A cut-off answer — a `<select>`
+  without its `</select>`, so its options may be incomplete — reads as unknown, never as the first option: that
+  would be a plausible-looking but wrong value. Void elements such as `<input>` have no end tag and are read as
+  they are; a cut-off `<input>` tag is dropped, so its field reads as unknown too. A regex that tries to cover these cases outgrows
   SonarQube's regex complexity limit (S5843) and still misses some of them.
 - **Live readings stay at DEBUG:** a WARNING or higher about an unexpected answer to a *value* request (live states,
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the

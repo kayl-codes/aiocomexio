@@ -752,11 +752,50 @@ async def test_get_webio_command_range_field_without_value_is_none(
     assert await logged_in.get_webio_command_range(1324, 34) == (None, 1.0)
 
 
-@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e999"])
-async def test_get_webio_command_range_rejects_a_value_that_is_not_finite(
-    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, value: str
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        ("<input id='min_cmd_io_0' value='-5'><input id=max_cmd_io_0 value=5>", (-5.0, 5.0)),
+        ('<input id="min_cmd_io_0" value="&#45;5"><input id="max_cmd_io_0" value="1&#46;5" />', (-5.0, 1.5)),
+        ('<input title="a > b" id="min_cmd_io_0" value="-5"><input id="max_cmd_io_0" value="5">', (-5.0, 5.0)),
+        ('<input id="min_cmd_io_0" value="-5" value="0"><input id="max_cmd_io_0" value="5">', (-5.0, 5.0)),
+        ('<input id="min_cmd_io_0" value="-5"><input id="min_cmd_io_0" value="0">', (-5.0, None)),
+        ('<!-- <input id="min_cmd_io_0" value="0"> --><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<input id="min_cmd_io_0_extra" value="0"><input id="max_cmd_io_0" value="5">', (None, 5.0)),
+        ('<input id="max_cmd_io_0" value="5">', (None, 5.0)),
+        ('<input id="min_cmd_io_0"><input id="min_cmd_io_0" value="3">', (None, None)),
+        ('<input id="min_cmd_io_0" value="-5"><input id="max_cmd_io_0" value="5', (-5.0, None)),
+    ],
+    ids=[
+        "single-quoted-and-unquoted",
+        "entities-and-self-closing",
+        "quoted-gt-before-the-id",
+        "first-duplicate-attribute-wins",
+        "first-input-of-an-id-wins",
+        "commented-out-input",
+        "longer-id-is-another-input",
+        "max-only",
+        "first-input-without-value-wins",
+        "cut-off-input-is-unknown",
+    ],
+)
+async def test_get_webio_command_range_reads_the_inputs_as_a_browser_does(
+    logged_in: ComexioClient, comexio: FakeComexio, html: str, expected: tuple[float | None, float | None]
 ) -> None:
-    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, f'<input id="min_cmd_io_0" value="{value}">')
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, html)
+
+    assert await logged_in.get_webio_command_range(1324, 34) == expected
+
+
+@pytest.mark.parametrize(
+    ("tag", "value"),
+    [(f'<input id="min_cmd_io_0" value="{text}">', text) for text in ("inf", "-inf", "nan", "1e999")]
+    + [('<input id="min_cmd_io_0" value>', "")],  # a bare value is "", as for value=""
+)
+async def test_get_webio_command_range_rejects_a_value_that_is_not_finite(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, tag: str, value: str
+) -> None:
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, tag)
 
     with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
         assert await logged_in.get_webio_command_range(1324, 34) == (None, None)
