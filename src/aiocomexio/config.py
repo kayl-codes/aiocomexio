@@ -1131,9 +1131,9 @@ def _type_bounds(type_info: Mapping[str, Any], ext_name: str, ident: str) -> tup
     bounds = (_type_bound(raw[0]), _type_bound(raw[1]))
     if any(bound is None and value is not None for bound, value in zip(bounds, raw, strict=True)):
         _LOGGER.warning(
-            "IO %s %r: the IO type table has an unusable min/max (%s, %s), the Web-IO command gets the default range",
-            ext_name,
-            ident,
+            "IO %s %s: the IO type table has an unusable min/max (%s, %s), the Web-IO command gets the default range",
+            _log_safe(ext_name),
+            _short_repr(ident),
             _short_repr(raw[0]),
             _short_repr(raw[1]),
         )
@@ -1331,8 +1331,8 @@ def _build_io_entry(
         if io_types:
             _LOGGER.debug(
                 "IO %s %s: no usable row for type %s in the IO type table — classified by identifier",
-                ext_name,
-                ident,
+                _log_safe(ext_name),
+                _log_safe(ident),
                 _short_repr(io_item.get("InOutputTypeId")),
             )
         if _ANALOG_OUTPUT_IO_RE.match(ident_upper):

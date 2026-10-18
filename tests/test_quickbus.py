@@ -1191,6 +1191,21 @@ def test_unusable_type_bounds_give_the_default_range(v_min: Any, v_max: Any, cap
     ) in [r.getMessage() for r in caplog.records]
 
 
+def test_unusable_type_bounds_warning_keeps_scraped_names_on_one_line(caplog: pytest.LogCaptureFixture) -> None:
+    """A control character in an extension name or identifier must not forge a log line; long names are cut."""
+    ext_name = "EXT" + chr(10) + "ERROR forged" + "x" * 500
+    ident = "Q1" + chr(13) + "ERROR forged"
+    with caplog.at_level(logging.WARNING):
+        assert config_module._type_bounds({"min": "abc", "max": 10}, ext_name, ident) == (None, None)
+
+    (message,) = [r.getMessage() for r in caplog.records]
+    assert chr(10) not in message
+    assert chr(13) not in message
+    assert r"EXT\nERROR forged" in message
+    assert r"Q1\rERROR forged" in message
+    assert "x" * 500 not in message
+
+
 @pytest.mark.parametrize(("bound", "kind"), [(5, int), (-40, int), (2.5, float)])
 def test_numeric_type_bounds_are_kept(bound: Any, kind: type) -> None:
     result = _with_type_bounds(bound, bound)
