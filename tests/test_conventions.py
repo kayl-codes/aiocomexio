@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import logging
 import math
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, TypeGuard
@@ -32,6 +33,8 @@ _CATCHES_VALUE_ERROR = frozenset({"ValueError", "Exception", "BaseException"})
 _DIGIT_LIMIT_GETTER = "get_int_max_str_digits"
 # Derived, not written out: this file is scanned too, and the literal would count as a reference to the setter.
 _DIGIT_LIMIT_SETTER = _DIGIT_LIMIT_GETTER.replace("get_", "set_", 1)
+_SYS_DIGIT_LIMIT_GETTER = f"sys.{_DIGIT_LIMIT_GETTER}"
+_SYS_DIGIT_LIMIT_SETTER = f"sys.{_DIGIT_LIMIT_SETTER}"
 
 
 class _Builtins:
@@ -269,114 +272,155 @@ def test_a_value_beyond_the_digit_limit_falls_back_and_is_logged_by_size(caplog:
 
 
 def _is_setter(node: ast.AST) -> TypeGuard[ast.expr | ast.stmt]:
-    """Whether node references sys.set_int_max_str_digits, however it is reached."""
+    """Whether node references sys.set_int_max_str_digits: as an attribute, an import or its literal name.
+
+    A name computed at run time (getattr with a concatenation) is not caught; the guard stops accidental use, not
+    deliberate evasion.
+    """
     return (
         (isinstance(node, ast.Attribute) and node.attr == _DIGIT_LIMIT_SETTER)
-        or (isinstance(node, ast.ImportFrom) and any(alias.name == _DIGIT_LIMIT_SETTER for alias in node.names))
+        or (
+            isinstance(node, ast.ImportFrom)
+            and any(
+                alias.name == _DIGIT_LIMIT_SETTER or (alias.name == "*" and node.module == "sys")
+                for alias in node.names
+            )
+        )
         or (isinstance(node, ast.Constant) and node.value == _DIGIT_LIMIT_SETTER)
     )
 
 
-def _is_fixture(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """Whether a function is decorated with pytest.fixture or fixture, with or without arguments."""
+def _is_per_test_fixture(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether a function is decorated with pytest.fixture or fixture and torn down after each test.
+
+    A fixture with a wider scope keeps its change for the tests after the one that requested it.
+    """
     return any(
         ast.unparse(decorator.func if isinstance(decorator, ast.Call) else decorator) in {"pytest.fixture", "fixture"}
+        and (
+            not isinstance(decorator, ast.Call)
+            or (
+                not decorator.args
+                and all(
+                    keyword.arg is not None  # **options may set any scope
+                    and (
+                        keyword.arg != "scope"
+                        or (isinstance(keyword.value, ast.Constant) and keyword.value.value == "function")
+                    )
+                    for keyword in decorator.keywords
+                )
+            )
+        )
         for decorator in function.decorator_list
     )
 
 
-def _saved_limits(statements: list[ast.stmt]) -> set[str]:
-    """The names these statements (not nested ones) assign the result of sys.get_int_max_str_digits() to."""
-    return {
-        target.id
-        for statement in statements
-        if isinstance(statement, ast.Assign)
-        and isinstance(statement.value, ast.Call)
-        and ast.unparse(statement.value.func).endswith(_DIGIT_LIMIT_GETTER)
-        for target in statement.targets
-        if isinstance(target, ast.Name)
-    }
+def _saved_name(statement: ast.stmt) -> str | None:
+    """The name a `name = sys.get_int_max_str_digits()` statement saves the limit to."""
+    if (
+        isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(target := statement.targets[0], ast.Name)
+        and isinstance(call := statement.value, ast.Call)
+        and ast.unparse(call.func) == _SYS_DIGIT_LIMIT_GETTER
+        and not call.args
+        and not call.keywords
+    ):
+        return target.id
+    return None
+
+
+def _setter_argument(statement: ast.stmt) -> ast.expr | None:
+    """The argument of a statement that is a `sys.set_int_max_str_digits(argument)` call and nothing else."""
+    if (
+        isinstance(statement, ast.Expr)
+        and isinstance(call := statement.value, ast.Call)
+        and ast.unparse(call.func) == _SYS_DIGIT_LIMIT_SETTER
+        and len(call.args) == 1
+        and not call.keywords
+    ):
+        return call.args[0]
+    return None
+
+
+def _is_valid_limit(argument: ast.expr | None) -> bool:
+    """Whether the argument is a literal limit the setter accepts: 0 (no limit) or at least the threshold."""
+    return (
+        isinstance(argument, ast.Constant)
+        and isinstance(limit := argument.value, int)
+        and not isinstance(limit, bool)
+        and (limit == 0 or limit >= sys.int_info.str_digits_check_threshold)
+    )
 
 
 def _is_yield(statement: ast.stmt) -> bool:
     return isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Yield)
 
 
-def _is_setter_call(statement: ast.stmt) -> bool:
-    return isinstance(statement, ast.Expr) and isinstance(call := statement.value, ast.Call) and _is_setter(call.func)
-
-
-def _is_restore(statement: ast.stmt, saved: set[str]) -> bool:
-    """Whether the statement is a call that sets the limit to one of the saved names."""
-    return (
-        isinstance(statement, ast.Expr)
-        and isinstance(call := statement.value, ast.Call)
-        and _is_setter(call.func)
-        and len(call.args) == 1
-        and isinstance(call.args[0], ast.Name)
-        and call.args[0].id in saved
-    )
-
-
-def _may_exit(statement: ast.stmt) -> bool:
-    """Whether a return or raise in the statement can leave the function; one in a nested function cannot.
-
-    A class body runs where the class is defined, so a raise in it does leave the function.
-    """
-    pending: list[ast.AST] = [statement]
-    while pending:
-        node = pending.pop()
-        if isinstance(node, ast.Return | ast.Raise):
-            return True
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
-            pending.extend(ast.iter_child_nodes(node))
-    return False
+def _restore_of(statement: ast.stmt, following: list[ast.stmt]) -> ast.stmt | None:
+    """The statement that must restore the limit: the one after a yield, or the first of a finally around only one."""
+    if _is_yield(statement):
+        return following[0] if following else None
+    if (
+        isinstance(statement, ast.Try)
+        and len(statement.body) == 1
+        and _is_yield(statement.body[0])
+        and not statement.handlers
+        and not statement.orelse
+        and statement.finalbody
+    ):
+        return statement.finalbody[0]
+    return None
 
 
 def _spared_setters(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.stmt]:
-    """The setter calls of a function that saves the limit before its yield and always sets it back after it.
+    """The setter and the restore of a fixture with exactly the restoring shape; empty for any other function.
 
-    Saving, yield and restore must be statements of the function body itself, or the yield sits in a try whose
-    finally restores; a restore in a branch, a loop or a nested function may not run, so it does not count. A save
-    after the first setter would keep the changed limit, so only a save before it counts. Only the setter calls of
-    the body before the yield and the restores are spared; any other setter in the function still counts.
+    The shape, after an optional docstring: `previous = sys.get_int_max_str_digits()`, one
+    `sys.set_int_max_str_digits(<literal limit>)`, then either `yield` directly followed by
+    `sys.set_int_max_str_digits(previous)`, or a try of only that yield (no except, no else) whose finally starts with
+    that restore. Anything between them may raise (pytest runs no teardown for a fixture that raised before its yield)
+    or rebind the saved name, so the guard matches this shape instead of judging other code.
     """
     body = function.body
-    first_setter = next(
-        (index for index, statement in enumerate(body) if any(_is_setter(node) for node in ast.walk(statement))),
-        len(body),
-    )
-    for index, statement in enumerate(body):
-        saved = _saved_limits(body[: min(index, first_setter)])
-        if _is_yield(statement):
-            after = body[index + 1 :]
-        elif isinstance(statement, ast.Try) and any(_is_yield(inner) for inner in statement.body):
-            after = [*statement.finalbody, *body[index + 1 :]]
-        else:
-            continue
-        # A return or raise before the restore may skip it, so only restores before the first one count.
-        first_exit = next((position for position, later in enumerate(after) if _may_exit(later)), len(after))
-        restores = [restore for restore in after[:first_exit] if _is_restore(restore, saved)]
-        return [*filter(_is_setter_call, body[:index]), *restores] if restores else []
-    return []
+    if body and isinstance(docstring := body[0], ast.Expr) and isinstance(docstring.value, ast.Constant):
+        body = body[1:]
+    if len(body) < 3:
+        return []
+    save, setter, guarded, *following = body
+    name = _saved_name(save)
+    restore = _restore_of(guarded, following)
+    if (
+        name is None
+        or restore is None
+        or not _is_valid_limit(_setter_argument(setter))
+        or not isinstance(saved := _setter_argument(restore), ast.Name)
+        or saved.id != name
+    ):
+        return []
+    return [setter, restore]
 
 
-def _spared_setter_lines(tree: ast.AST) -> set[int]:
-    """The lines of the setter calls a fixture restores after its yield, so the test it serves keeps no change."""
+def _spared_setter_nodes(tree: ast.AST) -> set[int]:
+    """The ids of the setter references a fixture restores after its yield, so the test it serves keeps no change.
+
+    Nodes, not lines: another setter on the line of a spared one still counts.
+    """
     return {
-        line
+        id(node)
         for function in ast.walk(tree)
-        if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef) and _is_fixture(function)
+        if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef) and _is_per_test_fixture(function)
         for statement in _spared_setters(function)
-        for line in range(statement.lineno, (statement.end_lineno or statement.lineno) + 1)
+        for node in ast.walk(statement)
+        if _is_setter(node)
     }
 
 
 def _digit_limit_setters(source: str, filename: str, *, fixtures_allowed: bool = False) -> list[str]:
     """file:line of each reference to sys.set_int_max_str_digits; fixtures_allowed spares a restoring fixture."""
     tree = ast.parse(source, filename)
-    allowed = _spared_setter_lines(tree) if fixtures_allowed else set()
-    return [f"{filename}:{node.lineno}" for node in ast.walk(tree) if _is_setter(node) and node.lineno not in allowed]
+    allowed = _spared_setter_nodes(tree) if fixtures_allowed else set()
+    return [f"{filename}:{node.lineno}" for node in ast.walk(tree) if _is_setter(node) and id(node) not in allowed]
 
 
 def _digit_limit_callers(root: Path) -> list[str]:
@@ -414,6 +458,7 @@ def test_the_guard_recognises_the_real_restoring_fixture() -> None:
     (fixture,) = (
         node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "int_max_str_digits"
     )
+    assert _is_per_test_fixture(fixture)
     assert len(_spared_setters(fixture)) == 2  # the setter before the yield and the restore after it
 
 
@@ -424,8 +469,17 @@ def test_the_guard_recognises_the_real_restoring_fixture() -> None:
         ("from sys import set_int_max_str_digits as limit\nlimit(0)\n", ["m.py:1"]),
         ('getattr(sys, "set_int_max_str_digits")(0)\n', ["m.py:1"]),
         ("sys.get_int_max_str_digits()\n", []),
+        ("from sys import *\nset_int_max_str_digits(0)\n", ["m.py:1"]),
+        ("from os import *\n", []),
     ],
-    ids=["attribute", "import-from", "getattr", "getter-only"],
+    ids=[
+        "attribute",
+        "import-from",
+        "getattr",
+        "getter-only",
+        "star-import-from-sys",
+        "star-import-from-another-module",
+    ],
 )
 def test_the_guard_flags_every_way_to_set_the_digit_limit(source: str, expected: list[str]) -> None:
     assert _digit_limit_setters(source, "m.py") == expected
@@ -486,7 +540,7 @@ _RESTORING_FIXTURE = (
             _RESTORING_FIXTURE.replace(
                 "    yield\n", "    if flag:\n        sys.set_int_max_str_digits(0)\n    yield\n"
             ),
-            ["m.py:6"],
+            ["m.py:4", "m.py:8", "m.py:6"],
         ),
         (
             _RESTORING_FIXTURE.replace("    yield\n", "    yield\n    if flag:\n        return\n"),
@@ -501,14 +555,14 @@ _RESTORING_FIXTURE = (
                 "    yield\n    sys.set_int_max_str_digits(previous)\n",
                 "    try:\n        yield\n        return\n    finally:\n        sys.set_int_max_str_digits(previous)\n",
             ),
-            [],
+            ["m.py:4", "m.py:9"],
         ),
         (
             _RESTORING_FIXTURE.replace(
                 "    yield\n",
                 "    yield\n    def helper():\n        return 1\n    async def other():\n        raise ValueError\n",
             ),
-            [],
+            ["m.py:4", "m.py:10"],
         ),
         (
             _RESTORING_FIXTURE.replace("    yield\n", "    yield\n    class Helper:\n        raise ValueError\n"),
@@ -518,6 +572,59 @@ _RESTORING_FIXTURE = (
             _RESTORING_FIXTURE.replace("    yield\n", "    yield\n    with context:\n        return\n"),
             ["m.py:4", "m.py:8"],
         ),
+        (_RESTORING_FIXTURE.replace("    yield\n", "    prepare()\n    yield\n"), ["m.py:4", "m.py:7"]),
+        (_RESTORING_FIXTURE.replace("    yield\n", "    yield\n    cleanup()\n"), ["m.py:4", "m.py:7"]),
+        (
+            _RESTORING_FIXTURE.replace(
+                "    yield\n    sys.set_int_max_str_digits(previous)\n",
+                "    try:\n        yield\n    finally:\n        cleanup()\n"
+                "        sys.set_int_max_str_digits(previous)\n",
+            ),
+            ["m.py:4", "m.py:9"],
+        ),
+        (
+            _RESTORING_FIXTURE.replace(
+                "    yield\n    sys.set_int_max_str_digits(previous)\n",
+                "    try:\n        prepare()\n        yield\n        cleanup()\n    finally:\n"
+                "        sys.set_int_max_str_digits(previous)\n",
+            ),
+            ["m.py:4", "m.py:10"],
+        ),
+        (_RESTORING_FIXTURE.replace("def limit():\n", 'def limit():\n    """Doc."""\n'), []),
+        (
+            _RESTORING_FIXTURE.replace("(4300)\n", "(4300)\n    sys.set_int_max_str_digits(10)\n"),
+            ["m.py:4", "m.py:5", "m.py:7"],
+        ),
+        (_RESTORING_FIXTURE.replace("(4300)", "(10)"), ["m.py:4", "m.py:6"]),
+        (_RESTORING_FIXTURE.replace("(4300)", "(limit)"), ["m.py:4", "m.py:6"]),
+        (_RESTORING_FIXTURE.replace("sys.get_", "other.get_"), ["m.py:4", "m.py:6"]),
+        (
+            _RESTORING_FIXTURE.replace("digits()\n", "digits()\n    previous = 0\n"),
+            ["m.py:5", "m.py:7"],
+        ),
+        (
+            _RESTORING_FIXTURE.replace(
+                "    yield\n    sys.set_int_max_str_digits(previous)\n",
+                "    try:\n        yield\n        previous = 0\n    finally:\n"
+                "        sys.set_int_max_str_digits(previous)\n",
+            ),
+            ["m.py:4", "m.py:9"],
+        ),
+        (
+            _RESTORING_FIXTURE.replace(
+                "    yield\n    sys.set_int_max_str_digits(previous)\n",
+                "    try:\n        yield\n    except ValueError as previous:\n        pass\n    finally:\n"
+                "        sys.set_int_max_str_digits(previous)\n",
+            ),
+            ["m.py:4", "m.py:10"],
+        ),
+        (
+            _RESTORING_FIXTURE.replace("digits(previous)\n", "digits(previous); sys.set_int_max_str_digits(0)\n"),
+            ["m.py:6"],
+        ),
+        (_RESTORING_FIXTURE.replace("@pytest.fixture", '@pytest.fixture(scope="session")'), ["m.py:4", "m.py:6"]),
+        (_RESTORING_FIXTURE.replace("@pytest.fixture", '@pytest.fixture(scope="function")'), []),
+        (_RESTORING_FIXTURE.replace("@pytest.fixture", "@pytest.fixture(**options)"), ["m.py:4", "m.py:6"]),
     ],
     ids=[
         "restoring-fixture",
@@ -537,9 +644,25 @@ _RESTORING_FIXTURE = (
         "return-before-the-restore",
         "raise-before-the-restore",
         "return-in-the-try-body",
-        "return-in-a-nested-function",
+        "nested-function-before-the-restore",
         "raise-in-a-class-body",
         "return-in-a-with-block",
+        "call-between-the-setter-and-the-yield",
+        "call-before-the-restore",
+        "call-before-the-restore-in-finally",
+        "calls-in-the-try",
+        "docstring",
+        "second-setter-before-the-yield",
+        "limit-the-setter-rejects",
+        "limit-that-is-no-literal",
+        "another-getter",
+        "saved-name-rebound-before-the-setter",
+        "saved-name-rebound-in-the-try",
+        "saved-name-rebound-in-an-except",
+        "second-setter-on-the-line-of-the-restore",
+        "session-scoped-fixture",
+        "function-scoped-fixture",
+        "fixture-options-from-a-mapping",
     ],
 )
 def test_the_guard_spares_only_a_fixture_that_restores_the_digit_limit(source: str, expected: list[str]) -> None:
