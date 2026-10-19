@@ -135,8 +135,10 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 # The ids of the min/max <input> tags on a Web-IO command's edit form and the field each fills, e.g.
 # <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
 _WEBIO_RANGE_INPUT_IDS = {"min_cmd_io_0": "min", "max_cmd_io_0": "max"}
-# Elements whose content a browser reads as text, so markup inside them is no form field.
-_TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title"})
+# Elements whose content a browser reads as text (RCDATA and raw text), so markup inside them is no form field.
+_TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title", "xmp", "iframe", "noembed", "noframes", "plaintext"})
+# A text-only element that no end tag ends: the rest of the page is its text.
+_ENDLESS_TEXT_ELEMENT = "plaintext"
 # The ASCII whitespace a browser strips from and collapses in an option text it uses as the value.
 _HTML_WHITESPACE = "\t\n\f\r "
 _HTML_WHITESPACE_RE = re.compile(f"[{_HTML_WHITESPACE}]+")
@@ -145,13 +147,16 @@ _OPTION_ENDING_TAGS = frozenset({"option", "optgroup", "hr"})
 # Elements whose content is no option text (script-supporting elements); a <script/> stays open, as in a browser.
 _HIDDEN_ELEMENTS = frozenset({"script", "template"})
 # Start tags that end an open <select> before a browser reads them.
-_SELECT_ENDING_TAGS = frozenset({"input", "textarea"})
+_SELECT_ENDING_TAGS = frozenset({"input", "keygen", "textarea"})
+# Start tags a browser ignores inside an open <select>, so what follows them is still markup, not their text.
+_IGNORED_IN_SELECT = (_TEXT_ONLY_ELEMENTS - _SELECT_ENDING_TAGS) | {"style"}
 # The start of a size attribute as a browser parses a non-negative integer (whitespace, an optional "+", digits).
 _SIZE_RE = re.compile(rf"[{_HTML_WHITESPACE}]*\+?(\d+)", re.ASCII)
 # The id of the form's protocol <select>, whose options read e.g. <option value="0" selected="selected">.
 _WEBIO_PROTOCOL_SELECT_ID = "protocol"
-# A protocol is a small number; a longer digit string is none (and int() refuses one beyond 4300 digits).
-_PROTOCOL_VALUE_RE = re.compile(r"\d{1,9}", re.ASCII)
+# A protocol is a small number (leading zeros aside); a longer digit string is none, and int() would refuse one
+# beyond 4300 digits, leading zeros included.
+_PROTOCOL_VALUE_RE = re.compile(r"0*(\d{1,9})", re.ASCII)
 
 # Plain-text answer of fupValueData for a plan that is not running (instead of a JSON value dict).
 _JSON_START_CHARS = ("{", "[")
@@ -1808,23 +1813,41 @@ def _first_attributes(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
 
 
 class _FormParser(HTMLParser):
-    """An HTMLParser that reads the content of a <textarea> or <title> as text, as a browser does.
+    """An HTMLParser that reads form fields as a browser does, for subclasses that pick out the fields they need.
 
-    Newer Pythons do this themselves; older 3.13 releases report markup inside them as tags, so a field written
-    as text into a textarea would be read as a real one. Subclasses get the remaining tags through handle_form_tag
-    and handle_form_endtag, with the attributes from _first_attributes.
+    The content of a <textarea>, <title> or raw-text element is text: html.parser reports markup inside most of them
+    as tags (older 3.13 releases even inside <textarea> and <title>), so a field written as text into one would be
+    read as a real one; a <plaintext> makes the rest of the page text. The content of a <script> or <template> is no
+    field either. Inside an open <select> a browser ignores the start tag of another text-only element or a <style>,
+    and a <select>, <input>, <keygen> or <textarea> start tag ends the select. Subclasses get the remaining tags
+    through handle_form_tag and handle_form_endtag, with the attributes from _first_attributes, and the end of a
+    select through handle_select_end.
     """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._text_only: str | None = None
+        self._hidden: list[str] = []  # open <script>/<template> elements: their content is no field or text of one
+        self._select_open = False  # any select is open; a <select> inside it only ends it
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if self._text_only is not None:
             return
+        if self._reads_select_markup():
+            if tag in _IGNORED_IN_SELECT:
+                return
+            if tag in _SELECT_ENDING_TAGS:
+                self._end_select()
         if tag in _TEXT_ONLY_ELEMENTS:
             self._text_only = tag
+        elif tag in _HIDDEN_ELEMENTS:
+            self._hidden.append(tag)
+        elif self._hidden:  # a tag inside a hidden element is no field
+            return
+        elif tag == "select" and self._select_open:
+            self._end_select()
         else:
+            self._select_open = self._select_open or tag == "select"
             self.handle_form_tag(tag, _first_attributes(attrs))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -1832,17 +1855,40 @@ class _FormParser(HTMLParser):
         # is still its text. A void element such as <input/> has no end tag either way.
         self.handle_starttag(tag, attrs)
 
+    def set_cdata_mode(self, elem: str, *args: Any, **kwargs: Any) -> None:
+        # html.parser switches to text mode after handle_starttag; inside an open select a browser ignores the tag.
+        if not (self._reads_select_markup() and elem in _IGNORED_IN_SELECT):
+            super().set_cdata_mode(elem, *args, **kwargs)
+
     def handle_endtag(self, tag: str) -> None:
-        if self._text_only is None:
+        if self._text_only is not None:
+            if tag == self._text_only != _ENDLESS_TEXT_ELEMENT:
+                self._text_only = None
+        elif self._hidden:  # only the end tag of the innermost hidden element ends it
+            if tag == self._hidden[-1]:
+                self._hidden.pop()
+        elif tag == "select":
+            if self._select_open:
+                self._end_select()
+        else:
             self.handle_form_endtag(tag)
-        elif tag == self._text_only:
-            self._text_only = None
+
+    def _reads_select_markup(self) -> bool:
+        """Whether a start tag now is markup of an open select (not text, not inside a <script> or <template>)."""
+        return self._select_open and self._text_only is None and not self._hidden
+
+    def _end_select(self) -> None:
+        self._select_open = False
+        self.handle_select_end()
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        """A start tag outside a text-only element."""
+        """A start tag outside a text-only or hidden element; a <select> only when no select is open."""
 
     def handle_form_endtag(self, tag: str) -> None:
-        """An end tag outside a text-only element."""
+        """An end tag other than </select> outside a text-only or hidden element."""
+
+    def handle_select_end(self) -> None:
+        """The open select ended (its </select>, or a start tag that ends it)."""
 
 
 class _CommandRangeParser(_FormParser):
@@ -1867,10 +1913,9 @@ class _ProtocolSelectParser(_FormParser):
 
     Attribute values come unquoted with entities resolved, the first of a name wins and a bare one is "";
     a ">" inside a quoted value does not end its tag. options holds each option's attributes, texts its text and
-    disabled whether it or its <optgroup> is disabled. closed says the select ended (its </select>, or a <select>,
-    <input> or <textarea> start tag, which a browser reads as one), so its options are complete (a cut-off answer
-    drops a half-read option tag); multiple says it allows several selected options and listbox that its size shows
-    more than one row, so it selects no option by default.
+    disabled whether it or its <optgroup> is disabled. closed says the select ended (see _FormParser), so its options
+    are complete (a cut-off answer drops a half-read option tag); multiple says it allows several selected options
+    and listbox that its size shows more than one row, so it selects no option by default.
     """
 
     def __init__(self) -> None:
@@ -1882,46 +1927,35 @@ class _ProtocolSelectParser(_FormParser):
         self.options: list[dict[str, str]] = []
         self.texts: list[list[str]] = []  # the text chunks of each option, joined once at the end
         self.disabled: list[bool] = []
-        self._open = False  # any select is open; a <select> inside it only ends it
         self._inside = False  # the open select is the protocol select
         self._in_option = False
         self._group: bool | None = None  # whether the open <optgroup> is disabled; None: no optgroup is open
-        self._hidden = 0  # open <script>/<template> elements: their content is neither option text nor a field
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if self._open and self._text_only is None and not self._hidden and tag in _SELECT_ENDING_TAGS:
-            self._end_select()
-        super().handle_starttag(tag, attrs)
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        if tag in _HIDDEN_ELEMENTS or self._hidden:
-            self._hidden += tag in _HIDDEN_ELEMENTS
-        elif tag == "select":
-            if self._open:
-                self._end_select()
-                return
-            self._open = True
-            self._inside = not self.found and attributes.get("id") == _WEBIO_PROTOCOL_SELECT_ID
-            if self._inside:
-                self.found = True
-                self.multiple = "multiple" in attributes
-                self.listbox = _shows_several_rows(attributes.get("size", ""))
+        if tag == "select":
+            self._start_select(attributes)
         elif tag in _OPTION_ENDING_TAGS:
-            if tag != "option":  # an <optgroup> outside the protocol select does not group its options
-                self._group = "disabled" in attributes if tag == "optgroup" and self._inside else None
-            self._in_option = tag == "option" and self._inside
-            if self._in_option:
-                self.options.append(attributes)
-                self.texts.append([])
-                self.disabled.append("disabled" in attributes or bool(self._group))
+            self._start_option_ending_tag(tag, attributes)
+
+    def _start_select(self, attributes: dict[str, str]) -> None:
+        self._inside = not self.found and attributes.get("id") == _WEBIO_PROTOCOL_SELECT_ID
+        if self._inside:
+            self.found = True
+            self.multiple = "multiple" in attributes
+            self.listbox = _shows_several_rows(attributes.get("size", ""))
+
+    def _start_option_ending_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        if tag != "option":  # an <optgroup> outside the protocol select does not group its options
+            self._group = "disabled" in attributes if tag == "optgroup" and self._inside else None
+        self._in_option = tag == "option" and self._inside
+        if self._in_option:
+            self.options.append(attributes)
+            self.texts.append([])
+            self.disabled.append("disabled" in attributes or bool(self._group))
 
     def handle_form_endtag(self, tag: str) -> None:
         # A browser ignores </hr>, and </optgroup> without an open optgroup; </option> and </optgroup> end the option.
-        if self._hidden:
-            self._hidden -= tag in _HIDDEN_ELEMENTS
-        elif tag == "select" and self._open:
-            self._end_select()
-        elif tag == "option":
+        if tag == "option":
             self._in_option = False
         elif tag == "optgroup" and self._group is not None:
             self._in_option = False
@@ -1932,9 +1966,9 @@ class _ProtocolSelectParser(_FormParser):
         if self._in_option and not self._hidden:
             self.texts[-1].append(data)
 
-    def _end_select(self) -> None:
+    def handle_select_end(self) -> None:
         self.closed = self.closed or self._inside
-        self._open = self._inside = self._in_option = False
+        self._inside = self._in_option = False
         self._group = None
 
 
@@ -2007,10 +2041,10 @@ def _command_protocol(html: str, command_id: str | int) -> int | None:
     if (chosen := _chosen_option(parser, command_id)) is None:
         return None
     value = _option_value(chosen.attributes, chosen.text)
-    if not _PROTOCOL_VALUE_RE.fullmatch(value):
+    if (match := _PROTOCOL_VALUE_RE.fullmatch(value)) is None:
         _LOGGER.warning("Web-IO command %r has an unknown protocol value: %s", command_id, _excerpt(value))
         return None
-    return int(value)
+    return int(match.group(1))
 
 
 def _collect_io_values(result: dict[str, Any], io_ids: Iterable[str]) -> tuple[dict[str, str], list[str]]:

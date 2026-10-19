@@ -770,6 +770,12 @@ async def test_get_webio_command_range_field_without_value_is_none(
         ('<textarea><input id="min_cmd_io_0" value="0"></textarea><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
         ('<title><input id="max_cmd_io_0" value="0"></title><input id="max_cmd_io_0" value="5">', (None, 5.0)),
         ('<textarea/><input id="min_cmd_io_0" value="0"></textarea><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        *(
+            (f'<{tag}><input id="min_cmd_io_0" value="0"></{tag}><input id="min_cmd_io_0" value="-5">', (-5.0, None))
+            for tag in ("xmp", "iframe", "noembed", "noframes")
+        ),
+        ('<input id="max_cmd_io_0" value="5"><plaintext></plaintext><input id="min_cmd_io_0" value="-5">', (None, 5.0)),
+        ('<template><input id="min_cmd_io_0" value="0"></template><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
     ],
     ids=[
         "single-quoted-and-unquoted",
@@ -786,6 +792,12 @@ async def test_get_webio_command_range_field_without_value_is_none(
         "input-written-into-a-textarea",
         "input-written-into-the-title",
         "input-after-a-self-closing-textarea",
+        "input-written-into-an-xmp",
+        "input-written-into-an-iframe",
+        "input-written-into-a-noembed",
+        "input-written-into-a-noframes",
+        "no-end-tag-ends-a-plaintext",
+        "input-in-a-template",
     ],
 )
 async def test_get_webio_command_range_reads_the_inputs_as_a_browser_does(
@@ -796,17 +808,32 @@ async def test_get_webio_command_range_reads_the_inputs_as_a_browser_does(
     assert await logged_in.get_webio_command_range(1324, 34) == expected
 
 
+def _emulate_an_older_html_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make html.parser behave as an older 3.13 release: only <script> and <style> content is raw text."""
+    monkeypatch.setattr(HTMLParser, "RCDATA_CONTENT_ELEMENTS", (), raising=False)
+    monkeypatch.setattr(HTMLParser, "CDATA_CONTENT_ELEMENTS", ("script", "style"))
+    set_cdata_mode = HTMLParser.set_cdata_mode
+
+    def set_cdata_mode_without_plaintext(self: HTMLParser, elem: str, *args: Any, **kwargs: Any) -> None:
+        if elem != "plaintext":
+            set_cdata_mode(self, elem, *args, **kwargs)
+
+    monkeypatch.setattr(HTMLParser, "set_cdata_mode", set_cdata_mode_without_plaintext)
+
+
 @pytest.mark.parametrize(
-    "opening", ["<textarea>", "<title>", "<textarea/>", "<TEXTAREA>"], ids=["textarea", "title", "slash", "upper"]
+    "opening",
+    ["<textarea>", "<title>", "<textarea/>", "<TEXTAREA>", "<xmp>", "<iframe>", "<noembed>", "<noframes>"],
+    ids=["textarea", "title", "slash", "upper", "xmp", "iframe", "noembed", "noframes"],
 )
 async def test_get_webio_command_form_reads_text_only_content_as_text_on_an_older_html_parser(
     logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, opening: str
 ) -> None:
-    """Python releases before RCDATA_CONTENT_ELEMENTS report markup inside a <textarea> or <title> as tags.
+    """Older 3.13 releases of html.parser report markup inside a <textarea>, <title> or raw-text element as tags.
 
     Another end tag inside it (here </b> and </select>) does not end it, only its own does.
     """
-    monkeypatch.setattr(HTMLParser, "RCDATA_CONTENT_ELEMENTS", (), raising=False)
+    _emulate_an_older_html_parser(monkeypatch)
     closing = "</" + opening.strip("</>").lower() + ">"
     comexio.serve_text(
         "GET",
@@ -816,6 +843,37 @@ async def test_get_webio_command_form_reads_text_only_content_as_text_on_an_olde
     )
 
     assert await logged_in.get_webio_command_form(1324, 34) == WebioCommandForm(min=-5.0, max=None, protocol=1)
+
+
+async def test_get_webio_command_form_reads_the_rest_after_a_plaintext_as_text_on_an_older_html_parser(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _emulate_an_older_html_parser(monkeypatch)
+    comexio.serve_text(
+        "GET",
+        WEBIO_EDIT_COMMAND_PATH,
+        '<input id="max_cmd_io_0" value="5"><plaintext></plaintext><input id="min_cmd_io_0" value="-5">'
+        '<select id="protocol"><option value="1" selected></select>',
+    )
+
+    assert await logged_in.get_webio_command_form(1324, 34) == WebioCommandForm(min=None, max=5.0, protocol=None)
+
+
+@pytest.mark.parametrize("older_parser", [False, True], ids=["this-parser", "older-parser"])
+@pytest.mark.parametrize("tag", ["title", "xmp", "plaintext", "style"])
+async def test_get_webio_command_form_ignores_a_text_only_tag_in_the_select(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, tag: str, older_parser: bool
+) -> None:
+    """Inside an open select a browser ignores the tag, so neither the options nor the inputs after it are text."""
+    if older_parser:
+        _emulate_an_older_html_parser(monkeypatch)
+    comexio.serve_text(
+        "GET",
+        WEBIO_EDIT_COMMAND_PATH,
+        f'<select id="protocol"><option value="1"><{tag}><option value="5" selected></{tag}></select>{_RANGE_FIELDS}',
+    )
+
+    assert await logged_in.get_webio_command_form(1324, 34) == WebioCommandForm(min=0.0, max=1.0, protocol=5)
 
 
 @pytest.mark.parametrize(
@@ -989,6 +1047,41 @@ _RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" val
             1,
             id="input-ends-the-select",
         ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><keygen><option value="5" selected></select>',
+            1,
+            id="keygen-ends-the-select",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><template></script><option value="5" selected></template>'
+            "</select>",
+            1,
+            id="only-its-own-end-tag-ends-a-template",
+        ),
+        # Inside an open select a browser ignores another text-only element or a <style>: what follows is markup.
+        *(
+            pytest.param(
+                f'<select id="protocol"><option value="1"><{tag}><option value="5" selected></{tag}></select>',
+                5,
+                id=f"{tag}-in-the-select-is-ignored",
+            )
+            for tag in ("title", "xmp", "iframe", "noembed", "noframes", "style")
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><plaintext><option value="5" selected></select>',
+            5,
+            id="plaintext-in-the-select-is-ignored",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><script><option value="5" selected></script></select>',
+            1,
+            id="script-in-the-select-stays-source",
+        ),
+        pytest.param('<select id="protocol"><option value="0000000001" selected></select>', 1, id="leading-zeros"),
+        pytest.param(
+            '<select id="protocol"><option value="' + "0" * 5000 + '2" selected></select>', 2, id="many-leading-zeros"
+        ),
+        pytest.param('<select id="protocol"><option value="0000000000" selected></select>', 0, id="only-zeros"),
         # An option's text leaves out script source but keeps a title's text; </hr> and a stray </optgroup> are ignored.
         pytest.param(
             '<select id="protocol"><option>1<script>5</script></option></select>', 1, id="script-in-the-option"

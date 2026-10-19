@@ -66,20 +66,22 @@ published on PyPI and consumed by the Home Assistant integration
 - **HTML forms are read with `html.parser`, not regexes:** a form field (a `<select>`, its `<option>`s, an `<input>`)
   is read as a browser reads it: attribute values unquoted and entities resolved, the first of two equal attribute
   names wins, a bare attribute is `""`, a `>` inside a quoted value does not end the tag. An element is matched by its
-  exact `id`/`name` (case included), not a prefix, and the first element of an id counts. Markup inside a `<textarea>`
-  or `<title>` is text, not a field (older 3.13 releases of `html.parser` report it as tags; `_FormParser` in
-  `client.py` skips it). In a single `<select>` (no `multiple`) the last of several `selected` options counts, and
-  without one the first enabled one (not `disabled`, not in a disabled `<optgroup>`) — unless its `size` makes it a
-  list box, which selects none; a `<select multiple>` keeps every selected option and none when none is selected, so a
-  field that holds one value reads it as unknown. An `<option>` without a `value` attribute has its text (whitespace
-  collapsed, the content of a `<script>` or `<template>` left out, a `<title>`'s text kept) as value; `</hr>` and a
-  `</optgroup>` without an open optgroup do not end it, and a `<select>`, `<input>` or `<textarea>` start tag inside
-  an open select ends that select. The slash of a start tag is ignored: `<select/>` and `<option/>` open their
-  element. A cut-off answer — a `<select>` without its `</select>`, so its options may be incomplete — reads as
-  unknown, never as the first option: that would be a plausible-looking but wrong value. Void elements such as
-  `<input>` have no end tag and are read as they are; a cut-off `<input>` tag is dropped, so its field reads as
-  unknown too. A regex that tries to cover these cases outgrows SonarQube's regex complexity limit (S5843) and still
-  misses some of them.
+  exact `id`/`name` (case included), not a prefix, and the first element of an id counts. Markup inside a
+  `<textarea>`, `<title>` or raw-text element (`<xmp>`, `<iframe>`, `<noembed>`, `<noframes>`; a `<plaintext>` up to
+  the end of the page) is text, not a field (older 3.13 releases of `html.parser` report it as tags; `_FormParser` in
+  `client.py` skips it), and so is the content of a `<script>` or `<template>`. In a single `<select>` (no `multiple`)
+  the last of several `selected` options counts, and without one the first enabled one (not `disabled`, not in a
+  disabled `<optgroup>`) — unless its `size` makes it a list box, which selects none; a `<select multiple>` keeps
+  every selected option and none when none is selected, so a field that holds one value reads it as unknown. An
+  `<option>` without a `value` attribute has its text (whitespace collapsed, the content of a `<script>` or
+  `<template>` left out, a `<title>`'s text kept) as value; `</hr>` and a `</optgroup>` without an open optgroup do
+  not end it, and a `<select>`, `<input>`, `<keygen>` or `<textarea>` start tag inside an open select ends that
+  select; any other text-only start tag or a `<style>` inside an open select is ignored, so the markup after it still
+  counts. The slash of a start tag is ignored: `<select/>` and `<option/>` open their element. A cut-off answer — a
+  `<select>` without its `</select>`, so its options may be incomplete — reads as unknown, never as the first option:
+  that would be a plausible-looking but wrong value. Void elements such as `<input>` have no end tag and are read as
+  they are; a cut-off `<input>` tag is dropped, so its field reads as unknown too. A regex that tries to cover these
+  cases outgrows SonarQube's regex complexity limit (S5843) and still misses some of them.
 - **Live readings stay at DEBUG:** a WARNING or higher about an unexpected answer to a *value* request (live states,
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
   answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes
