@@ -318,6 +318,21 @@ def _is_restore(statement: ast.stmt, saved: set[str]) -> bool:
     )
 
 
+def _may_exit(statement: ast.stmt) -> bool:
+    """Whether a return or raise in the statement can leave the function; one in a nested function cannot.
+
+    A class body runs where the class is defined, so a raise in it does leave the function.
+    """
+    pending: list[ast.AST] = [statement]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.Return | ast.Raise):
+            return True
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            pending.extend(ast.iter_child_nodes(node))
+    return False
+
+
 def _spared_setters(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.stmt]:
     """The setter calls of a function that saves the limit before its yield and always sets it back after it.
 
@@ -340,14 +355,7 @@ def _spared_setters(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[as
         else:
             continue
         # A return or raise before the restore may skip it, so only restores before the first one count.
-        first_exit = next(
-            (
-                position
-                for position, later in enumerate(after)
-                if any(isinstance(node, ast.Return | ast.Raise) for node in ast.walk(later))
-            ),
-            len(after),
-        )
+        first_exit = next((position for position, later in enumerate(after) if _may_exit(later)), len(after))
         restores = [restore for restore in after[:first_exit] if _is_restore(restore, saved)]
         return [*filter(_is_setter_call, body[:index]), *restores] if restores else []
     return []
@@ -495,6 +503,21 @@ _RESTORING_FIXTURE = (
             ),
             [],
         ),
+        (
+            _RESTORING_FIXTURE.replace(
+                "    yield\n",
+                "    yield\n    def helper():\n        return 1\n    async def other():\n        raise ValueError\n",
+            ),
+            [],
+        ),
+        (
+            _RESTORING_FIXTURE.replace("    yield\n", "    yield\n    class Helper:\n        raise ValueError\n"),
+            ["m.py:4", "m.py:8"],
+        ),
+        (
+            _RESTORING_FIXTURE.replace("    yield\n", "    yield\n    with context:\n        return\n"),
+            ["m.py:4", "m.py:8"],
+        ),
     ],
     ids=[
         "restoring-fixture",
@@ -514,6 +537,9 @@ _RESTORING_FIXTURE = (
         "return-before-the-restore",
         "raise-before-the-restore",
         "return-in-the-try-body",
+        "return-in-a-nested-function",
+        "raise-in-a-class-body",
+        "return-in-a-with-block",
     ],
 )
 def test_the_guard_spares_only_a_fixture_that_restores_the_digit_limit(source: str, expected: list[str]) -> None:
