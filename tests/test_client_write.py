@@ -1331,6 +1331,65 @@ async def test_get_webio_command_range_reads_cdata_only_in_foreign_content(
     assert await logged_in.get_webio_command_range(1324, 34) == expected
 
 
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        # Every raw-text and escapable raw-text element, written out so that a slash after a new one is checked too.
+        *(
+            (f'<{tag}/><input id="min_cmd_io_0" value="0"></{tag}><input id="min_cmd_io_0" value="-5">', (-5.0, None))
+            for tag in ("script", "style", "xmp", "iframe", "noembed", "noframes", "noscript", "textarea", "title")
+        ),
+        ('<script/><textarea></script><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><style/></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<select><style/><input id="min_cmd_io_0" value="-5"></select>', (-5.0, None)),
+        ('<textarea><style></textarea><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<textarea><style/></textarea><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+    ],
+    ids=[
+        *(
+            f"{tag}-with-a-slash"
+            for tag in ("script", "style", "xmp", "iframe", "noembed", "noframes", "noscript", "textarea", "title")
+        ),
+        "script-with-a-slash-ends-at-its-end-tag",
+        "svg-style-with-a-slash-is-closed",
+        "style-with-a-slash-in-a-select-is-ignored",
+        "style-in-a-textarea-is-text",
+        "style-with-a-slash-in-a-textarea-is-text",
+    ],
+)
+@pytest.mark.parametrize("older_html_parser", [False, True], ids=["html-parser", "older-html-parser"])
+async def test_get_webio_command_range_reads_a_text_element_with_a_slash_as_text(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    monkeypatch: pytest.MonkeyPatch,
+    html: str,
+    expected: tuple[float | None, float | None],
+    older_html_parser: bool,
+) -> None:
+    """A browser ignores the slash of an HTML start tag: what follows <style/> is its text up to </style>."""
+    if older_html_parser:
+        _emulate_an_older_html_parser(monkeypatch)
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, html)
+
+    assert await logged_in.get_webio_command_range(1324, 34) == expected
+
+
+@pytest.mark.parametrize("tag", ["style", "xmp", "iframe", "noembed", "noframes"])
+@pytest.mark.parametrize("slash", ["", "/"], ids=["start-tag", "start-tag-with-a-slash"])
+async def test_get_webio_command_range_ends_a_raw_text_element_at_its_end_tag_inside_a_comment(
+    logged_in: ComexioClient, comexio: FakeComexio, tag: str, slash: str
+) -> None:
+    """Raw text knows no comment: the first </xmp> ends an <xmp>, with or without a slash on its start tag."""
+    comexio.serve_text(
+        "GET",
+        WEBIO_EDIT_COMMAND_PATH,
+        f'<{tag}{slash}><!-- </{tag}> --><input id="min_cmd_io_0" value="-5">'
+        f'</{tag}><input id="min_cmd_io_0" value="0">',
+    )
+
+    assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+
+
 @pytest.mark.skipif(not client_module._HTML_PARSER_SCRIPTING, reason="html.parser cannot read a <noscript> as raw text")
 async def test_get_webio_command_range_reads_a_noscript_as_raw_text(
     logged_in: ComexioClient, comexio: FakeComexio

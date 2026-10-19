@@ -2167,6 +2167,7 @@ class _FormParser(HTMLParser):
         self._formatting: list[str] = []
         self._foreign: list[_ForeignElement] = []  # open SVG/MathML elements, outermost first
         self._foreign_start = False  # the last start tag was a foreign element: html.parser keeps no text mode for it
+        self._text_start = False  # the last start tag was text of a text-only element (older html.parser reports it)
         self._closing = False  # close() is reading the rest of the page: no more of it will come
         self._sync_cdata_support()
 
@@ -2183,12 +2184,15 @@ class _FormParser(HTMLParser):
         # is still its text; a void element such as <input/> has no end tag either way. The slash only closes a
         # foreign element, such as <svg/>.
         self._start(tag, attrs, self_closing=True)
+        if tag in self.CDATA_CONTENT_ELEMENTS:
+            # html.parser switches to raw text only after handle_starttag; after <style/> a browser reads it too.
+            self.set_cdata_mode(tag)
         self._sync_cdata_support()
 
     def set_cdata_mode(self, elem: str, *args: Any, **kwargs: Any) -> None:
-        # html.parser switches to text mode after handle_starttag; a foreign element (an SVG <style>) has none, and
-        # inside an open select a browser ignores the tag.
-        if self._foreign_start or (self._reads_select_markup() and elem in _IGNORED_IN_SELECT):
+        # html.parser switches to text mode after handle_starttag; a foreign element (an SVG <style>) has none, a tag
+        # that is text of a text-only element is none, and inside an open select a browser ignores the tag.
+        if self._foreign_start or self._text_start or (self._reads_select_markup() and elem in _IGNORED_IN_SELECT):
             return
         super().set_cdata_mode(elem, *args, **kwargs)
 
@@ -2236,7 +2240,8 @@ class _FormParser(HTMLParser):
 
     def _start(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> None:
         self._foreign_start = False
-        if self._text_only is not None:
+        self._text_start = self._text_only is not None
+        if self._text_start:
             return
         if self._foreign and self._is_foreign(tag, attrs):
             self._start_foreign(tag, attrs, self_closing=self_closing)
