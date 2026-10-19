@@ -16,7 +16,7 @@ import secrets
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from html.parser import HTMLParser
 from http import HTTPStatus
@@ -38,9 +38,13 @@ from .exceptions import (
 )
 from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_missing_collections
 from .scrape import (
+    TimeServerSettings,
     parse_comexio_version,
+    parse_free_storage_percent,
     parse_io_input_types,
     parse_io_types,
+    parse_run_duration,
+    parse_time_server,
     parse_webio_add_page,
     scrape_js_vars,
 )
@@ -53,6 +57,7 @@ __all__ = [
     "IoAddress",
     "LiveStates",
     "RawConfig",
+    "SystemInfo",
     "WebioBaseInfo",
     "WebioCommandForm",
 ]
@@ -70,6 +75,7 @@ _BUS_WORKLOAD_PATH = "/admin/in_output/inoutputinfo"
 _BUS_WORKLOAD_REFERER_PATH = "/admin/in_output/home"
 _EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
 _SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
+_RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
 _API_PATH = "/api/"
 _WEBIO_HOME_PATH = "/admin/web_io/home"
 _WEBIO_ADD_PATH = "/admin/web_io/add"
@@ -192,6 +198,19 @@ class RawConfig:
     io_types: dict[str, Any]
     io_input_types: dict[str, Any]
     comexio_version: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SystemInfo:
+    """General system information from the system dashboard page.
+
+    free_storage_percent is the free space of the Comexio's internal storage in percent (0-100),
+    time_server the date & time form's time server settings; either is None if the page does not
+    show it (logged at WARNING).
+    """
+
+    free_storage_percent: float | None
+    time_server: TimeServerSettings | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -608,6 +627,43 @@ class ComexioClient:
         if not isinstance(data, dict):
             raise ComexioDataError(f"Bus workload payload is not an object: {_excerpt(data)}")
         return data
+
+    async def get_system_info(self) -> SystemInfo:
+        """General system information (free storage, time server settings) from the system dashboard page.
+
+        The page is requested without any query parameter: the same URL with restart=1 reboots
+        the system (system_emergency_reboot). Raises ComexioAuthenticationError if the session is
+        no longer logged in and ComexioDataError if the page shows none of the information; a part
+        that is missing alone is None and logged at WARNING.
+        """
+        html = await self._request_admin_text("GET", _SYSTEM_DASHBOARD_PATH, what="System info")
+        info = SystemInfo(free_storage_percent=parse_free_storage_percent(html), time_server=parse_time_server(html))
+        if info.free_storage_percent is None and info.time_server is None:
+            raise ComexioDataError(f"System dashboard page ({len(html)} chars) shows no system information")
+        for part, value in (("free_storage_percent", info.free_storage_percent), ("time_server", info.time_server)):
+            if value is None:
+                _LOGGER.warning("System dashboard page of %r does not show %s", self._host, part)
+        return info
+
+    async def get_uptime(self) -> timedelta:
+        """How long the Comexio system has been running (the system dashboard's active time).
+
+        Raises ComexioAuthenticationError if the session is no longer logged in and
+        ComexioDataError if the answer carries no parseable duration.
+        """
+        # The login form check by its submit button, not by its (German) heading: any UI language.
+        body = await self._request_admin_text(
+            "POST", _RUN_DURATION_PATH, what="Uptime", headers=self._xhr_headers(_SYSTEM_DASHBOARD_PATH)
+        )
+        try:
+            data = json.loads(body)
+        except ValueError as err:
+            raise ComexioDataError(f"Uptime answer is not JSON: {_excerpt(body)}") from err
+        duration = data.get("duration") if isinstance(data, dict) else None
+        uptime = parse_run_duration(duration) if isinstance(duration, str) else None
+        if uptime is None:
+            raise ComexioDataError(f"Uptime answer carries no parseable duration: {_excerpt(data)}")
+        return uptime
 
     async def check_extension_firmware(self) -> list[dict[str, Any]]:
         """Available firmware updates for the base module and every extension on the local bus.

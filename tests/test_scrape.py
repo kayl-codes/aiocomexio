@@ -2,15 +2,20 @@
 
 import json
 import logging
+from datetime import timedelta
 
 import pytest
 
 from aiocomexio.scrape import (
+    TimeServerSettings,
     extract_js_object_literal,
     normalize_js_like_object,
     parse_comexio_version,
+    parse_free_storage_percent,
     parse_io_input_types,
     parse_io_types,
+    parse_run_duration,
+    parse_time_server,
     parse_webio_add_page,
     scrape_js_vars,
 )
@@ -253,3 +258,205 @@ def test_scrape_js_vars_non_object_value_does_not_steal_next_object() -> None:
     html = '<script>var $A = 5; var $B = {"x": 1};</script>'
 
     assert scrape_js_vars(html, page_label="test") == {"B": {"x": 1}}
+
+
+# --- system dashboard: free storage ------------------------------------------------------------
+
+_DASHBOARD_PAGE = "system_dashboard_page.html"
+
+
+def _dashboard(
+    label: str = "Freier Speicherplatz", rows: str = "<tr><td >Freier Speicherplatz:</td><td >43%</td></tr>"
+) -> str:
+    """A system dashboard page whose $I18N names the free storage label, with the given table rows."""
+    i18n = json.dumps({"module": {"free_flash": label}})
+    return f"<html><script>var $I18N = {i18n};</script><table>{rows}</table></html>"
+
+
+def test_parse_free_storage_percent_reads_the_labelled_row() -> None:
+    assert parse_free_storage_percent(load_fixture(_DASHBOARD_PAGE)) == 43.0
+
+
+@pytest.mark.parametrize(
+    ("label", "rows", "expected"),
+    [
+        ("Free diskspace", "<tr><td >Free diskspace:</td><td >14%</td></tr>", 14.0),
+        ("Espace libre", "<tr><td>Espace libre :</td><td> 7 % </td></tr>", 7.0),
+        ("Speicher & Co", "<tr><td>Speicher &amp; Co:</td><td>100%</td></tr>", 100.0),
+        ("Freier Speicherplatz", "<tr><td>Freier Speicherplatz:</td><td>0%</td></tr>", 0.0),
+        # A label that carries the colon itself, in $I18N or without one in the cell.
+        ("Freier Speicherplatz:", "<tr><td>Freier Speicherplatz:</td><td>43%</td></tr>", 43.0),
+        ("Freier Speicherplatz:", "<tr><td>Freier Speicherplatz</td><td>43%</td></tr>", 43.0),
+        ("Freier Speicherplatz", "<tr><td>Freier Speicherplatz:</td><td>43,5%</td></tr>", 43.5),
+        ("Freier Speicherplatz", "<tr><td>Freier Speicherplatz:</td><td>43.5%</td></tr>", 43.5),
+        # Another row with a label that merely starts like it does not count.
+        (
+            "Freier Speicherplatz",
+            "<tr><td>Freier Speicherplatz SD:</td><td>99%</td></tr><tr><td>Freier Speicherplatz:</td><td>43%</td></tr>",
+            43.0,
+        ),
+    ],
+)
+def test_parse_free_storage_percent_follows_the_page_label(label: str, rows: str, expected: float) -> None:
+    assert parse_free_storage_percent(_dashboard(label, rows)) == expected
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        pytest.param("<html><table><tr><td>Freier Speicherplatz:</td><td>43%</td></tr></table></html>", id="no-i18n"),
+        pytest.param(
+            '<html><script>var $I18N = {"module": {"serial": "Seriennummer"}};</script>'
+            "<tr><td>Freier Speicherplatz:</td><td>43%</td></tr></html>",
+            id="no-free-flash-key",
+        ),
+        pytest.param(
+            '<html><script>var $I18N = {"module": {"free_flash": 5}};</script><tr><td>5:</td><td>43%</td></tr></html>',
+            id="label-not-a-string",
+        ),
+        pytest.param(_dashboard(label=" "), id="blank-label"),
+        pytest.param(_dashboard(rows="<tr><td>Seriennummer:</td><td>1</td></tr>"), id="no-row"),
+        pytest.param(
+            _dashboard(
+                rows="<tr><td>Freier Speicherplatz:</td><td>43%</td></tr>"
+                "<tr><td>Freier Speicherplatz:</td><td>12%</td></tr>"
+            ),
+            id="two-rows",
+        ),
+        pytest.param(_dashboard(rows="<tr><td>Freier Speicherplatz:</td><td>n/a</td></tr>"), id="not-a-number"),
+        pytest.param(_dashboard(rows="<tr><td>Freier Speicherplatz:</td><td>43</td></tr>"), id="no-percent-sign"),
+        pytest.param(_dashboard(rows="<tr><td>Freier Speicherplatz:</td><td>101%</td></tr>"), id="above-100"),
+        pytest.param(_dashboard(rows="<tr><td>Freier Speicherplatz:</td><td>-1%</td></tr>"), id="negative"),
+        pytest.param(_dashboard(rows="<tr><td>Freier Speicherplatz:</td><td>\u0664\u0663%</td></tr>"), id="non-ascii"),
+        pytest.param(_dashboard(rows="<tr><td>Freier Speicherplatz:</td><td>1 GB 43%</td></tr>"), id="extra-text"),
+    ],
+)
+def test_parse_free_storage_percent_returns_none_without_a_clear_value(page: str) -> None:
+    assert parse_free_storage_percent(page) is None
+
+
+# --- system dashboard: uptime ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("12 Tage 21:16:16", timedelta(days=12, hours=21, minutes=16, seconds=16)),
+        ("1 Tag 00:00:05", timedelta(days=1, seconds=5)),
+        ("3 days 01:02:03", timedelta(days=3, hours=1, minutes=2, seconds=3)),
+        ("2 días 10:00:00", timedelta(days=2, hours=10)),
+        ("0 Tage 00:00:00", timedelta(0)),
+        ("21:16:16", timedelta(hours=21, minutes=16, seconds=16)),
+        ("  12 Tage 21:16:16 ", timedelta(days=12, hours=21, minutes=16, seconds=16)),
+    ],
+)
+def test_parse_run_duration(text: str, expected: timedelta) -> None:
+    assert parse_run_duration(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "12 Tage",
+        "12 Tage 21:16",
+        "12 Tage 21:61:16",
+        "12 Tage 21:16:60",
+        "Tage 21:16:16",
+        "12 21:16:16",
+        "١ Tag 01:02:03",
+    ],
+)
+def test_parse_run_duration_returns_none_when_unparsable(text: str) -> None:
+    assert parse_run_duration(text) is None
+
+
+def test_parse_free_storage_percent_ignores_a_row_with_nested_markup() -> None:
+    # Only plain-text cells are read; a tag inside the cell leaves the value unclear.
+    assert (
+        parse_free_storage_percent(_dashboard(rows="<tr><td>Freier Speicherplatz:</td><td><b>43%</b></td></tr>"))
+        is None
+    )
+
+
+# --- system dashboard: time server -------------------------------------------------------------
+
+
+def _time_form(checkbox: str = 'checked="checked"', server: str = 'value="ntp.example.org"', options: str = "") -> str:
+    """The date & time form of a system dashboard page with the given checkbox, field and interval options."""
+    return (
+        f'<form><input type="checkbox" id="use_timeserver" name="use_timeserver" {checkbox} />'
+        f'<input type="text" id="timeserver" name="timeserver" {server} />'
+        f'<select id="timeserver_update_rate">{options}</select></form>'
+    )
+
+
+def test_parse_time_server_reads_the_form() -> None:
+    assert parse_time_server(load_fixture(_DASHBOARD_PAGE)) == TimeServerSettings(
+        enabled=True, server="ntp.example.org", update_interval=86400
+    )
+
+
+@pytest.mark.parametrize(
+    ("page", "expected"),
+    [
+        pytest.param(_time_form(checkbox=""), TimeServerSettings(False, "ntp.example.org", None), id="unchecked"),
+        pytest.param(
+            _time_form(checkbox="checked"), TimeServerSettings(True, "ntp.example.org", None), id="bare-checked"
+        ),
+        pytest.param(_time_form(server='value=""'), TimeServerSettings(True, "", None), id="empty-server"),
+        pytest.param(_time_form(server=""), TimeServerSettings(True, "", None), id="no-value-attribute"),
+        pytest.param(
+            _time_form(server='value="  ntp &amp; co "'), TimeServerSettings(True, "ntp & co", None), id="escaped"
+        ),
+        pytest.param(
+            _time_form(options='<option value="3600" selected>1</option><option value="7200">2</option>'),
+            TimeServerSettings(True, "ntp.example.org", 3600),
+            id="interval",
+        ),
+        pytest.param(
+            _time_form(options='<option value="3600" selected>1</option><option value="7200" selected>2</option>'),
+            TimeServerSettings(True, "ntp.example.org", None),
+            id="two-selected-intervals",
+        ),
+        pytest.param(
+            _time_form(options='<option value="1h" selected>1</option>'),
+            TimeServerSettings(True, "ntp.example.org", None),
+            id="interval-not-a-number",
+        ),
+        pytest.param(
+            _time_form(options='<option value="0" selected>0</option>'),
+            TimeServerSettings(True, "ntp.example.org", None),
+            id="interval-zero",
+        ),
+        pytest.param(
+            # An unclosed interval select ends at the next non-option tag.
+            '<input type="checkbox" id="use_timeserver" checked /><input type="text" id="timeserver" value="a" />'
+            '<select id="timeserver_update_rate"><option value="60">1</option><div>'
+            '<option value="5" selected>5</option></div>',
+            TimeServerSettings(True, "a", None),
+            id="unclosed-select",
+        ),
+        pytest.param(
+            # A selected option of another select (the time zone) is not the interval.
+            '<select id="timezone_continent"><option value="5" selected>Europa</option></select>' + _time_form(),
+            TimeServerSettings(True, "ntp.example.org", None),
+            id="other-select",
+        ),
+    ],
+)
+def test_parse_time_server_settings(page: str, expected: TimeServerSettings) -> None:
+    assert parse_time_server(page) == expected
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        pytest.param("<html><body>kein Formular</body></html>", id="no-form"),
+        pytest.param('<input type="text" id="timeserver" value="ntp.example.org" />', id="no-checkbox"),
+        pytest.param('<input type="checkbox" id="use_timeserver" checked />', id="no-field"),
+        pytest.param(_time_form() + _time_form(), id="two-forms"),
+    ],
+)
+def test_parse_time_server_returns_none_without_a_clear_form(page: str) -> None:
+    assert parse_time_server(page) is None

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="de"><head>
+<title>COMEXIO Studio</title>
+<script type="text/javascript">
+var $I18N = {"format":{"date":"dd.mm.yy","decimals":2},"module":{"serial":"Seriennummer","free_flash":"Freier Speicherplatz","general_system_info":"Allgemeine System-Information"}};
+</script>
+</head><body>
+<table><thead><tr><th>Datum &amp; Uhrzeit</th><th></th></tr></thead><tbody>
+<tr><td>Aktuelle Systemzeit</td><td><input type="text" id="tm_hour" name="tm_hour" value="--" readonly="readonly" /></td></tr>
+<tr class="blue_text"><td><label for="use_timeserver">Zeitserver verwenden.</label></td><td ><input type="checkbox" id="use_timeserver" name="use_timeserver" checked="checked" onclick="change_use_timeserver()" /></td></tr>
+</tbody></table>
+<div class ="more_time is_hidden"><table><thead><tr><th>Zeit Sync.</th><th></th></tr></thead><tbody class="solid-line">
+<tr class="blue_text"><td><label for="timeserver">Zeitserver</label></td><td colspan="2"><input type="text" id="timeserver" name="timeserver" value="ntp.example.org" /></td></tr>
+<tr class="blue_text timezone_settings"><td><label for="timezone_continent">Kontinent</label></td><td colspan="2"><select id="timezone_continent" name="timezone_continent"><option value="Europe" selected="selected">Europa</option></select></td></tr>
+<tr class="blue_text"><td>Zeitserver Abfrageintervall in Stunden</td><td><select id="timeserver_update_rate" name="timeserver_update_rate"><option value="3600">1</option><option value="7200">2</option><option value="86400" selected="selected">24</option></select></td></tr>
+</tbody></table></div>
+<table>
+<tr><th>Allgemeine System-Information</th><th></th></tr>
+<tr><td>Hardware Version:</td><td>IO-Server 3G</td></tr>
+<tr><td>Seriennummer:</td><td>0000-0000-0000</td></tr>
+<tr><td > Aktiv-Dauer:<td id="running_duration"></td></tr><tr><td >Freier Speicherplatz:</td><td >43%</td></tr><tr><td>SD-Karte:</td><td>Keine SD-Karte gefunden</td></tr>
+</table>
+</body></html>
