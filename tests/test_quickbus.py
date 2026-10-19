@@ -587,6 +587,9 @@ def test_missing_type_table_keeps_quickbus_ios(io_types: Any, caplog: pytest.Log
         "302",
     }
     assert "no usable row in the IO type table" not in caplog.text
+    # io_all keeps every IO (plan labels), the inactive 46 and 212 included, and none of them unknown.
+    assert {io["id"] for io in result["io_all"]} == {io["id"] for io in _parse()["io_all"]}
+    assert {"46", "212"} <= {io["id"] for io in result["io_all"]}
     assert all(isinstance(io["is_binary"], bool) for io in result["io_all"])
 
 

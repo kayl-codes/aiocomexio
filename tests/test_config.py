@@ -394,8 +394,19 @@ def test_malformed_config_entries_are_skipped() -> None:
     assert result["webio_devices"][WebioClass.MARKER]["device_id"] == "30"
 
 
-@pytest.mark.parametrize("binary", [None, "false", 0])
-def test_a_type_row_with_a_non_bool_binary_is_no_row(binary: Any, caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize(
+    ("row", "logged"),
+    [
+        ({"binary": None, "min": 0, "max": 100}, "'2': None"),
+        ({"binary": "false", "min": 0, "max": 100}, "'2': 'false'"),
+        ({"binary": 0, "min": 0, "max": 100}, "'2': 0"),
+        # Without "binary" the kind is just as unknown — no silent "analog".
+        ({"min": 0, "max": 100}, "'2': missing"),
+    ],
+)
+def test_a_type_row_without_a_bool_binary_is_no_row(
+    row: dict[str, Any], logged: str, caplog: pytest.LogCaptureFixture
+) -> None:
     """Kept, "binary": null would put is_binary None into an active IO and abort the Web-IO build."""
     conf = {
         "FubModules": {
@@ -405,13 +416,13 @@ def test_a_type_row_with_a_non_bool_binary_is_no_row(binary: Any, caplog: pytest
     }
 
     with caplog.at_level(logging.WARNING):
-        result = parse_config(conf, io_types={"2": {"binary": binary, "min": 0, "max": 100}})
+        result = parse_config(conf, io_types={"2": row})
 
     # Once per parse, not once per IO / KNX object reading the row.
     rows_warnings = [r.getMessage() for r in caplog.records if "IO type table rows" in r.getMessage()]
     assert len(rows_warnings) == 1
     assert '1 IO type table rows have no boolean "binary" and are ignored' in rows_warnings[0]
-    assert f"'2': {binary!r}" in rows_warnings[0]
+    assert logged in rows_warnings[0]
 
     # Classified by identifier (Q1 = binary output) / unresolved KNX, like a type without a row.
     assert [(io["identifier"], io["is_binary"], io["max"]) for io in result["io"]] == [("Q1", True, 1)]

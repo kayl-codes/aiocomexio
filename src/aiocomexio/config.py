@@ -213,22 +213,22 @@ def _table_entry(table: Mapping[str, Any], key: Any) -> Mapping[str, Any]:
 
 
 def _io_type_row(io_types: Mapping[str, Any], type_id: Any) -> Mapping[str, Any]:
-    """The IO type table row of type_id, or {} if it has none or its "binary" is no bool.
+    """The IO type table row of type_id, or {} if it has none or no bool "binary".
 
-    A row with "binary": null (or "false", 0, ...) cannot tell binary from analog; kept, it would
-    put a None or a misread kind into an active IO and its Web-IO command. Treated as no row, the
-    IO falls back like one without a type row.
+    A row without "binary", or with "binary": null (or "false", 0, ...), cannot tell binary from
+    analog; kept, it would put a None or a guessed kind into an active IO, its Web-IO command or
+    a KNX object. Treated as no row, the IO falls back like one without a type row.
     """
     row = _table_entry(io_types, type_id)
-    return row if isinstance(row.get("binary", False), bool) else {}
+    return row if isinstance(row.get("binary"), bool) else {}
 
 
 def _warn_malformed_type_rows(io_types: Mapping[str, Any]) -> None:
     """Warn once per parse about IO type rows _io_type_row drops — a scraper or firmware problem, not a missing row."""
     malformed = [
-        f"{_short_repr(type_id)}: {_short_repr(row.get('binary'))}"
+        f"{_short_repr(type_id)}: {_short_repr(row['binary']) if 'binary' in row else 'missing'}"
         for type_id, row in io_types.items()
-        if isinstance(row, Mapping) and not isinstance(row.get("binary", False), bool)
+        if isinstance(row, Mapping) and not isinstance(row.get("binary"), bool)
     ]
     if malformed:
         _LOGGER.warning(
