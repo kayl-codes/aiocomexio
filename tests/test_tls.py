@@ -176,7 +176,19 @@ def test_https_address_uses_the_port_in_host_or_443(host: str, expected: tuple[s
     assert https_address(host) == expected
 
 
-@pytest.mark.parametrize("host", ["", ":443", "comexio:notaport", "comexio:99999"])
+@pytest.mark.parametrize(
+    "host",
+    [
+        "",
+        ":443",
+        "comexio:notaport",
+        "comexio:99999",
+        "comexio.local/admin",
+        "comexio.local?x=1",
+        "comexio.local#top",
+        "attacker.example@comexio.local",
+    ],
+)
 def test_https_address_rejects_malformed_hosts(host: str) -> None:
     with pytest.raises(ValueError) as excinfo:
         https_address(host)
@@ -294,15 +306,16 @@ async def test_fetch_certificate_fingerprint_keeps_one_deadline_for_handshake_an
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     writer = _StallingWriter(_SslObject(b"synthetic certificate"))
-    # The handshake uses most of the time; a fresh timeout for closing would double the total.
-    monkeypatch.setattr(asyncio, "open_connection", _open_connection_returning(writer, delay=0.4))
-    monkeypatch.setattr(aiocomexio.tls, "FINGERPRINT_FETCH_TIMEOUT_SEC", 0.5)
+    # The handshake uses most of the 1.2 s; a fresh timeout for closing would take the total to 2.2 s.
+    # 2 s leaves 0.8 s of slack for a loaded test runner.
+    monkeypatch.setattr(asyncio, "open_connection", _open_connection_returning(writer, delay=1.0))
+    monkeypatch.setattr(aiocomexio.tls, "FINGERPRINT_FETCH_TIMEOUT_SEC", 1.2)
     started = asyncio.get_running_loop().time()
 
     fingerprint = await fetch_certificate_fingerprint(_SYNTHETIC_HOST)
 
     assert fingerprint == hashlib.sha256(b"synthetic certificate").hexdigest()
-    assert asyncio.get_running_loop().time() - started < 0.75
+    assert asyncio.get_running_loop().time() - started < 2.0
     assert writer.closed
 
 
@@ -557,6 +570,13 @@ async def test_unpinned_client_still_uses_plain_http(client: ComexioClient, come
 
     assert client.fingerprint is None
     assert comexio.received_at("GET", ADMIN_PATH)
+
+
+def test_pinned_client_rejects_a_host_with_url_parts() -> None:
+    session: Any = object()  # never used: construction fails first
+    with pytest.raises(ValueError) as excinfo:
+        ComexioClient("comexio.local/admin", USERNAME, PASSWORD, session=session, fingerprint=FOREIGN_FINGERPRINT)
+    assert str(excinfo.value) == "'comexio.local/admin' is not a host name or address"
 
 
 def test_client_rejects_an_invalid_fingerprint() -> None:

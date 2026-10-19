@@ -61,7 +61,8 @@ def https_address(host: str) -> tuple[str, int]:
     """Host name and port an https:// URL for host reaches: the port in host if any, else 443.
 
     host is what ComexioClient takes ("hostname", "ip" or either with ":port", IPv6 in brackets).
-    Raises ValueError for a host that does not form a URL.
+    Raises ValueError for anything else: a host that does not form a URL, or one that carries a
+    path, query, fragment or user info, which would point the URL somewhere other than host.
     """
     message = f"{host!r} is not a host name or address"
     parts = urlsplit(f"https://{host}")
@@ -69,7 +70,8 @@ def https_address(host: str) -> tuple[str, int]:
         port = parts.port
     except ValueError as err:
         raise ValueError(message) from err
-    if not parts.hostname:
+    # netloc != host: a path, query or fragment followed; "@": user info precedes the real host.
+    if not parts.hostname or parts.netloc != host or "@" in host:
         raise ValueError(message)
     return parts.hostname, _HTTPS_DEFAULT_PORT if port is None else port
 

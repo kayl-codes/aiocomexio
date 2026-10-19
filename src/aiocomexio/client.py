@@ -48,7 +48,7 @@ from .scrape import (
     scrape_js_vars,
 )
 from .session import is_local_address
-from .tls import _HTTPS_DEFAULT_PORT, format_fingerprint, normalize_fingerprint
+from .tls import _HTTPS_DEFAULT_PORT, format_fingerprint, https_address, normalize_fingerprint
 from .webio import CONTENT_TYPE_JSON, WEBIO_PROTOCOL_HTTP
 
 __all__ = [
@@ -293,6 +293,7 @@ class ComexioClient:
             # Unpinned: _warn_plain_http flags non-local hosts before credentials go out.
             self._base_url = f"http://{host}"  # NOSONAR
         else:
+            https_address(host)  # a pinned client must reach exactly the host the fingerprint was read from
             self._base_url = f"https://{host}"
             self._ssl = aiohttp.Fingerprint(bytes.fromhex(self._fingerprint))
         self._plain_http_warned = False
