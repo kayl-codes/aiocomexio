@@ -1,7 +1,8 @@
 """Async client for the Comexio IO-Server: admin login, reads, value writes, Web-IO and function plans.
 
 The client works on an aiohttp.ClientSession the caller creates and owns (see
-session.session_kwargs for the settings it needs). It never closes that session. Every call
+session.session_kwargs for the settings it needs). It never closes that session. With a pinned
+certificate fingerprint (see tls) it talks HTTPS, otherwise plain HTTP. Every call
 either returns real data or raises a ComexioError subclass. The one exception is an invalid
 argument (a non-finite value for a set_*_value call, a non-numeric command_id, ...): that
 raises ValueError or TypeError before anything is sent, as the method's docstring states.
@@ -14,14 +15,15 @@ import math
 import re
 import secrets
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from html.parser import HTMLParser
 from http import HTTPStatus
 from typing import Any, NamedTuple, TypeIs
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -29,6 +31,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from .config import iter_group
 from .exceptions import (
     ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
     ComexioConnectionError,
     ComexioCreatedWithoutIdError,
     ComexioDataError,
@@ -49,6 +52,7 @@ from .scrape import (
     scrape_js_vars,
 )
 from .session import is_local_address
+from .tls import _HTTPS_DEFAULT_PORT, format_fingerprint, https_address, normalize_fingerprint
 from .webio import CONTENT_TYPE_JSON, WEBIO_PROTOCOL_HTTP
 
 __all__ = [
@@ -166,6 +170,10 @@ _PLAN_DPI_RANGE = range(45, 121)
 # save_fub / delete answer with a redirect whose query carries the verdict as one (key, value)
 # parameter; the home page renders its message from exactly that parameter (verified live).
 _REDIRECT_STATUSES = frozenset({HTTPStatus.MOVED_PERMANENTLY, HTTPStatus.FOUND, HTTPStatus.SEE_OTHER})
+# Redirects a pinned client follows itself (aiohttp would also follow one to plain http://, without
+# the pin, and send the session cookie along). Like aiohttp, a POST turns into a GET on 301/302/303.
+_FOLLOWED_REDIRECT_STATUSES = _REDIRECT_STATUSES | {HTTPStatus.TEMPORARY_REDIRECT, HTTPStatus.PERMANENT_REDIRECT}
+_MAX_REDIRECTS = 10
 _PLAN_ADDED_CONFIRMATION = ("added", "1")
 _PLAN_SAVED_CONFIRMATION = ("saved", "1")
 _PLAN_DELETED_CONFIRMATION = ("delete", "ok")
@@ -271,11 +279,15 @@ class LiveStates:
 class ComexioClient:
     """Admin-session client for one Comexio IO-Server.
 
-    host is "hostname", "ip" or either with ":port". The server only speaks plain HTTP. session
-    must have its own cookie jar (session.session_kwargs), since the admin login lives in it.
-    Call login() before any other admin method. api_username / api_password are the separate
-    Comexio API user the set_*_value methods send as Basic Auth; without api_username they send
-    no credentials at all.
+    host is "hostname", "ip" or either with ":port". With fingerprint (the SHA-256 fingerprint of
+    the server's TLS certificate, see tls.fetch_certificate_fingerprint) every request goes over
+    HTTPS and is refused with ComexioCertificateMismatchError unless the server presents exactly
+    that certificate; without it the client uses plain HTTP. A pinned client follows a redirect only
+    within its HTTPS origin. An invalid fingerprint string raises ValueError, a non-str TypeError.
+    The port in host applies to whichever scheme is used. session must have its own cookie jar
+    (session.session_kwargs), since the admin login lives in it. Call login() before any other
+    admin method. api_username / api_password are the separate Comexio API user the set_*_value
+    methods send as Basic Auth; without api_username they send no credentials at all.
     """
 
     def __init__(
@@ -287,6 +299,7 @@ class ComexioClient:
         session: aiohttp.ClientSession,
         api_username: str = "",
         api_password: str = "",  # nosec B107
+        fingerprint: str | None = None,
     ) -> None:
         self._host = host
         self._username = username
@@ -294,8 +307,15 @@ class ComexioClient:
         self._api_username = api_username
         self._api_password = api_password
         self._session = session
-        # The IO-Server has no HTTPS endpoint; _warn_plain_http flags non-local hosts before credentials go out.
-        self._base_url = f"http://{host}"  # NOSONAR
+        self._fingerprint = None if fingerprint is None else normalize_fingerprint(fingerprint)
+        self._ssl: aiohttp.Fingerprint | bool = True
+        if self._fingerprint is None:
+            # Unpinned: _warn_plain_http flags non-local hosts before credentials go out.
+            self._base_url = f"http://{host}"  # NOSONAR
+        else:
+            https_address(host)  # a pinned client must reach exactly the host the fingerprint was read from
+            self._base_url = f"https://{host}"
+            self._ssl = aiohttp.Fingerprint(bytes.fromhex(self._fingerprint))
         self._plain_http_warned = False
 
     @property
@@ -303,11 +323,17 @@ class ComexioClient:
         """The host this client talks to."""
         return self._host
 
+    @property
+    def fingerprint(self) -> str | None:
+        """The pinned certificate fingerprint (64 lowercase hex digits), None when the client uses plain HTTP."""
+        return self._fingerprint
+
     async def login(self) -> None:
         """RSA admin login (Comexio v11 scheme: PKCS#1 v1.5 blocks over salt + nonce + password).
 
         Raises ComexioAuthenticationError if the server rejects the credentials (or the password
-        cannot be encoded for the login form), ComexioConnectionError / ComexioResponseError /
+        cannot be encoded for the login form), ComexioCertificateMismatchError if a pinned client
+        meets a foreign certificate, ComexioConnectionError / ComexioResponseError /
         ComexioDataError if the login could not be carried out at all.
         """
         self._warn_plain_http()
@@ -1407,7 +1433,7 @@ class ComexioClient:
 
     def _warn_plain_http(self) -> None:
         """Warn once that credentials go over plain HTTP to a non-local address."""
-        if self._plain_http_warned or is_local_address(self._host):
+        if self._fingerprint is not None or self._plain_http_warned or is_local_address(self._host):
             return
         _LOGGER.warning(
             "Sending Comexio credentials over plain HTTP to a non-local address (%s). "
@@ -1534,7 +1560,7 @@ class ComexioClient:
     ) -> str:
         """Body of one request as text, with transport errors and error statuses mapped to ComexioError."""
         try:
-            async with self._session.request(method, f"{self._base_url}{path}", **kwargs) as resp:
+            async with self._response(method, path, what=what, **kwargs) as resp:
                 if check_status and resp.status != HTTPStatus.OK:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
                 try:
@@ -1542,7 +1568,49 @@ class ComexioClient:
                 except UnicodeDecodeError as err:
                     raise ComexioDataError(f"{what}: response is not valid {resp.get_encoding()}") from err
         except (aiohttp.ClientError, TimeoutError) as err:
-            raise ComexioConnectionError(f"{what} failed: {err!r}") from err
+            raise self._transport_error(what, err) from err
+
+    @asynccontextmanager
+    async def _response(
+        self, method: str, path: str, *, what: str, **kwargs: Any
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
+        """The response to one request; a pinned client follows redirects itself, only within its HTTPS origin.
+
+        A redirect that leaves the pinned origin (plain http://, another host or port) raises
+        ComexioResponseError before it is followed, so neither the session cookie nor credentials
+        go anywhere the pin does not cover.
+        """
+        url = f"{self._base_url}{path}"
+        if self._fingerprint is None:
+            async with self._session.request(method, url, ssl=self._ssl, **kwargs) as resp:
+                yield resp
+            return
+        for _ in range(_MAX_REDIRECTS + 1):
+            async with self._session.request(method, url, ssl=self._ssl, allow_redirects=False, **kwargs) as resp:
+                if resp.status not in _FOLLOWED_REDIRECT_STATUSES:
+                    yield resp
+                    return
+                url = _pinned_redirect_target(resp, what)
+                # The Location carries its own query; like aiohttp, a 303 (except on a HEAD) and a POST on
+                # 301/302 continue as a body-less GET.
+                kwargs.pop("params", None)
+                see_other = resp.status == HTTPStatus.SEE_OTHER and method != "HEAD"
+                if see_other or (resp.status in _REDIRECT_STATUSES and method == "POST"):
+                    method = "GET"
+                    kwargs.pop("data", None)
+        raise ComexioResponseError(f"{what} failed: more than {_MAX_REDIRECTS} redirects", status=resp.status)
+
+    def _transport_error(self, what: str, err: aiohttp.ClientError | TimeoutError) -> ComexioError:
+        """The ComexioError for a request that failed below HTTP: a foreign certificate or a connection problem."""
+        if isinstance(err, aiohttp.ServerFingerprintMismatch):
+            expected, actual = err.expected.hex(), err.got.hex()
+            return ComexioCertificateMismatchError(
+                f"{what} refused: Comexio at {self._host!r} presented the TLS certificate "
+                f"{format_fingerprint(actual)} instead of the pinned {format_fingerprint(expected)}",
+                expected=expected,
+                actual=actual,
+            )
+        return ComexioConnectionError(f"{what} failed: {err!r}")
 
     async def _request_admin_text(self, method: str, path: str, *, what: str, **kwargs: Any) -> str:
         """_request_text for an admin page or action; the login form raises ComexioAuthenticationError.
@@ -1563,7 +1631,7 @@ class ComexioClient:
         """
         try:
             async with self._session.request(
-                method, f"{self._base_url}{path}", allow_redirects=False, **kwargs
+                method, f"{self._base_url}{path}", allow_redirects=False, ssl=self._ssl, **kwargs
             ) as resp:
                 if resp.status in _REDIRECT_STATUSES:
                     location = resp.headers.get("Location", "")
@@ -1582,7 +1650,7 @@ class ComexioClient:
                 status = resp.status
                 body = await (resp.text(errors="replace") if status == HTTPStatus.OK else _error_page_text(resp, what))
         except (aiohttp.ClientError, TimeoutError) as err:
-            raise ComexioConnectionError(f"{what} failed: {err!r}") from err
+            raise self._transport_error(what, err) from err
         if _LOGIN_FORM_SUBMIT_MARKER in body:
             raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
         if status != HTTPStatus.OK:
@@ -2040,6 +2108,39 @@ def _bulk_plan_entry(
     except ComexioDataError as err:
         _LOGGER.warning("Skipping bulk function plan %s: %s", fub_id, err)
         return None
+
+
+def _pinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
+    """Where a redirect of a pinned client leads; ComexioResponseError unless it stays on the same HTTPS origin."""
+    location = resp.headers.get("Location", "")
+    if not location:
+        raise ComexioResponseError(
+            f"{what} failed: Comexio answered {resp.status} without a Location header", status=resp.status
+        )
+    current = str(resp.url)
+    try:
+        target = urljoin(current, location)
+        same_origin = _https_origin(target) == _https_origin(current)
+    except ValueError as err:
+        raise ComexioResponseError(
+            f"{what} failed: Comexio redirected to an unparsable location {_excerpt(location)}", status=resp.status
+        ) from err
+    if not same_origin:
+        raise ComexioResponseError(
+            f"{what} refused: Comexio redirected to {_excerpt(location)}, outside the pinned HTTPS connection",
+            status=resp.status,
+        )
+    return target
+
+
+def _https_origin(url: str) -> tuple[str, str | None, int | None]:
+    """Scheme, host and port of url, the port filled in for https; ValueError for a malformed port."""
+    parts = urlsplit(url)
+    return (
+        parts.scheme.lower(),
+        parts.hostname,
+        _HTTPS_DEFAULT_PORT if parts.port is None and parts.scheme.lower() == "https" else parts.port,
+    )
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:

@@ -15,6 +15,27 @@ class ComexioConnectionError(ComexioError):
     """The server could not be reached, or the connection broke or timed out mid-request."""
 
 
+class ComexioCertificateMismatchError(ComexioError):
+    """The server presented a TLS certificate other than the pinned one.
+
+    Deliberately not a ComexioConnectionError: retrying cannot help. Either Comexio got a new
+    certificate (its "generate new certificate" action) or something else answers in its place.
+    expected and actual are SHA-256 fingerprints as 64 lowercase hex digits. The request that met
+    the foreign certificate was not sent; when it was a redirect hop, though, the requests before it
+    in the chain did reach the pinned server, so an action may already have been carried out.
+
+    A host name that resolves to several addresses is the exception: aiohttp tries the next one
+    after a mismatch and reports only the last failure, so a foreign certificate on one address and
+    an unreachable other address arrive as ComexioConnectionError. A caller that keeps getting
+    ComexioConnectionError can compare tls.fetch_certificate_fingerprint with the pin to tell them apart.
+    """
+
+    def __init__(self, message: str, *, expected: str, actual: str) -> None:
+        super().__init__(message)
+        self.expected = expected
+        self.actual = actual
+
+
 class ComexioAuthenticationError(ComexioError):
     """The server rejected the admin credentials."""
 
