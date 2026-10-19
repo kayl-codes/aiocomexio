@@ -204,8 +204,13 @@ def _io_command_range(io_item: Mapping[str, Any]) -> tuple[bool, float, float]:
     Uses the authentic min/max from the Comexio IO type definition, unless it lands in the
     int16 danger zone (see safe_webio_range). io_item["min"/"max"] can be present but None
     (scraped type value missing), so None is coerced explicitly rather than via .get()'s default.
+    An is_binary of None (an untyped Quickbus IO from io_all) raises ValueError: binary or analog
+    is unknown, and a guessed command type would push wrong values.
     """
-    is_ana = not io_item.get("is_binary", False)
+    binary = io_item.get("is_binary", False)
+    if binary is None:
+        raise ValueError(f"IO {io_item.get('id')!r} has an unknown kind (is_binary None), no Web-IO command")
+    is_ana = not binary
     raw_min = io_item.get("min")
     raw_max = io_item.get("max")
     v_min = 0 if raw_min is None else raw_min

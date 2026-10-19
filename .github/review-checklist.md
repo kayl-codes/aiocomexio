@@ -75,7 +75,9 @@ published on PyPI and consumed by the Home Assistant integration
   value, keys included").
 - **Scraped names in `config.py` log lines:** an extension name, identifier, title or other scraped string goes
   through `_log_safe` (control characters escaped, length cut), a raw value of unknown type through `_short_repr`
-  (capped repr), a list of names through `log_excerpt` — never as a bare `%s` or an uncapped `%r` (#32).
+  (capped repr), a list of names through `log_excerpt` — never as a bare `%s` or an uncapped `%r` (#32). This
+  applies to new and touched log calls; older calls (e.g. the title warnings in `marker_kind`) are not findings
+  unless the diff changes them.
 - **Caller values in new messages:** an id, name or value that comes from the caller or from Comexio is written as
   repr (`%r` in log calls, `!r` in f-strings for exceptions), so a line break in it cannot forge a log line and an
   empty string stays visible. Older `%s` calls are not a finding unless the diff touches them.

@@ -212,6 +212,33 @@ def _table_entry(table: Mapping[str, Any], key: Any) -> Mapping[str, Any]:
     return entry if isinstance(entry, Mapping) else {}
 
 
+def _io_type_row(io_types: Mapping[str, Any], type_id: Any) -> Mapping[str, Any]:
+    """The IO type table row of type_id, or {} if it has none or its "binary" is no bool.
+
+    A row with "binary": null (or "false", 0, ...) cannot tell binary from analog; kept, it would
+    put a None or a misread kind into an active IO and its Web-IO command. Treated as no row, the
+    IO falls back like one without a type row.
+    """
+    row = _table_entry(io_types, type_id)
+    return row if isinstance(row.get("binary", False), bool) else {}
+
+
+def _warn_malformed_type_rows(io_types: Mapping[str, Any]) -> None:
+    """Warn once per parse about IO type rows _io_type_row drops — a scraper or firmware problem, not a missing row."""
+    malformed = [
+        f"{_short_repr(type_id)}: {_short_repr(row.get('binary'))}"
+        for type_id, row in io_types.items()
+        if isinstance(row, Mapping) and not isinstance(row.get("binary", False), bool)
+    ]
+    if malformed:
+        _LOGGER.warning(
+            '%d IO type table rows have no boolean "binary" and are ignored — their IOs and KNX objects are '
+            "classified as if the type had no row: %s",
+            len(malformed),
+            log_excerpt(malformed),
+        )
+
+
 def iter_group(group: Any) -> Iterable[tuple[str, Any]]:
     """Iterate a Comexio id group as (id, member) pairs, ids normalized to str.
 
@@ -321,7 +348,7 @@ def parse_config(
     addressed by its unique "id" only — its ext_name/identifier pair repeats across devices, so
     ComexioClient.set_io_value cannot reach it: treat it as read-only even when is_input is False.
     Active IOs that repeat an identifier of their own device (Quickbus device or extension), and
-    active Quickbus IOs whose type has no row in a non-empty io_types, land only in "io_all" —
+    active Quickbus IOs whose type has no usable row in a non-empty io_types, land only in "io_all" —
     the latter with "is_binary" None (kind unknown).
     IOs whose canonical id repeats are left out of "io" (when two active ones share it) and of
     "io_all" (when any two IOs share it, inactive and left-out ones included: a label looked up
@@ -350,6 +377,7 @@ def parse_config(
             "IO, whose identifier says nothing, as analog) and every KNX object is flagged dpt_ambiguous"
         )
     io_types = io_types or {}
+    _warn_malformed_type_rows(io_types)
 
     _process_device_info(conf, data, options.webio_name, fub_modules)
     data[_KEY_MARKERS].extend(
@@ -579,11 +607,11 @@ def _source_item_type(module_key: str, type_raw: Any, io_types: Mapping[str, Any
 
     KNX Type is a rich catalog code in the same value space as IOs' $IOTypesBinary, not the
     simple {1,2,3} marker scale. A KNX Type without a usable io_types entry (missing, null, no
-    object or an empty one) is reported unresolved and defaults to "digital" — the safer of the two, it
-    never exposes a possibly-binary datapoint to analog writes.
+    object, an empty one or a non-bool "binary") is reported unresolved and defaults to "digital"
+    — the safer of the two, it never exposes a possibly-binary datapoint to analog writes.
     """
     if module_key == _MODULE_KNX:
-        if not (entry := _table_entry(io_types, type_raw)):
+        if not (entry := _io_type_row(io_types, type_raw)):
             return TYPE_DIGITAL, True
         return (TYPE_DIGITAL if entry.get("binary", False) else TYPE_ANALOG), False
     return (TYPE_ANALOG if type_raw in [2, 3] else TYPE_DIGITAL), False
@@ -1147,7 +1175,7 @@ def _type_bounds(type_info: Mapping[str, Any], ext_name: str, ident: str) -> tup
 def _untyped_quickbus_ios(
     ext_id: str, entries: list[dict[str, Any]], type_ids: list[Any], io_types: Mapping[str, Any]
 ) -> set[int]:
-    """Positions of the active Quickbus IOs whose type has no row in the IO type table.
+    """Positions of the active Quickbus IOs whose type has no usable row in the IO type table (_io_type_row).
 
     A plain IO falls back to its identifier (I1, Q1, QI1, ...); G1, TL1 or R of a Quickbus
     device say nothing about binary or analog, so its entity and Web-IO command would get a
@@ -1160,7 +1188,7 @@ def _untyped_quickbus_ios(
     untyped = [
         pos
         for pos, (entry, type_id) in enumerate(zip(entries, type_ids, strict=True))
-        if entry["quickbus"] and not entry["inactive"] and not _table_entry(io_types, type_id)
+        if entry["quickbus"] and not entry["inactive"] and not _io_type_row(io_types, type_id)
     ]
     if untyped:
         labels = [
@@ -1168,7 +1196,7 @@ def _untyped_quickbus_ios(
             for pos in untyped
         ]
         _LOGGER.warning(
-            "%d active Quickbus IOs of extension %s have no row in the IO type table, so binary or analog is "
+            "%d active Quickbus IOs of extension %s have no usable row in the IO type table, so binary or analog is "
             "unknown — they are left out of the active IOs (no entity, no Web-IO command): %s",
             len(untyped),
             ext_id,
@@ -1321,7 +1349,7 @@ def _build_io_entry(
     ident = _label(io_item.get("Identifier")) or io_id
     raw_desc = io_item.get("Description")
     description = _io_description(raw_desc if isinstance(raw_desc, str) else "", ident)
-    type_info = _table_entry(io_types, io_item.get("InOutputTypeId"))
+    type_info = _io_type_row(io_types, io_item.get("InOutputTypeId"))
     is_binary = type_info.get("binary", False)
     v_min, v_max = _type_bounds(type_info, ext_name, ident)
     ident_upper = ident.upper()

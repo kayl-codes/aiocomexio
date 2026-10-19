@@ -19,6 +19,7 @@ from aiocomexio.config import (
     parse_config,
 )
 from aiocomexio.const import MarkerKind, WebioClass
+from aiocomexio.webio import build_webio_commands
 from tests.common import load_json_fixture
 from tests.fake_comexio import DASHBOARD_REFRESH_PATH, FakeComexio
 
@@ -391,6 +392,29 @@ def test_malformed_config_entries_are_skipped() -> None:
     assert [m["id"] for m in result["markers"]] == ["2"]
     assert (result["knx"][0]["type"], result["knx"][0]["dpt_ambiguous"]) == (TYPE_DIGITAL, True)
     assert result["webio_devices"][WebioClass.MARKER]["device_id"] == "30"
+
+
+@pytest.mark.parametrize("binary", [None, "false", 0])
+def test_a_type_row_with_a_non_bool_binary_is_no_row(binary: Any, caplog: pytest.LogCaptureFixture) -> None:
+    """Kept, "binary": null would put is_binary None into an active IO and abort the Web-IO build."""
+    conf = {
+        "FubModules": {
+            "1": {"2": {"inoutput": {"5": {"Id": 5, "Identifier": "Q1", "InOutputTypeId": 2, "Active": True}}}},
+            "11": {"1": {"Id": 1, "Name": "Wert", "Type": 2}},
+        },
+    }
+
+    with caplog.at_level(logging.WARNING):
+        result = parse_config(conf, io_types={"2": {"binary": binary, "min": 0, "max": 100}})
+
+    assert '1 IO type table rows have no boolean "binary" and are ignored' in caplog.text
+    assert f"'2': {binary!r}" in caplog.text
+
+    # Classified by identifier (Q1 = binary output) / unresolved KNX, like a type without a row.
+    assert [(io["identifier"], io["is_binary"], io["max"]) for io in result["io"]] == [("Q1", True, 1)]
+    assert (result["knx"][0]["type"], result["knx"][0]["dpt_ambiguous"]) == (TYPE_DIGITAL, True)
+    commands = build_webio_commands("/api/webhook/x", result)
+    assert [c["TypeId"] for c in commands if "Q1" in c["Name"]] == [1]
 
 
 def test_malformed_identifiers_and_webio_command_names_do_not_crash(caplog: pytest.LogCaptureFixture) -> None:
