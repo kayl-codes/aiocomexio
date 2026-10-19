@@ -39,19 +39,31 @@ back — the object exists, do not create it again). One exception: the value se
 plain `ValueError`, which is not a `ComexioError`, for a non-finite float (`nan`, `inf`) before
 sending anything — catch it separately if your values can be non-finite.
 
+### HTTPS with a pinned certificate
+
+Comexio serves HTTPS with a self-signed certificate, so the client pins its SHA-256 fingerprint
+instead of verifying a CA. `fetch_certificate_fingerprint(host)` reads it from a bare TLS
+handshake — no HTTP request, no credentials. Pass it as `fingerprint=` and every request goes over
+HTTPS; a server presenting any other certificate raises `ComexioCertificateMismatchError` (not a
+`ComexioConnectionError`: retrying cannot help, the certificate was replaced or something else
+answers) before anything is sent. Without `fingerprint` the client uses plain HTTP. Store the
+fingerprint and reuse it; fetching it anew on every start would accept whatever certificate
+answers. `format_fingerprint()` renders it the way Comexio's admin page shows it.
+
 ```python
 import asyncio
 
 import aiohttp
 
-from aiocomexio import ComexioClient, session_kwargs
+from aiocomexio import ComexioClient, fetch_certificate_fingerprint, session_kwargs
 from aiocomexio.config import parse_config
 
 
 async def main() -> None:
     host = "192.168.0.20"
     async with aiohttp.ClientSession(**session_kwargs()) as session:
-        client = ComexioClient(host, "admin", "secret", session=session)
+        fingerprint = await fetch_certificate_fingerprint(host)  # once, at setup; then store it
+        client = ComexioClient(host, "admin", "secret", session=session, fingerprint=fingerprint)
         await client.login()
         raw = await client.get_raw_config()
         config = parse_config(raw.variables, io_types=raw.io_types, io_input_types=raw.io_input_types)
