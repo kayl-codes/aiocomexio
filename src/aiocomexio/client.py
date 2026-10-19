@@ -2078,7 +2078,7 @@ def _https_origin(url: str) -> tuple[str, str | None, int | None]:
     return (
         parts.scheme.lower(),
         parts.hostname,
-        parts.port or (_HTTPS_DEFAULT_PORT if parts.scheme.lower() == "https" else None),
+        _HTTPS_DEFAULT_PORT if parts.port is None and parts.scheme.lower() == "https" else parts.port,
     )
 
 

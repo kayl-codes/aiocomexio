@@ -71,7 +71,7 @@ def https_address(host: str) -> tuple[str, int]:
         raise ValueError(message) from err
     if not parts.hostname:
         raise ValueError(message)
-    return parts.hostname, port or _HTTPS_DEFAULT_PORT
+    return parts.hostname, _HTTPS_DEFAULT_PORT if port is None else port
 
 
 async def fetch_certificate_fingerprint(host: str) -> str:
@@ -83,19 +83,22 @@ async def fetch_certificate_fingerprint(host: str) -> str:
     trust on first use: whoever answers this one handshake gets pinned, so fetch once (at setup)
     and store the result rather than fetching it anew on every start.
 
-    Raises ComexioConnectionError if host cannot be reached over TLS within
-    FINGERPRINT_FETCH_TIMEOUT_SEC (no HTTPS on that port included), ComexioDataError if the
-    handshake completed without a certificate. A host that does not form a URL raises ValueError.
+    Handshake and closing share one deadline of FINGERPRINT_FETCH_TIMEOUT_SEC. Raises
+    ComexioConnectionError if host cannot be reached over TLS by then (no HTTPS on that port
+    included), ComexioDataError if the handshake completed without a certificate. A host that does
+    not form a URL raises ValueError.
     """
     hostname, port = https_address(host)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.check_hostname = False
-    # Self-signed certificate: nothing to verify against, the fingerprint is what gets pinned.
+    # Self-signed certificate issued to comexio.local: neither host name nor CA can be verified,
+    # the fingerprint read here is what gets pinned (trust on first use, see above).
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # NOSONAR
+    context.check_hostname = False  # NOSONAR
     context.verify_mode = ssl.CERT_NONE  # NOSONAR
+    deadline = asyncio.get_running_loop().time() + FINGERPRINT_FETCH_TIMEOUT_SEC
     try:
-        async with asyncio.timeout(FINGERPRINT_FETCH_TIMEOUT_SEC):
+        async with asyncio.timeout_at(deadline):
             _reader, writer = await asyncio.open_connection(hostname, port, ssl=context)
-    except (OSError, TimeoutError) as err:
+    except OSError as err:  # TimeoutError included
         raise ComexioConnectionError(f"TLS handshake with {host!r} failed: {err!r}") from err
     try:
         ssl_object = writer.get_extra_info("ssl_object")
@@ -103,8 +106,8 @@ async def fetch_certificate_fingerprint(host: str) -> str:
     finally:
         writer.close()
         # The close_notify exchange is a courtesy; a peer that does not answer it must not stall the caller.
-        with suppress(OSError, TimeoutError):
-            async with asyncio.timeout(FINGERPRINT_FETCH_TIMEOUT_SEC):
+        with suppress(OSError):  # TimeoutError included
+            async with asyncio.timeout_at(deadline):
                 await writer.wait_closed()
     if not certificate:
         raise ComexioDataError(f"{host!r} completed the TLS handshake without presenting a certificate")

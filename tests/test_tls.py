@@ -169,6 +169,7 @@ def test_format_fingerprint_matches_comexios_display() -> None:
         ("comexio.local:8443", ("comexio.local", 8443)),
         ("[fe80::1]:444", ("fe80::1", 444)),
         ("[fe80::1]", ("fe80::1", 443)),
+        ("comexio.local:0", ("comexio.local", 0)),  # an explicit port is kept, even 0
     ],
 )
 def test_https_address_uses_the_port_in_host_or_443(host: str, expected: tuple[str, int]) -> None:
@@ -248,8 +249,18 @@ class _FakeWriter:
         raise ConnectionResetError("peer skipped close_notify")
 
 
-def _open_connection_returning(writer: _FakeWriter) -> Callable[..., Awaitable[tuple[None, _FakeWriter]]]:
+class _StallingWriter(_FakeWriter):
+    """A peer that never answers close_notify."""
+
+    async def wait_closed(self) -> None:
+        await asyncio.sleep(60)
+
+
+def _open_connection_returning(
+    writer: _FakeWriter, delay: float = 0
+) -> Callable[..., Awaitable[tuple[None, _FakeWriter]]]:
     async def open_connection(*_args: Any, **_kwargs: Any) -> tuple[None, _FakeWriter]:
+        await asyncio.sleep(delay)
         return None, writer
 
     return open_connection
@@ -276,6 +287,22 @@ async def test_fetch_certificate_fingerprint_survives_a_failing_close(monkeypatc
     fingerprint = await fetch_certificate_fingerprint(_SYNTHETIC_HOST)
 
     assert fingerprint == hashlib.sha256(b"synthetic certificate").hexdigest()
+    assert writer.closed
+
+
+async def test_fetch_certificate_fingerprint_keeps_one_deadline_for_handshake_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = _StallingWriter(_SslObject(b"synthetic certificate"))
+    # The handshake uses most of the time; a fresh timeout for closing would double the total.
+    monkeypatch.setattr(asyncio, "open_connection", _open_connection_returning(writer, delay=0.4))
+    monkeypatch.setattr(aiocomexio.tls, "FINGERPRINT_FETCH_TIMEOUT_SEC", 0.5)
+    started = asyncio.get_running_loop().time()
+
+    fingerprint = await fetch_certificate_fingerprint(_SYNTHETIC_HOST)
+
+    assert fingerprint == hashlib.sha256(b"synthetic certificate").hexdigest()
+    assert asyncio.get_running_loop().time() - started < 0.75
     assert writer.closed
 
 
@@ -556,6 +583,7 @@ def test_pinned_client_never_warns_about_plain_http(caplog: pytest.LogCaptureFix
         ("https://comexio.local/a", "HTTPS://Comexio.Local/b", True),
         ("https://comexio.local/a", "https://comexio.local:8443/a", False),
         ("https://comexio.local/a", "http://comexio.local:443/a", False),
+        ("https://comexio.local/a", "https://comexio.local:0/a", False),
     ],
 )
 def test_https_origin_fills_in_the_default_port(first: str, second: str, same: bool) -> None:
