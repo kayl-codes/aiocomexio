@@ -8,7 +8,8 @@ provide the communication layer of the
 [homeassistant-comexio](https://github.com/kayl-codes/homeassistant-comexio) integration.
 
 > **Status: pre-alpha.** The code is being moved over from the integration step by step. So far:
-> admin login, read access (including live values of physical IOs), value writes, the Web-IO
+> admin login, read access (including live values of physical IOs and system info — free
+> storage, time server settings, uptime), value writes, the Web-IO
 > lifecycle (including the command protocol, HTTP or HTTPS), marker / KNX object management and
 > function plan editing — plans, elements, wires, block instance settings, run / stop
 > (`ComexioClient`), admin page scraping (`aiocomexio.scrape`), config parsing
