@@ -8,6 +8,7 @@ raises ValueError or TypeError before anything is sent, as the method's docstrin
 """
 
 import base64
+import inspect
 import json
 import logging
 import math
@@ -135,8 +136,11 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 # The ids of the min/max <input> tags on a Web-IO command's edit form and the field each fills, e.g.
 # <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
 _WEBIO_RANGE_INPUT_IDS = {"min_cmd_io_0": "min", "max_cmd_io_0": "max"}
-# Elements whose content a browser reads as text (RCDATA and raw text), so markup inside them is no form field.
-_TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title", "xmp", "iframe", "noembed", "noframes", "plaintext"})
+# Elements whose content a browser reads as text (RCDATA and raw text), so markup inside them is no form field; a
+# <noscript> is raw text too, as a browser runs scripts.
+_TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"})
+# html.parser releases that know a <noscript> is raw text when scripts run read it so when asked to.
+_HTML_PARSER_SCRIPTING = {"scripting": True} if "scripting" in inspect.signature(HTMLParser.__init__).parameters else {}
 # A text-only element that no end tag ends: the rest of the page is its text.
 _ENDLESS_TEXT_ELEMENT = "plaintext"
 # The ASCII whitespace a browser strips from and collapses in an option text it uses as the value.
@@ -144,12 +148,130 @@ _HTML_WHITESPACE = "\t\n\f\r "
 _HTML_WHITESPACE_RE = re.compile(f"[{_HTML_WHITESPACE}]+")
 # Tags that end an open <option>, so text after them is no longer its text.
 _OPTION_ENDING_TAGS = frozenset({"option", "optgroup", "hr"})
+# Tag names the element sets below share.
+_CAPTION = "caption"
+_TABLE = "table"
+_TBODY = "tbody"
+_TEMPLATE = "template"
 # Elements whose content is no option text (script-supporting elements); a <script/> stays open, as in a browser.
-_HIDDEN_ELEMENTS = frozenset({"script", "template"})
+_HIDDEN_ELEMENTS = frozenset({"script", _TEMPLATE})
 # Start tags that end an open <select> before a browser reads them.
 _SELECT_ENDING_TAGS = frozenset({"input", "keygen", "textarea"})
+# The elements that start SVG and MathML (foreign) content, whose elements are no HTML form fields.
+_FOREIGN_ROOTS = frozenset({"svg", "math"})
 # Start tags a browser ignores inside an open <select>, so what follows them is still markup, not their text.
-_IGNORED_IN_SELECT = (_TEXT_ONLY_ELEMENTS - _SELECT_ENDING_TAGS) | {"style"}
+_IGNORED_IN_SELECT = (_TEXT_ONLY_ELEMENTS - _SELECT_ENDING_TAGS) | {"style"} | _FOREIGN_ROOTS
+# Foreign elements whose content a browser reads as HTML again (html.parser reports tag names in lower case).
+_SVG_HTML_INTEGRATION_POINTS = frozenset({"foreignobject", "desc", "title"})
+_MATHML_TEXT_INTEGRATION_POINTS = frozenset({"mi", "mo", "mn", "ms", "mtext"})
+_MATHML_GLYPH_TAGS = frozenset({"mglyph", "malignmark"})  # stay MathML inside a MathML text integration point
+_HTML_ANNOTATION_ENCODINGS = frozenset({"text/html", "application/xhtml+xml"})
+# HTML start tags that end foreign content (WHATWG "in foreign content"); a <font> only with one of the attributes.
+_FOREIGN_BREAKOUT_TAGS = frozenset(
+    {
+        *("b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed"),
+        *("h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing", "menu", "meta"),
+        *("nobr", "ol", "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", _TABLE),
+        *("tt", "u", "ul", "var"),
+    }
+)
+_FONT_BREAKOUT_ATTRS = frozenset({"color", "face", "size"})
+# HTML end tags that end foreign content as well.
+_FOREIGN_BREAKOUT_END_TAGS = frozenset({"p", "br"})
+# HTML elements without content or end tag: they are not left open.
+_VOID_ELEMENTS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "keygen",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+# The special HTML elements of the HTML standard: the end tag of another element does not reach past one.
+_SPECIAL_ELEMENTS = frozenset(
+    {
+        *("address", "applet", "area", "article", "aside", "base", "basefont", "bgsound", "blockquote", "body", "br"),
+        *("button", _CAPTION, "center", "col", "colgroup", "dd", "details", "dir", "div", "dl", "dt", "embed"),
+        *("fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5"),
+        *("h6", "head", "header", "hgroup", "hr", "html", "iframe", "img", "input", "keygen", "li", "link"),
+        *("listing", "main", "marquee", "menu", "meta", "nav", "noembed", "noframes", "noscript", "object", "ol"),
+        *("p", "param", "plaintext", "pre", "script", "search", "section", "select", "source", "style", "summary"),
+        *(_TABLE, _TBODY, "td", _TEMPLATE, "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul"),
+        *("wbr", "xmp"),
+    }
+)
+# Elements whose open element an end tag looks for in scope: it closes the elements above it, special or not, up to
+# a scope boundary.
+_SCOPE_BOUNDARIES = frozenset(
+    {"applet", _CAPTION, "html", _TABLE, "td", "th", "marquee", "object", "select", _TEMPLATE}
+)
+_SCOPED_END_TAGS = frozenset(
+    {
+        *("address", "applet", "article", "aside", "blockquote", "button", "center", "details", "dialog", "dir"),
+        *("div", "dl", "dd", "dt", "fieldset", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6"),
+        *("header", "hgroup", "listing", "main", "marquee", "menu", "nav", "object", "ol", "p", "pre", "search"),
+        *("section", "select", "summary", "ul"),
+    }
+)
+_LIST_ITEM_SCOPE_BOUNDARIES = _SCOPE_BOUNDARIES | {"ol", "ul"}
+# Table parts: outside a <table> a browser ignores their start tag; their end tag looks for them in table scope.
+_TABLE_PARTS = frozenset({_CAPTION, "col", "colgroup", _TBODY, "td", "tfoot", "th", "thead", "tr"})
+_TABLE_SCOPE_BOUNDARIES = frozenset({"html", _TABLE, _TEMPLATE})
+# Start tags a browser ignores in a page body (or only merges the attributes of): they open no element.
+_IGNORED_IN_BODY = frozenset({"body", "frame", "frameset", "head", "html"})
+# A <colgroup> holds only <col>s: anything else closes it, so its end tag never closes what follows it.
+_OPENS_NO_ELEMENT = _IGNORED_IN_BODY | {"colgroup"}
+_HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+_BUTTON_SCOPE_BOUNDARIES = _SCOPE_BOUNDARIES | {"button"}
+# Formatting elements: their end tag runs the adoption agency, which looks for them in scope.
+_FORMATTING_ELEMENTS = frozenset(
+    {"a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u"}
+)
+# Start tags that close an open <p> first (unless a scope boundary or a <button> lies between); a <table> does so
+# outside quirks mode, as on Comexio's pages, which declare <!DOCTYPE html>.
+_CLOSES_A_P = frozenset(
+    {
+        *("address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl"),
+        *("fieldset", "figcaption", "figure", "footer", "header", "hgroup", "main", "menu", "nav", "ol", "p"),
+        *("search", "section", "summary", "ul", "pre", "listing", "form", "li", "dd", "dt", "plaintext", "hr"),
+        *("xmp", _TABLE, *_HEADINGS),
+    }
+)
+# A new <li>, <dd> or <dt> closes an open one of its kind unless a special element other than these lies between.
+_LIST_ITEM_TRANSPARENT = frozenset({"address", "div", "p"})
+_DEFINITION_ITEMS = frozenset({"dd", "dt"})
+# A new table cell, row or section closes the open one, with the parts inside it.
+_TABLE_CELLS = frozenset({"td", "th"})
+_TABLE_SECTIONS = frozenset({_TBODY, "thead", "tfoot"})
+_TABLE_ROW_PARTS = {"tr": frozenset({"tr"}), **dict.fromkeys(_TABLE_SECTIONS, _TABLE_SECTIONS)}
+# The open elements a table part start tag is placed in: it closes a <caption>, and a row or cell put straight into
+# a table (or a cell into a section) gets the <tbody>/<tr> a browser inserts around it.
+_TABLE_PART_HOSTS = frozenset({_TABLE, "tr", *_TABLE_SECTIONS})
+_TABLE_PART_CLOSED = frozenset({_CAPTION, "td", "th"})  # a table part start tag inside one closes it first
+_TABLE_CONTEXTS = _TABLE_PART_HOSTS | _TABLE_PART_CLOSED | {_TEMPLATE}
+_IMPLIED_TABLE_PARENTS = {"tr": (_TBODY,), "td": (_TBODY, "tr"), "th": (_TBODY, "tr")}
+# Elements that put a marker on the list of active formatting elements: formatting does not leak into them.
+_FORMATTING_MARKERS = frozenset({"applet", _CAPTION, "marquee", "object", "td", _TEMPLATE, "th"})
+# Start tags before which a browser does not reopen the formatting elements an end tag closed implicitly.
+_NOT_RECONSTRUCTING = (
+    _CLOSES_A_P
+    | _TABLE_PARTS
+    | _IGNORED_IN_BODY
+    | _HIDDEN_ELEMENTS
+    | _TEXT_ONLY_ELEMENTS
+    | {"base", "basefont", "bgsound", "link", "meta", "style"}
+) - {"xmp"}
 # The start of a size attribute as a browser parses a non-negative integer (whitespace, an optional "+", digits).
 _SIZE_RE = re.compile(rf"[{_HTML_WHITESPACE}]*\+?(\d+)", re.ASCII)
 # The id of the form's protocol <select>, whose options read e.g. <option value="0" selected="selected">.
@@ -1812,66 +1934,445 @@ def _first_attributes(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
     return attributes
 
 
+class _ForeignElement(NamedTuple):
+    """An open SVG or MathML element.
+
+    html_inside says start tags inside it are HTML again (an integration point); html lists the HTML elements open
+    inside it, innermost last — while one is open, it and not this element is where the browser is.
+    """
+
+    tag: str
+    namespace: str
+    html_inside: bool
+    html: list[str]
+
+
+def _foreign_element(tag: str, namespace: str, attrs: list[tuple[str, str | None]]) -> _ForeignElement:
+    """An SVG or MathML element, marked as an integration point where a browser reads its content as HTML."""
+    if namespace == "svg":
+        html_inside = tag in _SVG_HTML_INTEGRATION_POINTS
+    elif tag == "annotation-xml":
+        html_inside = _first_attributes(attrs).get("encoding", "").lower() in _HTML_ANNOTATION_ENCODINGS
+    else:
+        html_inside = tag in _MATHML_TEXT_INTEGRATION_POINTS
+    return _ForeignElement(tag, namespace, html_inside, [])
+
+
+class _OpenElement(str):
+    """The tag name of one open HTML element: two open elements of a tag are equal names but not the same object."""
+
+    __slots__ = ()
+
+
+def _bounds_scope(element: _ForeignElement) -> bool:
+    """Whether a foreign element bounds an HTML end tag's scope (an integration point, a MathML <annotation-xml>)."""
+    return element.html_inside or (element.namespace == "math" and element.tag == "annotation-xml")
+
+
+def _end_tag_target(tag: str) -> tuple[frozenset[str], frozenset[str]]:
+    """The elements an end tag closes the innermost open one of, and the open elements it does not reach past."""
+    if tag in _HIDDEN_ELEMENTS:  # a </template> closes everything inside it
+        return frozenset({tag}), frozenset()
+    if tag in _HEADINGS:  # any heading end tag closes the innermost open heading
+        return _HEADINGS, _SCOPE_BOUNDARIES
+    if tag in _TABLE_PARTS or tag == _TABLE:
+        return frozenset({tag}), _TABLE_SCOPE_BOUNDARIES
+    if tag == "li":
+        return frozenset({tag}), _LIST_ITEM_SCOPE_BOUNDARIES
+    if tag == "p":
+        return frozenset({tag}), _BUTTON_SCOPE_BOUNDARIES
+    if tag in _SCOPED_END_TAGS or tag in _FORMATTING_ELEMENTS or tag == "form":
+        return frozenset({tag}), _SCOPE_BOUNDARIES
+    return frozenset({tag}), _SPECIAL_ELEMENTS
+
+
+def _innermost_open_element(html: list[str], names: frozenset[str], barriers: frozenset[str]) -> int | None:
+    """The index of the innermost element of one of the names in html; None if there is none or a barrier is first."""
+    for index in range(len(html) - 1, -1, -1):
+        if html[index] in names:
+            return index
+        if html[index] in barriers:
+            return None
+    return None
+
+
+def _close_open_element(html: list[str], names: frozenset[str], barriers: frozenset[str]) -> None:
+    """Close the innermost open element of one of the names, with the elements opened inside it, if it is in scope."""
+    index = _innermost_open_element(html, names, barriers)
+    if index is not None:
+        del html[index:]
+
+
+def _close_list_item(html: list[str], names: frozenset[str]) -> None:
+    """Close an open <li> (or <dd>/<dt>) as a new one does: no special element other than a block may lie between."""
+    for index in range(len(html) - 1, -1, -1):
+        if html[index] in names:
+            del html[index:]
+            return
+        if html[index] in _SPECIAL_ELEMENTS - _LIST_ITEM_TRANSPARENT:
+            return
+
+
+def _close_implied(tag: str, html: list[str]) -> None:
+    """Close the open HTML elements a browser closes before it inserts the element of an HTML start tag."""
+    if tag == "li":
+        _close_list_item(html, frozenset({"li"}))
+    elif tag in _DEFINITION_ITEMS:
+        _close_list_item(html, _DEFINITION_ITEMS)
+    elif tag in _TABLE_CELLS:
+        _close_open_element(html, _TABLE_CELLS, _TABLE_SCOPE_BOUNDARIES)
+    elif tag in _TABLE_ROW_PARTS:
+        _close_open_element(html, _TABLE_ROW_PARTS[tag], _TABLE_SCOPE_BOUNDARIES)
+    elif tag == "button":
+        _close_open_element(html, frozenset({"button"}), _SCOPE_BOUNDARIES)
+    if tag in _CLOSES_A_P:
+        _close_open_element(html, frozenset({"p"}), _BUTTON_SCOPE_BOUNDARIES)
+    if tag in _HEADINGS and html and html[-1] in _HEADINGS:
+        html.pop()
+
+
+def _open_table_parts(tag: str, html: list[str]) -> None:
+    """Place a table part start tag as a browser does: close an open cell or <caption>, and open the <tbody>/<tr> a
+    row or cell put straight into a table (or a cell into a section) gets, closing what else lies open in between."""
+    if tag not in _TABLE_PARTS:
+        return
+    index = _innermost_open_element(html, _TABLE_CONTEXTS, frozenset())
+    while index is not None and html[index] in _TABLE_PART_CLOSED:
+        del html[index:]
+        index = _innermost_open_element(html, _TABLE_CONTEXTS, frozenset())
+    if index is None or html[index] not in _TABLE_PART_HOSTS:  # in a template the part stays where it is
+        return
+    parents = _IMPLIED_TABLE_PARENTS.get(tag)
+    if parents is None:  # a section, caption or column group belongs straight into the table
+        index = max((position for position in range(index + 1) if html[position] == _TABLE), default=index)
+        parents = ()
+    elif html[index] in _TABLE_SECTIONS:
+        parents = parents[1:]
+    elif html[index] == "tr":
+        parents = ()
+    html[index + 1 :] = [_OpenElement(parent) for parent in parents]
+
+
+def _left_open_by_end_tag(tag: str, above: list[str]) -> list[str]:
+    """The HTML elements opened inside a closed element that stay open: none, except after a formatting end tag.
+
+    A browser's adoption agency moves the special elements (and the formatting elements before the last of them) out
+    of the formatting element and closes the rest, so a </b> keeps a <div> inside it open but closes an <svg> above.
+    """
+    if tag not in _FORMATTING_ELEMENTS:
+        return []
+    last = max((index for index, name in enumerate(above) if name in _SPECIAL_ELEMENTS), default=-1)
+    return [
+        name
+        for index, name in enumerate(above)
+        if name in _SPECIAL_ELEMENTS or (index < last and name in _FORMATTING_ELEMENTS)
+    ]
+
+
 class _FormParser(HTMLParser):
     """An HTMLParser that reads form fields as a browser does, for subclasses that pick out the fields they need.
 
     The content of a <textarea>, <title> or raw-text element is text: html.parser reports markup inside most of them
     as tags (older 3.13 releases even inside <textarea> and <title>), so a field written as text into one would be
     read as a real one; a <plaintext> makes the rest of the page text. The content of a <script> or <template> is no
-    field either. Inside an open <select> a browser ignores the start tag of another text-only element or a <style>,
-    and a <select>, <input>, <keygen> or <textarea> start tag ends the select. Subclasses get the remaining tags
-    through handle_form_tag and handle_form_endtag, with the attributes from _first_attributes, and the end of a
-    select through handle_select_end.
+    field either, nor is an SVG or MathML element (an <input> inside an <svg> is no form field), except inside an
+    integration point such as <foreignObject>, whose content is HTML again; a breakout tag such as <div> or </p> ends
+    the foreign content, and while an HTML element is open inside an integration point a foreign end tag is ignored;
+    the end tag of an open HTML element closes the SVG or MathML elements opened inside it, unless a special element
+    or a scope boundary lies between (a </span> stops at a <div>, a </div> at an <object>; a formatting end tag such
+    as </b> reaches past a <div> and leaves it open, any heading end tag closes the open heading). To know which HTML
+    elements are open, it closes what a browser closes implicitly (a <p> before a <div> or, outside quirks mode, a
+    <table>; an <li> before the next one, a cell before the next one or a <caption>, a <select> with the cell it is
+    in), opens what a browser inserts (the <tbody> and
+    <tr> around a cell put straight into a table; a formatting element such as <i> that an end tag closed implicitly,
+    reopened before most start tags, outside the cell it was opened in) and ignores what a browser ignores (a table
+    part outside a <table>, a <form> inside a form).
+    A <![CDATA[ section exists only in foreign content; elsewhere it is a bogus comment up to the next ">" (where
+    html.parser can tell the two apart). Inside an open <select> a browser ignores the start tag of another text-only
+    element, a <style>, <svg> or <math>, and a <select>, <input>, <keygen> or <textarea> start tag ends the select.
+    Subclasses get the remaining tags through handle_form_tag and handle_form_endtag, with the attributes from
+    _first_attributes, and the end of a select through handle_select_end.
     """
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
+        super().__init__(convert_charrefs=True, **_HTML_PARSER_SCRIPTING)
         self._text_only: str | None = None
-        self._hidden: list[str] = []  # open <script>/<template> elements: their content is no field or text of one
+        self._html: list[str] = []  # HTML elements open outside foreign content, innermost last
+        # Open <script>/<template> elements, each with the depth of the foreign stack it was opened at: their
+        # content is no field or text of one.
+        self._hidden: list[tuple[str, int]] = []
         self._select_open = False  # any select is open; a <select> inside it only ends it
+        self._form_open = False  # a form is open (the browser's form element pointer): another <form> is ignored
+        # The browser's list of active formatting elements: open (or implicitly closed) formatting elements, and the
+        # cells, captions, templates and objects they do not leak into (markers).
+        self._formatting: list[str] = []
+        self._foreign: list[_ForeignElement] = []  # open SVG/MathML elements, outermost first
+        self._foreign_start = False  # the last start tag was a foreign element: html.parser keeps no text mode for it
+        self._sync_cdata_support()
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if self._text_only is not None:
-            return
-        if self._reads_select_markup():
-            if tag in _IGNORED_IN_SELECT:
-                return
-            if tag in _SELECT_ENDING_TAGS:
-                self._end_select()
-        if tag in _TEXT_ONLY_ELEMENTS:
-            self._text_only = tag
-        elif tag in _HIDDEN_ELEMENTS:
-            self._hidden.append(tag)
-        elif self._hidden:  # a tag inside a hidden element is no field
-            return
-        elif tag == "select" and self._select_open:
-            self._end_select()
-        else:
-            self._select_open = self._select_open or tag == "select"
-            self.handle_form_tag(tag, _first_attributes(attrs))
+        self._start(tag, attrs, self_closing=False)
+        self._sync_cdata_support()
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         # A browser ignores the slash of an HTML start tag: <select/> opens a select and what follows <textarea/>
-        # is still its text. A void element such as <input/> has no end tag either way.
-        self.handle_starttag(tag, attrs)
+        # is still its text; a void element such as <input/> has no end tag either way. The slash only closes a
+        # foreign element, such as <svg/>.
+        self._start(tag, attrs, self_closing=True)
+        self._sync_cdata_support()
 
     def set_cdata_mode(self, elem: str, *args: Any, **kwargs: Any) -> None:
-        # html.parser switches to text mode after handle_starttag; inside an open select a browser ignores the tag.
-        if not (self._reads_select_markup() and elem in _IGNORED_IN_SELECT):
-            super().set_cdata_mode(elem, *args, **kwargs)
+        # html.parser switches to text mode after handle_starttag; a foreign element (an SVG <style>) has none, and
+        # inside an open select a browser ignores the tag.
+        if self._foreign_start or (self._reads_select_markup() and elem in _IGNORED_IN_SELECT):
+            return
+        super().set_cdata_mode(elem, *args, **kwargs)
 
     def handle_endtag(self, tag: str) -> None:
         if self._text_only is not None:
             if tag == self._text_only != _ENDLESS_TEXT_ELEMENT:
                 self._text_only = None
-        elif self._hidden:  # only the end tag of the innermost hidden element ends it
-            if tag == self._hidden[-1]:
+        elif not (self._foreign and self._end_foreign(tag)):
+            self._end_html(tag)
+        self._sync_cdata_support()
+
+    def _sync_cdata_support(self) -> None:
+        # html.parser releases that can tell a CDATA section from a bogus comment let the caller say which applies.
+        set_support_cdata = getattr(self, "_set_support_cdata", None)
+        if set_support_cdata is not None:
+            set_support_cdata(bool(self._foreign) and not self._foreign[-1].html)
+
+    def _hidden_floor(self) -> int:
+        """The depth of the foreign stack below the innermost hidden element, which no foreign tag reaches past."""
+        return self._hidden[-1][1] if self._hidden else 0
+
+    def _start(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> None:
+        self._foreign_start = False
+        if self._text_only is not None:
+            return
+        if self._foreign and self._is_foreign(tag, attrs):
+            self._start_foreign(tag, attrs, self_closing=self_closing)
+            return
+        if self._select_ignores(tag):
+            return
+        html = self._foreign[-1].html if self._foreign else self._html
+        self._prepare_start(tag, html)
+        if self._start_html(tag, attrs, self_closing=self_closing) and self._opens(tag, html):
+            self._insert(tag, html)
+
+    def _start_foreign(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> None:
+        self._foreign_start = True
+        if not self_closing:
+            current = self._foreign[-1]
+            # An <svg> inside a MathML <annotation-xml> is SVG; any other element keeps the namespace around it.
+            svg = tag == "svg" and current.tag == "annotation-xml"
+            self._foreign.append(_foreign_element(tag, "svg" if svg else current.namespace, attrs))
+
+    def _insert(self, tag: str, html: list[str]) -> None:
+        """Open an HTML element, listing a formatting element or marker element among the active formatting ones."""
+        element = _OpenElement(tag)
+        html.append(element)
+        if tag in _FORMATTING_ELEMENTS or tag in _FORMATTING_MARKERS:
+            self._formatting.append(element)
+
+    def _prepare_start(self, tag: str, html: list[str]) -> None:
+        """Close and reopen the HTML elements a browser closes or reopens before it inserts a start tag's element."""
+        _close_implied(tag, html)
+        _open_table_parts(tag, html)
+        self._end_closed_select()
+        self._forget_closed_markers()  # before a new marker joins the list behind a closed one
+        if tag in ("a", "nobr") and self._listed_formatting(tag) is not None:
+            self._close_html(tag)  # an open <a> or <nobr> ends before the next one
+        if tag not in _NOT_RECONSTRUCTING and not self._select_open:
+            self._reconstruct_formatting(html)
+
+    def _open_html_lists(self) -> list[list[str]]:
+        return [self._html, *(element.html for element in self._foreign)]
+
+    def _is_open(self, element: str) -> bool:
+        return any(open_element is element for html in self._open_html_lists() for open_element in html)
+
+    def _forget_closed_markers(self) -> None:
+        """Drop a closed marker element from the active formatting elements, with the entries it bounded."""
+        for index, entry in enumerate(self._formatting):
+            if entry in _FORMATTING_MARKERS and not self._is_open(entry):
+                del self._formatting[index:]
+                return
+
+    def _listed_formatting(self, tag: str) -> int | None:
+        """The index of the innermost active formatting element of the tag past the last marker, if there is one."""
+        self._forget_closed_markers()
+        for index in range(len(self._formatting) - 1, -1, -1):
+            entry = self._formatting[index]
+            if entry == tag:
+                return index
+            if entry in _FORMATTING_MARKERS:
+                return None
+        return None
+
+    def _forget_formatting(self, closed: str) -> None:
+        """Remove a formatting element its end tag closed from the active formatting elements.
+
+        A closed marker element stays listed until _forget_closed_markers drops it with the entries it bounded.
+        """
+        if closed in _FORMATTING_ELEMENTS:
+            self._formatting = [entry for entry in self._formatting if entry is not closed]
+
+    def _forgets_closed_formatting(self, tag: str) -> bool:
+        """Whether a formatting end tag only removes its active formatting element, closed implicitly before."""
+        if tag not in _FORMATTING_ELEMENTS:
+            return False
+        index = self._listed_formatting(tag)
+        if index is None or self._is_open(self._formatting[index]):
+            return False
+        del self._formatting[index]
+        return True
+
+    def _reconstruct_formatting(self, html: list[str]) -> None:
+        """Reopen the active formatting elements past the last marker that an end tag closed implicitly, as a browser
+        does before most start tags (a <b><i></b><svg> puts the svg into a new <i>)."""
+        self._forget_closed_markers()
+        entries = self._formatting
+        start = len(entries)
+        while start and entries[start - 1] not in _FORMATTING_MARKERS and not self._is_open(entries[start - 1]):
+            start -= 1
+        for index in range(start, len(entries)):
+            entries[index] = _OpenElement(entries[index])
+            html.append(entries[index])
+
+    def _opens(self, tag: str, html: list[str]) -> bool:
+        """Whether a browser opens an element for the start tag, given the HTML elements open around it.
+
+        It ignores a table part outside a <table>, a <head> or <body> in the body, and a <form> while another one
+        is open (outside a <template>).
+        """
+        if tag in _OPENS_NO_ELEMENT or (tag in _TABLE_PARTS and _TABLE not in html):
+            return False
+        if tag == "form" and not self._hidden:
+            if self._form_open:
+                return False
+            self._form_open = True
+        return True
+
+    def _is_foreign(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+        """Whether a start tag inside SVG/MathML content is a foreign element; a breakout tag ends that content."""
+        current = self._foreign[-1]
+        if current.html:  # an HTML element inside the integration point is where the browser is
+            return False
+        if current.html_inside and not (current.tag in _MATHML_TEXT_INTEGRATION_POINTS and tag in _MATHML_GLYPH_TAGS):
+            return False
+        if tag in _FOREIGN_BREAKOUT_TAGS or (tag == "font" and any(name in _FONT_BREAKOUT_ATTRS for name, _ in attrs)):
+            self._break_out()
+            return False
+        return True
+
+    def _break_out(self) -> None:
+        """Close the foreign elements up to the innermost integration point, as a breakout tag does."""
+        floor = self._hidden_floor()
+        while len(self._foreign) > floor and not self._foreign[-1].html_inside:
+            self._foreign.pop()
+
+    def _start_html(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> bool:
+        """Read an HTML start tag; True if it opened an element that stays open until an end tag closes it."""
+        if tag in _TEXT_ONLY_ELEMENTS:
+            self._text_only = tag
+            return False
+        if tag in _FOREIGN_ROOTS:
+            self._foreign_start = True
+            if not self_closing:
+                self._foreign.append(_ForeignElement(tag, tag, False, []))
+            return False
+        if tag in _HIDDEN_ELEMENTS:
+            self._hidden.append((tag, len(self._foreign)))
+            return True
+        if self._hidden:  # a tag inside a hidden element is no field
+            return tag not in _VOID_ELEMENTS
+        if tag == "select" and self._select_open:
+            self._end_select()
+            return False
+        self._select_open = self._select_open or tag == "select"
+        self.handle_form_tag(tag, _first_attributes(attrs))
+        return tag not in _VOID_ELEMENTS
+
+    def _select_ignores(self, tag: str) -> bool:
+        """Whether an open select ignores the start tag; one that ends the select ends it here."""
+        if not self._reads_select_markup():
+            return False
+        if tag in _IGNORED_IN_SELECT:
+            return True
+        if tag in _SELECT_ENDING_TAGS:
+            self._end_select()
+        return False
+
+    def _end_foreign(self, tag: str) -> bool:
+        """Read an end tag in foreign content; False if a browser reads it as an HTML end tag instead."""
+        if self._foreign[-1].html:  # an HTML element inside the integration point is where the browser is
+            return False
+        if tag in _FOREIGN_BREAKOUT_END_TAGS:
+            self._break_out()
+            return False
+        for index in range(len(self._foreign) - 1, self._hidden_floor() - 1, -1):
+            element = self._foreign[index]
+            if index < len(self._foreign) - 1 and element.html:  # the HTML elements open inside it come first
+                return False
+            if element.tag == tag:
+                del self._foreign[index:]
+                return True
+        return False
+
+    def _end_html(self, tag: str) -> None:
+        if self._hidden:  # only the end tag of the innermost hidden element ends it
+            name, depth = self._hidden[-1]
+            if tag == name:
                 self._hidden.pop()
-        elif tag == "select":
+                del self._foreign[depth:]
+                self._close_html(tag)
+            return
+        self._form_open = self._form_open and tag != "form"  # a </form> forgets the open form even out of scope
+        self._close_html(tag)
+        if tag == "select":
             if self._select_open:
                 self._end_select()
         else:
             self.handle_form_endtag(tag)
+
+    def _close_html(self, tag: str) -> None:
+        """Close the innermost open HTML element of the tag, with the elements opened inside it, as a browser does.
+
+        The end tag reaches no element past an open element that bounds it (_end_tag_target) or, unless it looks in
+        table scope, past an SVG or MathML integration point; a </form> removes the form alone, and a formatting end
+        tag leaves the special elements inside it open (_left_open_by_end_tag) and the active formatting element
+        closed, while it only forgets one an earlier end tag closed implicitly.
+        """
+        if self._forgets_closed_formatting(tag):
+            return
+        names, barriers = _end_tag_target(tag)
+        for depth in range(len(self._foreign), self._hidden_floor() - 1, -1):
+            html = self._foreign[depth - 1].html if depth else self._html
+            index = _innermost_open_element(html, names, barriers)
+            if index is not None:
+                self._close_open_html(tag, depth, index)
+                return
+            # Only an integration point holds HTML elements, and it bounds the scope; the page itself is the last.
+            if depth and barriers is not _TABLE_SCOPE_BOUNDARIES and _bounds_scope(self._foreign[depth - 1]):
+                return
+
+    def _close_open_html(self, tag: str, depth: int, index: int) -> None:
+        """Close the open HTML element at index of the HTML elements open at that depth of the foreign stack."""
+        html = self._foreign[depth - 1].html if depth else self._html
+        closed = html[index]
+        if tag == "form":
+            del html[index]
+        else:
+            del self._foreign[depth:]
+            html[index:] = _left_open_by_end_tag(tag, html[index + 1 :])
+        self._forget_formatting(closed)
+        self._end_closed_select()
+
+    def _end_closed_select(self) -> None:
+        """End the open select if an end tag or start tag closed it with the element it was in (a </td>)."""
+        if self._select_open and not any("select" in html for html in self._open_html_lists()):
+            self._end_select()
 
     def _reads_select_markup(self) -> bool:
         """Whether a start tag now is markup of an open select (not text, not inside a <script> or <template>)."""
@@ -1879,13 +2380,14 @@ class _FormParser(HTMLParser):
 
     def _end_select(self) -> None:
         self._select_open = False
+        self._close_html("select")
         self.handle_select_end()
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        """A start tag outside a text-only or hidden element; a <select> only when no select is open."""
+        """A start tag of an HTML element outside a text-only or hidden element; a <select> only when none is open."""
 
     def handle_form_endtag(self, tag: str) -> None:
-        """An end tag other than </select> outside a text-only or hidden element."""
+        """An end tag other than </select> outside a text-only or hidden element or an open foreign element."""
 
     def handle_select_end(self) -> None:
         """The open select ended (its </select>, or a start tag that ends it)."""
