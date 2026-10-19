@@ -402,11 +402,11 @@ def test_malformed_config_entries_are_skipped() -> None:
         ({"binary": 0, "min": 0, "max": 100}, "'2': 0"),
         # Without "binary" the kind is just as unknown — no silent "analog".
         ({"min": 0, "max": 100}, "'2': missing"),
+        # Not a mapping at all: just as unusable, and reported as well.
+        ("binary", "'2': not a row ('binary')"),
     ],
 )
-def test_a_type_row_without_a_bool_binary_is_no_row(
-    row: dict[str, Any], logged: str, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_a_type_row_without_a_bool_binary_is_no_row(row: Any, logged: str, caplog: pytest.LogCaptureFixture) -> None:
     """Kept, "binary": null would put is_binary None into an active IO and abort the Web-IO build."""
     conf = {
         "FubModules": {
@@ -423,6 +423,11 @@ def test_a_type_row_without_a_bool_binary_is_no_row(
     assert len(rows_warnings) == 1
     assert '1 IO type table rows have no boolean "binary" and are ignored' in rows_warnings[0]
     assert logged in rows_warnings[0]
+    # The only row is unusable, so the table counts as missing.
+    assert (
+        "The IO type table has no usable row at all — handled like a missing table: IOs are classified by their "
+        "identifier only (a Quickbus IO, whose identifier says nothing, as analog)"
+    ) in [r.getMessage() for r in caplog.records]
 
     # Classified by identifier (Q1 = binary output) / unresolved KNX, like a type without a row.
     assert [(io["identifier"], io["is_binary"], io["max"]) for io in result["io"]] == [("Q1", True, 1)]
