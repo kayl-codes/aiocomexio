@@ -407,8 +407,11 @@ def test_a_type_row_with_a_non_bool_binary_is_no_row(binary: Any, caplog: pytest
     with caplog.at_level(logging.WARNING):
         result = parse_config(conf, io_types={"2": {"binary": binary, "min": 0, "max": 100}})
 
-    assert '1 IO type table rows have no boolean "binary" and are ignored' in caplog.text
-    assert f"'2': {binary!r}" in caplog.text
+    # Once per parse, not once per IO / KNX object reading the row.
+    rows_warnings = [r.getMessage() for r in caplog.records if "IO type table rows" in r.getMessage()]
+    assert len(rows_warnings) == 1
+    assert '1 IO type table rows have no boolean "binary" and are ignored' in rows_warnings[0]
+    assert f"'2': {binary!r}" in rows_warnings[0]
 
     # Classified by identifier (Q1 = binary output) / unresolved KNX, like a type without a row.
     assert [(io["identifier"], io["is_binary"], io["max"]) for io in result["io"]] == [("Q1", True, 1)]

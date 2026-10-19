@@ -550,6 +550,7 @@ def test_quickbus_ios_without_a_type_row_are_left_out(caplog: pytest.LogCaptureF
         "unknown — they are left out of the active IOs (no entity, no Web-IO command): MT Flur G1 (type 134), "
         "MT Flur G18 (type 134), MT Bad G1 (type 134)"
     ) in caplog.text
+    assert sum("Quickbus IOs of extension" in r.getMessage() for r in caplog.records) == 1
 
 
 def test_untyped_quickbus_ios_do_not_break_the_command_build() -> None:
