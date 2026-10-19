@@ -206,7 +206,8 @@ class SystemInfo:
 
     free_storage_percent is the free space of the Comexio's internal storage in percent (0-100),
     time_server the date & time form's time server settings; either is None if the page does not
-    show it (logged at WARNING).
+    show it (logged at WARNING). A page that shows neither makes get_system_info raise
+    ComexioDataError instead.
     """
 
     free_storage_percent: float | None
