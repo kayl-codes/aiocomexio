@@ -312,7 +312,8 @@ class ComexioClient:
         """RSA admin login (Comexio v11 scheme: PKCS#1 v1.5 blocks over salt + nonce + password).
 
         Raises ComexioAuthenticationError if the server rejects the credentials (or the password
-        cannot be encoded for the login form), ComexioConnectionError / ComexioResponseError /
+        cannot be encoded for the login form), ComexioCertificateMismatchError if a pinned client
+        meets a foreign certificate, ComexioConnectionError / ComexioResponseError /
         ComexioDataError if the login could not be carried out at all.
         """
         self._warn_plain_http()

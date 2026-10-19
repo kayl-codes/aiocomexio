@@ -20,7 +20,9 @@ class ComexioCertificateMismatchError(ComexioError):
 
     Deliberately not a ComexioConnectionError: retrying cannot help. Either Comexio got a new
     certificate (its "generate new certificate" action) or something else answers in its place.
-    expected and actual are SHA-256 fingerprints as 64 lowercase hex digits; no request was sent.
+    expected and actual are SHA-256 fingerprints as 64 lowercase hex digits. The request that met
+    the foreign certificate was not sent; when it was a redirect hop, though, the requests before it
+    in the chain did reach the pinned server, so an action may already have been carried out.
 
     A host name that resolves to several addresses is the exception: aiohttp tries the next one
     after a mismatch and reports only the last failure, so a foreign certificate on one address and

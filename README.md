@@ -46,7 +46,8 @@ instead of verifying a CA. `fetch_certificate_fingerprint(host)` reads it from a
 handshake — no HTTP request, no credentials. Pass it as `fingerprint=` and every request goes over
 HTTPS; a server presenting any other certificate raises `ComexioCertificateMismatchError` (not a
 `ComexioConnectionError`: retrying cannot help, the certificate was replaced or something else
-answers) before anything is sent. Without `fingerprint` the client uses plain HTTP.
+answers) before the request that met it is sent — if that request was a redirect hop, the hops
+before it did reach the pinned server. Without `fingerprint` the client uses plain HTTP.
 
 Fetching the fingerprint is trust on first use: whatever answers that one handshake gets pinned.
 So fetch it **once, at setup**, store it, and pass the stored value on every later start —

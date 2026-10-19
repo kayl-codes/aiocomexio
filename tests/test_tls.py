@@ -306,17 +306,25 @@ async def test_fetch_certificate_fingerprint_keeps_one_deadline_for_handshake_an
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     writer = _StallingWriter(_SslObject(b"synthetic certificate"))
-    # The handshake uses most of the 1.2 s; a fresh timeout for closing would take the total to 2.2 s.
-    # 2 s leaves 0.8 s of slack for a loaded test runner.
-    monkeypatch.setattr(asyncio, "open_connection", _open_connection_returning(writer, delay=1.0))
-    monkeypatch.setattr(aiocomexio.tls, "FINGERPRINT_FETCH_TIMEOUT_SEC", 1.2)
+    monkeypatch.setattr(asyncio, "open_connection", _open_connection_returning(writer))
+    monkeypatch.setattr(aiocomexio.tls, "FINGERPRINT_FETCH_TIMEOUT_SEC", 0.2)
+    timeout_at = asyncio.timeout_at
+    deadlines: list[float | None] = []
+
+    def recording_timeout_at(when: float | None) -> asyncio.Timeout:
+        deadlines.append(when)
+        return timeout_at(when)
+
+    monkeypatch.setattr(asyncio, "timeout_at", recording_timeout_at)
     started = asyncio.get_running_loop().time()
 
     fingerprint = await fetch_certificate_fingerprint(_SYNTHETIC_HOST)
 
     assert fingerprint == hashlib.sha256(b"synthetic certificate").hexdigest()
-    assert asyncio.get_running_loop().time() - started < 2.0
     assert writer.closed
+    # No wall-clock bound: handshake and the stalled close are cut off by the very same deadline.
+    (handshake, close) = deadlines
+    assert handshake == close == pytest.approx(started + 0.2, abs=0.1)
 
 
 # --- the pinned client ---------------------------------------------------------------------
@@ -499,8 +507,14 @@ async def test_pinned_client_follows_a_redirect_within_its_origin(
     async def moved(_request: web.Request) -> web.Response:
         return web.Response(status=status, headers={"Location": _MOVED_PATH})
 
+    followed_bodies: list[bytes] = []
+
+    async def target(request: web.Request) -> web.Response:
+        followed_bodies.append(await request.read())
+        return web.Response(text="1")
+
     tls_comexio.serve(method, _API_PATH, moved)
-    tls_comexio.serve_text(followed_with, _MOVED_PATH, "1")
+    tls_comexio.serve(followed_with, _MOVED_PATH, target)
     client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
 
     body = await client._request_text(method, _API_PATH, what="Moved", data={"a": "1"}, params={"q": "1"})
@@ -513,6 +527,8 @@ async def test_pinned_client_follows_a_redirect_within_its_origin(
         (method, _API_PATH, {"q": "1"}, sent_form),
         (followed_with, _MOVED_PATH, {}, followed_form),
     ]
+    # The fake records forms only for POST: check the body itself, so a PUT that loses it shows too.
+    assert followed_bodies == [b"" if followed_with == "GET" else b"a=1"]
 
 
 async def test_pinned_client_resolves_each_hop_against_the_previous_one(
