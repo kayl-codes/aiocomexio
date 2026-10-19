@@ -59,8 +59,9 @@ _SELECT_CONTENT_TAGS = frozenset({"option", "optgroup"})
 class TimeServerSettings:
     """The time server settings of the system dashboard's date & time form.
 
-    enabled is the "use time server" checkbox, server the configured host as entered ("" if the
-    field is empty), update_interval the query interval in seconds (None if no option is selected).
+    enabled is the "use time server" checkbox, server the configured host with surrounding
+    whitespace removed ("" if the field is empty or blank), update_interval the query interval in
+    seconds (None if no option is selected).
     """
 
     enabled: bool
