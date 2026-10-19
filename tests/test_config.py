@@ -19,6 +19,7 @@ from aiocomexio.config import (
     parse_config,
 )
 from aiocomexio.const import MarkerKind, WebioClass
+from aiocomexio.webio import build_webio_commands
 from tests.common import load_json_fixture
 from tests.fake_comexio import DASHBOARD_REFRESH_PATH, FakeComexio
 
@@ -391,6 +392,48 @@ def test_malformed_config_entries_are_skipped() -> None:
     assert [m["id"] for m in result["markers"]] == ["2"]
     assert (result["knx"][0]["type"], result["knx"][0]["dpt_ambiguous"]) == (TYPE_DIGITAL, True)
     assert result["webio_devices"][WebioClass.MARKER]["device_id"] == "30"
+
+
+@pytest.mark.parametrize(
+    ("row", "logged"),
+    [
+        ({"binary": None, "min": 0, "max": 100}, "'2': None"),
+        ({"binary": "false", "min": 0, "max": 100}, "'2': 'false'"),
+        ({"binary": 0, "min": 0, "max": 100}, "'2': 0"),
+        # Without "binary" the kind is just as unknown — no silent "analog".
+        ({"min": 0, "max": 100}, "'2': missing"),
+        # Not a mapping at all: just as unusable, and reported as well.
+        ("binary", "'2': not a row ('binary')"),
+    ],
+)
+def test_a_type_row_without_a_bool_binary_is_no_row(row: Any, logged: str, caplog: pytest.LogCaptureFixture) -> None:
+    """Kept, "binary": null would put is_binary None into an active IO and abort the Web-IO build."""
+    conf = {
+        "FubModules": {
+            "1": {"2": {"inoutput": {"5": {"Id": 5, "Identifier": "Q1", "InOutputTypeId": 2, "Active": True}}}},
+            "11": {"1": {"Id": 1, "Name": "Wert", "Type": 2}},
+        },
+    }
+
+    with caplog.at_level(logging.WARNING):
+        result = parse_config(conf, io_types={"2": row})
+
+    # Once per parse, not once per IO / KNX object reading the row.
+    rows_warnings = [r.getMessage() for r in caplog.records if "IO type table rows" in r.getMessage()]
+    assert len(rows_warnings) == 1
+    assert '1 IO type table rows have no boolean "binary" and are ignored' in rows_warnings[0]
+    assert logged in rows_warnings[0]
+    # The only row is unusable, so the table counts as missing.
+    assert (
+        "The IO type table has no usable row at all — handled like a missing table: IOs are classified by their "
+        "identifier only (a Quickbus IO, whose identifier says nothing, as analog)"
+    ) in [r.getMessage() for r in caplog.records]
+
+    # Classified by identifier (Q1 = binary output) / unresolved KNX, like a type without a row.
+    assert [(io["identifier"], io["is_binary"], io["max"]) for io in result["io"]] == [("Q1", True, 1)]
+    assert (result["knx"][0]["type"], result["knx"][0]["dpt_ambiguous"]) == (TYPE_DIGITAL, True)
+    commands = build_webio_commands("/api/webhook/x", result)
+    assert [c["TypeId"] for c in commands if "Q1" in c["Name"]] == [1]
 
 
 def test_malformed_identifiers_and_webio_command_names_do_not_crash(caplog: pytest.LogCaptureFixture) -> None:

@@ -199,6 +199,25 @@ def test_build_io_webio_command_binary_defaults_to_zero_one() -> None:
     assert (command["TypeId"], command["Min"], command["Max"]) == (1, 0, 1)
 
 
+@pytest.mark.parametrize(
+    "io_item",
+    [
+        {"id": "7", "ext_name": "BASE", "identifier": "X1", "is_binary": None},
+        # An untyped Quickbus IO, as io_all holds it: dispatched to build_quickbus_webio_command.
+        {
+            "id": "211",
+            "ext_name": "BASE",
+            "identifier": "G1",
+            "is_binary": None,
+            "quickbus": {"device_id": "2", "name": "MT"},
+        },
+    ],
+)
+def test_build_io_webio_command_rejects_an_unknown_kind(io_item: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="unknown kind"):
+        build_io_webio_command(io_item, _HOOK)
+
+
 def test_knx_loopback_command_digital() -> None:
     command = build_knx_loopback_webio_command(
         k_id=1, marker_id=300, is_analog=False, knx_dpt_catalog=None, catalog_stale=False
