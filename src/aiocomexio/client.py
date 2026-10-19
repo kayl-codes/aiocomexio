@@ -48,7 +48,7 @@ from .scrape import (
     scrape_js_vars,
 )
 from .session import is_local_address
-from .tls import format_fingerprint, normalize_fingerprint
+from .tls import _HTTPS_DEFAULT_PORT, format_fingerprint, normalize_fingerprint
 from .webio import CONTENT_TYPE_JSON, WEBIO_PROTOCOL_HTTP
 
 __all__ = [
@@ -168,7 +168,6 @@ _REDIRECT_STATUSES = frozenset({HTTPStatus.MOVED_PERMANENTLY, HTTPStatus.FOUND, 
 # the pin, and send the session cookie along). Like aiohttp, a POST turns into a GET on 301/302/303.
 _FOLLOWED_REDIRECT_STATUSES = _REDIRECT_STATUSES | {HTTPStatus.TEMPORARY_REDIRECT, HTTPStatus.PERMANENT_REDIRECT}
 _MAX_REDIRECTS = 10
-_HTTPS_DEFAULT_PORT = 443
 _PLAN_ADDED_CONFIRMATION = ("added", "1")
 _PLAN_SAVED_CONFIRMATION = ("saved", "1")
 _PLAN_DELETED_CONFIRMATION = ("delete", "ok")
@@ -2053,6 +2052,10 @@ def _bulk_plan_entry(
 def _pinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
     """Where a redirect of a pinned client leads; ComexioResponseError unless it stays on the same HTTPS origin."""
     location = resp.headers.get("Location", "")
+    if not location:
+        raise ComexioResponseError(
+            f"{what} failed: Comexio answered {resp.status} without a Location header", status=resp.status
+        )
     current = str(resp.url)
     try:
         target = urljoin(current, location)
@@ -2061,7 +2064,7 @@ def _pinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
         raise ComexioResponseError(
             f"{what} failed: Comexio redirected to an unparsable location {_excerpt(location)}", status=resp.status
         ) from err
-    if not location or not same_origin:
+    if not same_origin:
         raise ComexioResponseError(
             f"{what} refused: Comexio redirected to {_excerpt(location)}, outside the pinned HTTPS connection",
             status=resp.status,

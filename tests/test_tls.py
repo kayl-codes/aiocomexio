@@ -31,6 +31,7 @@ from aiocomexio import (
     normalize_fingerprint,
     session_kwargs,
 )
+from aiocomexio.client import _https_origin
 from aiocomexio.tls import https_address
 from tests.fake_comexio import ADMIN_PATH, LOGIN_PATH, PASSWORD, USERNAME, FakeComexio
 
@@ -377,12 +378,15 @@ async def test_pinned_client_refuses_a_redirect_to_plain_http(
     [
         "https://comexio.example.com/admin/",  # another host
         "//comexio.example.com/admin/",  # scheme-relative, another host
-        "",  # a redirect without a target
+        "https://127.0.0.1:1/admin/",  # same host, another port
+        "HTTP://{host}/admin/",  # plain http, in capitals
     ],
 )
 async def test_pinned_client_refuses_a_redirect_off_its_origin(
     tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate, location: str
 ) -> None:
+    location = location.format(host=tls_comexio.host)
+
     async def redirect(_request: web.Request) -> web.Response:
         return web.Response(status=302, headers={"Location": location})
 
@@ -395,6 +399,23 @@ async def test_pinned_client_refuses_a_redirect_off_its_origin(
 
     assert str(excinfo.value) == _refused_redirect_message("Admin page", location)
     assert tls_comexio.requests == [("GET", ADMIN_PATH)]
+
+
+async def test_pinned_client_reports_a_redirect_without_a_location(
+    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
+) -> None:
+    async def redirect(_request: web.Request) -> web.Response:
+        return web.Response(status=302)
+
+    tls_comexio.serve("GET", ADMIN_PATH, redirect)
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+    request = client.get_raw_config()
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert str(excinfo.value) == "Admin page failed: Comexio answered 302 without a Location header"
+    assert excinfo.value.status == 302
 
 
 @pytest.mark.parametrize("location", ["https://[bad/admin/", "https://127.0.0.1:99999/admin/"])
@@ -415,41 +436,61 @@ async def test_pinned_client_refuses_an_unparsable_redirect(
     assert tls_comexio.requests == [("GET", ADMIN_PATH)]
 
 
+@pytest.mark.parametrize(
+    ("status", "method", "followed_with"),
+    [
+        (301, "POST", "GET"),
+        (302, "POST", "GET"),
+        (303, "POST", "GET"),
+        (303, "PUT", "GET"),
+        (301, "PUT", "PUT"),
+        (307, "POST", "POST"),
+        (308, "POST", "POST"),
+    ],
+)
 async def test_pinned_client_follows_a_redirect_within_its_origin(
-    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
+    tls_comexio: FakeComexio,
+    tls_session: aiohttp.ClientSession,
+    certificate: SelfSignedCertificate,
+    status: int,
+    method: str,
+    followed_with: str,
 ) -> None:
     async def moved(_request: web.Request) -> web.Response:
-        raise web.HTTPFound(_MOVED_PATH)
+        return web.Response(status=status, headers={"Location": _MOVED_PATH})
 
-    tls_comexio.serve("POST", _API_PATH, moved)
+    tls_comexio.serve(method, _API_PATH, moved)
+    tls_comexio.serve_text(followed_with, _MOVED_PATH, "1")
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+
+    body = await client._request_text(method, _API_PATH, what="Moved", data={"a": "1"}, params={"q": "1"})
+
+    assert body == "1"
+    # Like aiohttp: 303, and 301/302 on a POST, continue as a GET without the form; the old query never follows.
+    sent_form = {"a": "1"} if method == "POST" else {}
+    followed_form = sent_form if followed_with == "POST" else {}
+    assert [(r.method, r.path, r.query, r.form) for r in tls_comexio.received] == [
+        (method, _API_PATH, {"q": "1"}, sent_form),
+        (followed_with, _MOVED_PATH, {}, followed_form),
+    ]
+
+
+async def test_pinned_client_resolves_each_hop_against_the_previous_one(
+    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
+) -> None:
+    async def first(_request: web.Request) -> web.Response:
+        raise web.HTTPFound("second")  # relative: /admin/second
+
+    async def second(_request: web.Request) -> web.Response:
+        raise web.HTTPFound(f"HTTPS://{tls_comexio.host}{_MOVED_PATH}")  # same origin, scheme in capitals
+
+    tls_comexio.serve("GET", "/admin/first", first)
+    tls_comexio.serve("GET", "/admin/second", second)
     tls_comexio.serve_text("GET", _MOVED_PATH, "1")
     client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
 
-    body = await client._request_text("POST", _API_PATH, what="Moved", data={"a": "1"}, params={"q": "1"})
-
-    assert body == "1"
-    # Like aiohttp: a POST answered with 302 continues as a GET, without the form and the old query.
-    assert [(r.method, r.path, r.query, r.form) for r in tls_comexio.received] == [
-        ("POST", _API_PATH, {"q": "1"}, {"a": "1"}),
-        ("GET", _MOVED_PATH, {}, {}),
-    ]
-
-
-async def test_pinned_client_keeps_the_method_and_form_on_a_307(
-    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
-) -> None:
-    async def temporary(_request: web.Request) -> web.Response:
-        raise web.HTTPTemporaryRedirect(f"https://{tls_comexio.host}{_MOVED_PATH}")
-
-    tls_comexio.serve("POST", _API_PATH, temporary)
-    tls_comexio.serve_text("POST", _MOVED_PATH, "1")
-    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
-
-    assert await client._request_text("POST", _API_PATH, what="Moved", data={"a": "kept"}) == "1"
-    assert [(r.method, r.path, r.form) for r in tls_comexio.received] == [
-        ("POST", _API_PATH, {"a": "kept"}),
-        ("POST", _MOVED_PATH, {"a": "kept"}),
-    ]
+    assert await client._request_text("GET", "/admin/first", what="Moved") == "1"
+    assert tls_comexio.requests == [("GET", "/admin/first"), ("GET", "/admin/second"), ("GET", _MOVED_PATH)]
 
 
 async def test_pinned_client_stops_an_endless_redirect_loop(
@@ -506,3 +547,16 @@ def test_pinned_client_never_warns_about_plain_http(caplog: pytest.LogCaptureFix
         remote._warn_plain_http()
 
     assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "same"),
+    [
+        ("https://comexio.local/a", "https://comexio.local:443/b", True),
+        ("https://comexio.local/a", "HTTPS://Comexio.Local/b", True),
+        ("https://comexio.local/a", "https://comexio.local:8443/a", False),
+        ("https://comexio.local/a", "http://comexio.local:443/a", False),
+    ],
+)
+def test_https_origin_fills_in_the_default_port(first: str, second: str, same: bool) -> None:
+    assert (_https_origin(first) == _https_origin(second)) is same

@@ -21,6 +21,11 @@ class ComexioCertificateMismatchError(ComexioError):
     Deliberately not a ComexioConnectionError: retrying cannot help. Either Comexio got a new
     certificate (its "generate new certificate" action) or something else answers in its place.
     expected and actual are SHA-256 fingerprints as 64 lowercase hex digits; no request was sent.
+
+    A host name that resolves to several addresses is the exception: aiohttp tries the next one
+    after a mismatch and reports only the last failure, so a foreign certificate on one address and
+    an unreachable other address arrive as ComexioConnectionError. A caller that keeps getting
+    ComexioConnectionError can compare tls.fetch_certificate_fingerprint with the pin to tell them apart.
     """
 
     def __init__(self, message: str, *, expected: str, actual: str) -> None:
