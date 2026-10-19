@@ -40,8 +40,8 @@ _HEX_RE = re.compile(r"[0-9a-f]+", re.ASCII)
 def normalize_fingerprint(value: str) -> str:
     """A SHA-256 certificate fingerprint as 64 lowercase hex digits.
 
-    Accepts upper or lower case with ":", "-" or whitespace between the bytes. Anything else, a
-    SHA-1 or MD5 fingerprint included, raises ValueError.
+    Accepts upper or lower case with ":", "-" or whitespace between the bytes. Any other string, a
+    SHA-1 or MD5 fingerprint included, raises ValueError; a non-str raises TypeError.
     """
     if not isinstance(value, str):
         raise TypeError(f"fingerprint must be a str, not {type(value).__name__}")
@@ -63,10 +63,15 @@ def https_address(host: str) -> tuple[str, int]:
     host is what ComexioClient takes ("hostname", "ip" or either with ":port", IPv6 in brackets).
     Raises ValueError for a host that does not form a URL.
     """
+    message = f"{host!r} is not a host name or address"
     parts = urlsplit(f"https://{host}")
+    try:
+        port = parts.port
+    except ValueError as err:
+        raise ValueError(message) from err
     if not parts.hostname:
-        raise ValueError(f"{host!r} is not a host name or address")
-    return parts.hostname, parts.port or _HTTPS_DEFAULT_PORT
+        raise ValueError(message)
+    return parts.hostname, port or _HTTPS_DEFAULT_PORT
 
 
 async def fetch_certificate_fingerprint(host: str) -> str:
@@ -74,7 +79,9 @@ async def fetch_certificate_fingerprint(host: str) -> str:
 
     Only the TLS handshake runs: no HTTP request and no credentials are sent, and the certificate
     is deliberately not verified — reading it is the point. Pass the result to ComexioClient as
-    fingerprint so every later request checks the server presents this very certificate.
+    fingerprint so every later request checks the server presents this very certificate. This is
+    trust on first use: whoever answers this one handshake gets pinned, so fetch once (at setup)
+    and store the result rather than fetching it anew on every start.
 
     Raises ComexioConnectionError if host cannot be reached over TLS within
     FINGERPRINT_FETCH_TIMEOUT_SEC (no HTTPS on that port included), ComexioDataError if the

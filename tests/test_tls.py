@@ -1,10 +1,12 @@
 """Certificate pinning: fingerprint helpers, the bare-handshake fetch and the pinned HTTPS client."""
 
+import asyncio
+import base64
 import datetime
 import hashlib
 import logging
 import ssl
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +18,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+import aiocomexio.tls
 from aiocomexio import (
     ComexioCertificateMismatchError,
     ComexioClient,
     ComexioConnectionError,
+    ComexioDataError,
+    ComexioError,
+    ComexioResponseError,
     fetch_certificate_fingerprint,
     format_fingerprint,
     normalize_fingerprint,
@@ -30,7 +36,13 @@ from tests.fake_comexio import ADMIN_PATH, LOGIN_PATH, PASSWORD, USERNAME, FakeC
 
 # Synthetic: a fingerprint no test certificate has.
 FOREIGN_FINGERPRINT = "ab" * 32
+API_USER = "api"
+API_PASSWORD = "api-secret"  # nosec B105
+_API_PATH = "/api/"
+_MOVED_PATH = "/admin/moved"
 _PLAN_SAVE_PATH = "/admin/function_function_module/save_fub"
+_SAVING_PLAN = "Saving function plan 1"
+_SYNTHETIC_HOST = "192.168.0.5"
 
 
 class SelfSignedCertificate:
@@ -86,6 +98,22 @@ async def tls_session(tls_comexio: FakeComexio) -> AsyncIterator[aiohttp.ClientS
         yield session
 
 
+def _pinned_client(comexio: FakeComexio, session: aiohttp.ClientSession, fingerprint: str) -> ComexioClient:
+    return ComexioClient(
+        comexio.host,
+        USERNAME,
+        PASSWORD,
+        session=session,
+        api_username=API_USER,
+        api_password=API_PASSWORD,
+        fingerprint=fingerprint,
+    )
+
+
+def _refused_redirect_message(what: str, location: str) -> str:
+    return f"{what} refused: Comexio redirected to {location!r}, outside the pinned HTTPS connection"
+
+
 # --- fingerprint helpers -------------------------------------------------------------------
 
 
@@ -115,8 +143,9 @@ def test_normalize_fingerprint_accepts_the_usual_spellings(value: str) -> None:
     ],
 )
 def test_normalize_fingerprint_rejects_anything_but_sha256(value: str) -> None:
-    with pytest.raises(ValueError, match="is not a SHA-256 fingerprint"):
+    with pytest.raises(ValueError) as excinfo:
         normalize_fingerprint(value)
+    assert str(excinfo.value) == f"{value!r} is not a SHA-256 fingerprint (64 hex digits)"
 
 
 def test_normalize_fingerprint_rejects_non_strings() -> None:
@@ -145,10 +174,11 @@ def test_https_address_uses_the_port_in_host_or_443(host: str, expected: tuple[s
     assert https_address(host) == expected
 
 
-@pytest.mark.parametrize("host", ["", ":443", "comexio:notaport"])
+@pytest.mark.parametrize("host", ["", ":443", "comexio:notaport", "comexio:99999"])
 def test_https_address_rejects_malformed_hosts(host: str) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as excinfo:
         https_address(host)
+    assert str(excinfo.value) == f"{host!r} is not a host name or address"
 
 
 # --- fetch_certificate_fingerprint ---------------------------------------------------------
@@ -175,19 +205,86 @@ async def test_fetch_certificate_fingerprint_of_a_closed_port_is_a_connection_er
         await fetch_certificate_fingerprint(f"127.0.0.1:{unused_tcp_port}")
 
 
+async def test_fetch_certificate_fingerprint_gives_up_on_a_silent_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def silent(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await asyncio.sleep(5)  # never answers the ClientHello
+        writer.close()
+
+    server = await asyncio.start_server(silent, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(aiocomexio.tls, "FINGERPRINT_FETCH_TIMEOUT_SEC", 0.2)
+    try:
+        with pytest.raises(ComexioConnectionError) as excinfo:
+            await fetch_certificate_fingerprint(f"127.0.0.1:{port}")
+    finally:
+        server.close()
+    assert str(excinfo.value) == f"TLS handshake with '127.0.0.1:{port}' failed: TimeoutError()"
+
+
+class _SslObject:
+    def __init__(self, certificate: bytes | None) -> None:
+        self._certificate = certificate
+
+    def getpeercert(self, binary_form: bool = False) -> bytes | None:
+        assert binary_form
+        return self._certificate
+
+
+class _FakeWriter:
+    """What asyncio.open_connection hands back: a chosen ssl_object and a close_notify that fails."""
+
+    def __init__(self, ssl_object: _SslObject | None) -> None:
+        self._ssl_object = ssl_object
+        self.closed = False
+
+    def get_extra_info(self, name: str) -> _SslObject | None:
+        return self._ssl_object if name == "ssl_object" else None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        raise ConnectionResetError("peer skipped close_notify")
+
+
+def _open_connection_returning(writer: _FakeWriter) -> Callable[..., Awaitable[tuple[None, _FakeWriter]]]:
+    async def open_connection(*_args: Any, **_kwargs: Any) -> tuple[None, _FakeWriter]:
+        return None, writer
+
+    return open_connection
+
+
+@pytest.mark.parametrize("ssl_object", [None, _SslObject(None), _SslObject(b"")], ids=["no TLS", "none", "empty"])
+async def test_fetch_certificate_fingerprint_without_a_certificate_is_a_data_error(
+    monkeypatch: pytest.MonkeyPatch, ssl_object: _SslObject | None
+) -> None:
+    writer = _FakeWriter(ssl_object)
+    monkeypatch.setattr(asyncio, "open_connection", _open_connection_returning(writer))
+
+    with pytest.raises(ComexioDataError) as excinfo:
+        await fetch_certificate_fingerprint(_SYNTHETIC_HOST)
+
+    assert str(excinfo.value) == f"{_SYNTHETIC_HOST!r} completed the TLS handshake without presenting a certificate"
+    assert writer.closed
+
+
+async def test_fetch_certificate_fingerprint_survives_a_failing_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = _FakeWriter(_SslObject(b"synthetic certificate"))
+    monkeypatch.setattr(asyncio, "open_connection", _open_connection_returning(writer))
+
+    fingerprint = await fetch_certificate_fingerprint(_SYNTHETIC_HOST)
+
+    assert fingerprint == hashlib.sha256(b"synthetic certificate").hexdigest()
+    assert writer.closed
+
+
 # --- the pinned client ---------------------------------------------------------------------
 
 
 async def test_pinned_client_logs_in_over_https(
     tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
 ) -> None:
-    client = ComexioClient(
-        tls_comexio.host,
-        USERNAME,
-        PASSWORD,
-        session=tls_session,
-        fingerprint=format_fingerprint(certificate.fingerprint),
-    )
+    client = _pinned_client(tls_comexio, tls_session, format_fingerprint(certificate.fingerprint))
 
     await client.login()
 
@@ -197,28 +294,45 @@ async def test_pinned_client_logs_in_over_https(
     assert login.referer == f"https://{tls_comexio.host}{LOGIN_PATH}"
 
 
-@pytest.mark.parametrize("call", ["login", "redirect"])
+async def test_pinned_client_writes_values_with_basic_auth_over_https(
+    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
+) -> None:
+    tls_comexio.serve_text("GET", _API_PATH, "1")
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+
+    await client.set_marker_value(5, 21.5)
+
+    (request,) = tls_comexio.received_at("GET", _API_PATH)
+    assert request.query == {"action": "set", "value": "21.5", "marker": "M5"}
+    assert request.authorization == f"Basic {base64.b64encode(b'api:api-secret').decode()}"
+
+
+_MISMATCH_CALLS: dict[str, tuple[str, Callable[[ComexioClient], Awaitable[Any]]]] = {
+    "login": ("Login key request", lambda client: client.login()),
+    "config": ("Admin page", lambda client: client.get_raw_config()),
+    "value write": ("Writing marker M5", lambda client: client.set_marker_value(5, 1)),
+    "redirect": (_SAVING_PLAN, lambda client: client._request_redirect("POST", _PLAN_SAVE_PATH, what=_SAVING_PLAN)),
+}
+
+
+@pytest.mark.parametrize("call", list(_MISMATCH_CALLS))
 async def test_pinned_client_refuses_a_foreign_certificate_before_sending_anything(
     tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate, call: str
 ) -> None:
-    client = ComexioClient(tls_comexio.host, USERNAME, PASSWORD, session=tls_session, fingerprint=FOREIGN_FINGERPRINT)
-
-    request = (
-        client.login()
-        if call == "login"
-        else client._request_redirect("POST", _PLAN_SAVE_PATH, what="Saving function plan 1")
-    )
+    what, send = _MISMATCH_CALLS[call]
+    client = _pinned_client(tls_comexio, tls_session, FOREIGN_FINGERPRINT)
+    request = send(client)
 
     with pytest.raises(ComexioCertificateMismatchError) as excinfo:
         await request
 
-    what = "Login key request" if call == "login" else "Saving function plan 1"
     assert str(excinfo.value) == (
         f"{what} refused: Comexio at {tls_comexio.host!r} presented the TLS certificate "
         f"{format_fingerprint(certificate.fingerprint)} instead of the pinned {format_fingerprint(FOREIGN_FINGERPRINT)}"
     )
     assert excinfo.value.expected == FOREIGN_FINGERPRINT
     assert excinfo.value.actual == certificate.fingerprint
+    assert isinstance(excinfo.value, ComexioError)
     assert not isinstance(excinfo.value, ComexioConnectionError)
     assert tls_comexio.requests == []
 
@@ -226,11 +340,148 @@ async def test_pinned_client_refuses_a_foreign_certificate_before_sending_anythi
 async def test_pinned_client_does_not_fall_back_to_plain_http(
     comexio: FakeComexio, session: aiohttp.ClientSession, certificate: SelfSignedCertificate
 ) -> None:
-    client = ComexioClient(comexio.host, USERNAME, PASSWORD, session=session, fingerprint=certificate.fingerprint)
+    client = _pinned_client(comexio, session, certificate.fingerprint)
+    request = client.login()
 
-    with pytest.raises(ComexioConnectionError):
-        await client.login()
+    with pytest.raises(ComexioConnectionError, match=r"^Login key request failed: "):
+        await request
+
     assert comexio.requests == []
+
+
+async def test_pinned_client_refuses_a_redirect_to_plain_http(
+    tls_comexio: FakeComexio,
+    tls_session: aiohttp.ClientSession,
+    certificate: SelfSignedCertificate,
+    comexio: FakeComexio,
+) -> None:
+    location = f"http://{comexio.host}{ADMIN_PATH}"
+
+    async def downgrade(_request: web.Request) -> web.Response:
+        raise web.HTTPFound(location)
+
+    tls_comexio.serve("GET", ADMIN_PATH, downgrade)
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+    request = client.get_raw_config()
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert str(excinfo.value) == _refused_redirect_message("Admin page", location)
+    assert excinfo.value.status == 302
+    assert comexio.requests == []
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://comexio.example.com/admin/",  # another host
+        "//comexio.example.com/admin/",  # scheme-relative, another host
+        "",  # a redirect without a target
+    ],
+)
+async def test_pinned_client_refuses_a_redirect_off_its_origin(
+    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate, location: str
+) -> None:
+    async def redirect(_request: web.Request) -> web.Response:
+        return web.Response(status=302, headers={"Location": location})
+
+    tls_comexio.serve("GET", ADMIN_PATH, redirect)
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+    request = client.get_raw_config()
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert str(excinfo.value) == _refused_redirect_message("Admin page", location)
+    assert tls_comexio.requests == [("GET", ADMIN_PATH)]
+
+
+@pytest.mark.parametrize("location", ["https://[bad/admin/", "https://127.0.0.1:99999/admin/"])
+async def test_pinned_client_refuses_an_unparsable_redirect(
+    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate, location: str
+) -> None:
+    async def redirect(_request: web.Request) -> web.Response:
+        return web.Response(status=302, headers={"Location": location})
+
+    tls_comexio.serve("GET", ADMIN_PATH, redirect)
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+    request = client.get_raw_config()
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert str(excinfo.value) == f"Admin page failed: Comexio redirected to an unparsable location {location!r}"
+    assert tls_comexio.requests == [("GET", ADMIN_PATH)]
+
+
+async def test_pinned_client_follows_a_redirect_within_its_origin(
+    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
+) -> None:
+    async def moved(_request: web.Request) -> web.Response:
+        raise web.HTTPFound(_MOVED_PATH)
+
+    tls_comexio.serve("POST", _API_PATH, moved)
+    tls_comexio.serve_text("GET", _MOVED_PATH, "1")
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+
+    body = await client._request_text("POST", _API_PATH, what="Moved", data={"a": "1"}, params={"q": "1"})
+
+    assert body == "1"
+    # Like aiohttp: a POST answered with 302 continues as a GET, without the form and the old query.
+    assert [(r.method, r.path, r.query, r.form) for r in tls_comexio.received] == [
+        ("POST", _API_PATH, {"q": "1"}, {"a": "1"}),
+        ("GET", _MOVED_PATH, {}, {}),
+    ]
+
+
+async def test_pinned_client_keeps_the_method_and_form_on_a_307(
+    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
+) -> None:
+    async def temporary(_request: web.Request) -> web.Response:
+        raise web.HTTPTemporaryRedirect(f"https://{tls_comexio.host}{_MOVED_PATH}")
+
+    tls_comexio.serve("POST", _API_PATH, temporary)
+    tls_comexio.serve_text("POST", _MOVED_PATH, "1")
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+
+    assert await client._request_text("POST", _API_PATH, what="Moved", data={"a": "kept"}) == "1"
+    assert [(r.method, r.path, r.form) for r in tls_comexio.received] == [
+        ("POST", _API_PATH, {"a": "kept"}),
+        ("POST", _MOVED_PATH, {"a": "kept"}),
+    ]
+
+
+async def test_pinned_client_stops_an_endless_redirect_loop(
+    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
+) -> None:
+    async def loop(_request: web.Request) -> web.Response:
+        raise web.HTTPFound(ADMIN_PATH)
+
+    tls_comexio.serve("GET", ADMIN_PATH, loop)
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+    request = client.get_raw_config()
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert str(excinfo.value) == "Admin page failed: more than 10 redirects"
+    assert excinfo.value.status == 302
+    assert tls_comexio.requests == [("GET", ADMIN_PATH)] * 11
+
+
+async def test_redirect_through_pinned_client_works(
+    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
+) -> None:
+    async def redirect(_request: web.Request) -> web.Response:
+        raise web.HTTPFound("/admin/function_function_module/home?saved=1")
+
+    tls_comexio.serve("POST", _PLAN_SAVE_PATH, redirect)
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+
+    location = await client._request_redirect("POST", _PLAN_SAVE_PATH, what=_SAVING_PLAN)
+
+    assert location == "/admin/function_function_module/home?saved=1"
 
 
 async def test_unpinned_client_still_uses_plain_http(client: ComexioClient, comexio: FakeComexio) -> None:
@@ -242,8 +493,9 @@ async def test_unpinned_client_still_uses_plain_http(client: ComexioClient, come
 
 def test_client_rejects_an_invalid_fingerprint() -> None:
     session: Any = object()  # never used: construction fails first
-    with pytest.raises(ValueError, match="is not a SHA-256 fingerprint"):
-        ComexioClient("192.168.0.5", USERNAME, PASSWORD, session=session, fingerprint="34:54:BE:0E")
+    with pytest.raises(ValueError) as excinfo:
+        ComexioClient(_SYNTHETIC_HOST, USERNAME, PASSWORD, session=session, fingerprint="34:54:BE:0E")
+    assert str(excinfo.value) == "'34:54:BE:0E' is not a SHA-256 fingerprint (64 hex digits)"
 
 
 def test_pinned_client_never_warns_about_plain_http(caplog: pytest.LogCaptureFixture) -> None:
@@ -254,19 +506,3 @@ def test_pinned_client_never_warns_about_plain_http(caplog: pytest.LogCaptureFix
         remote._warn_plain_http()
 
     assert caplog.records == []
-
-
-async def test_redirect_through_pinned_client_works(
-    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
-) -> None:
-    async def redirect(_request: web.Request) -> web.Response:
-        raise web.HTTPFound("/admin/function_function_module/home?saved=1")
-
-    tls_comexio.serve("POST", _PLAN_SAVE_PATH, redirect)
-    client = ComexioClient(
-        tls_comexio.host, USERNAME, PASSWORD, session=tls_session, fingerprint=certificate.fingerprint
-    )
-
-    location = await client._request_redirect("POST", _PLAN_SAVE_PATH, what="Saving function plan 1")
-
-    assert location == "/admin/function_function_module/home?saved=1"
