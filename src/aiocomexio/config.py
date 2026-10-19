@@ -349,7 +349,7 @@ def parse_config(
     ComexioClient.set_io_value cannot reach it: treat it as read-only even when is_input is False.
     Active IOs that repeat an identifier of their own device (Quickbus device or extension), and
     active Quickbus IOs whose type has no usable row in a non-empty io_types, land only in "io_all" —
-    the latter with "is_binary" None (kind unknown).
+    the latter with "is_binary" None (kind unknown), as do inactive Quickbus IOs of such a type.
     IOs whose canonical id repeats are left out of "io" (when two active ones share it) and of
     "io_all" (when any two IOs share it, inactive and left-out ones included: a label looked up
     by that id would be arbitrary) — then an active IO can keep its entity but lose its label.
@@ -1175,34 +1175,36 @@ def _type_bounds(type_info: Mapping[str, Any], ext_name: str, ident: str) -> tup
 def _untyped_quickbus_ios(
     ext_id: str, entries: list[dict[str, Any]], type_ids: list[Any], io_types: Mapping[str, Any]
 ) -> set[int]:
-    """Positions of the active Quickbus IOs whose type has no usable row in the IO type table (_io_type_row).
+    """Positions of the Quickbus IOs whose type has no usable row in the IO type table (_io_type_row).
 
     A plain IO falls back to its identifier (I1, Q1, QI1, ...); G1, TL1 or R of a Quickbus
     device say nothing about binary or analog, so its entity and Web-IO command would get a
-    guessed kind and range — those IOs are left out instead. Not when the whole table is
-    missing (a failed scrape, warned about by parse_config): leaving out every Quickbus IO for
-    one poll would make a consumer drop their entities.
+    guessed kind and range — those IOs are left out instead. Inactive ones are included too
+    (io_all keeps them for plan labels, so their kind is unknown as well), but only the active
+    ones, which lose their entity, are warned about. Not when the whole table is missing (a
+    failed scrape, warned about by parse_config): leaving out every Quickbus IO for one poll
+    would make a consumer drop their entities.
     """
     if not io_types:
         return set()
-    untyped = [
+    untyped = {
         pos
         for pos, (entry, type_id) in enumerate(zip(entries, type_ids, strict=True))
-        if entry["quickbus"] and not entry["inactive"] and not _io_type_row(io_types, type_id)
-    ]
-    if untyped:
+        if entry["quickbus"] and not _io_type_row(io_types, type_id)
+    }
+    if active := [pos for pos in sorted(untyped) if not entries[pos]["inactive"]]:
         labels = [
             f"{entries[pos]['quickbus']['name']} {entries[pos]['identifier']} (type {_short_repr(type_ids[pos])})"
-            for pos in untyped
+            for pos in active
         ]
         _LOGGER.warning(
             "%d active Quickbus IOs of extension %s have no usable row in the IO type table, so binary or analog is "
             "unknown — they are left out of the active IOs (no entity, no Web-IO command): %s",
-            len(untyped),
-            ext_id,
+            len(active),
+            _log_safe(ext_id),
             log_excerpt(labels),
         )
-    return set(untyped)
+    return untyped
 
 
 def _process_extension_ios(

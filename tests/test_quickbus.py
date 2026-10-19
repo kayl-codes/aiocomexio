@@ -17,7 +17,7 @@ from aiocomexio.config import ParseOptions, parse_config
 from aiocomexio.const import WebioClass
 from aiocomexio.function_plan.render_geometry import _apply_geometry_target_fields
 from aiocomexio.function_plan.render_values import _element_analog, _pill_parts_io, element_search_id, io_owner
-from aiocomexio.webio import build_io_webio_command, build_webio_commands, generate_webio_json
+from aiocomexio.webio import build_io_webio_command, build_webio_commands, generate_webio_json, quickbus_command_name
 from tests.common import load_json_fixture
 
 _HOOK = "/api/webhook/comexio_test"
@@ -537,6 +537,8 @@ def test_quickbus_ios_without_a_type_row_are_left_out(caplog: pytest.LogCaptureF
     # Kept for plan labels, but a plan must not draw analog pins for an IO of unknown kind.
     ios_by_id = _io_all(result)
     assert {ios_by_id[io_id]["is_binary"] for io_id in ("201", "202", "211")} == {None}
+    # An inactive IO of that type (212) is unknown in io_all too, but not counted in the warning.
+    assert ios_by_id["212"]["is_binary"] is None
     pill = {"reference": {"type": 1, "ref_id": "201"}}
     assert _element_analog(pill, {}, {}, ios_by_id) is None
     assert _element_analog({"reference": {"type": 1, "ref_id": "203"}}, {}, {}, ios_by_id) is True
@@ -562,9 +564,9 @@ def test_untyped_quickbus_ios_do_not_break_the_command_build() -> None:
 
     assert payload["commands"] == commands
     expected = [io for io in result["io"] if io["quickbus"]]
-    assert expected
-    assert {"201", "202", "211"}.isdisjoint(io["id"] for io in expected)
-    assert len(commands) == len(expected)
+    typed = {io["id"] for io in _parse()["io"] if io["quickbus"]}
+    assert {io["id"] for io in expected} == typed - {"201", "202", "211"}
+    assert [c["Name"] for c in commands] == [quickbus_command_name(io) for io in expected]
 
 
 @pytest.mark.parametrize("io_types", [None, {}])
