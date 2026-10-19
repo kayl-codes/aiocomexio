@@ -50,6 +50,13 @@ published on PyPI and consumed by the Home Assistant integration
 - **One bad entry does not stop the other classes:** a filter or conversion that runs over every class (markers,
   IOs, KNX objects) must not fail on malformed data of one class: an invalid value falls back to a default with a
   warning instead of aborting the upload or build of all the others.
+- **An unknown kind stays unknown:** when the data cannot tell what an entry is (binary or analog, input or output,
+  its type), the parsed field is `None`, not a silent default such as `False`/`0`/analog, and every reader of
+  that field (e.g. the function plan renderers) handles `None` as unknown. A default turns missing data into a
+  plausible-looking but wrong result: an untyped Quickbus IO drawn as an analog pin (#32). The rule targets
+  *silent* defaults: an explicit, documented and logged conservative fallback stays allowed — the fallbacks listed
+  above, a Quickbus IO with a malformed direction flag kept read-only, and the identifier classification when the
+  whole IO type table is missing (`parse_config` warns; leaving out every IO for one poll would drop entities).
 - **Public API:** fully typed; flag breaking changes to public names or signatures that are not called out in the PR.
 - **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776); no duplicated string literals — extract
   constants (S1192).
@@ -104,6 +111,11 @@ published on PyPI and consumed by the Home Assistant integration
   well, not only to values; `%r` alone quotes them but does not cap their length. `_excerpt` caps the *output*
   only — it builds the full `repr` first — so it is not a guard against huge or non-JSON values (see "Every scraped
   value, keys included").
+- **Scraped names in `config.py` log lines:** an extension name, identifier, title or other scraped string goes
+  through `_log_safe` (control characters escaped, length cut), a raw value of unknown type through `_short_repr`
+  (capped repr), a list of names through `log_excerpt` — never as a bare `%s` or an uncapped `%r` (#32). This
+  applies to new and touched log calls; older calls (e.g. the title warnings in `marker_kind`) are not findings
+  unless the diff changes them.
 - **Caller values in new messages:** an id, name or value that comes from the caller or from Comexio is written as
   repr (`%r` in log calls, `!r` in f-strings for exceptions), so a line break in it cannot forge a log line and an
   empty string stays visible. Older `%s` calls are not a finding unless the diff touches them.
@@ -142,6 +154,9 @@ published on PyPI and consumed by the Home Assistant integration
   in a fixture or `try`/`finally`, never bare; the digit limit goes through the `int_max_str_digits` fixture in
   `conftest.py` (`tests/test_conventions.py` enforces this). A `pytest.mark.parametrize` with an int beyond 4300
   digits gets explicit `ids=`: `str()`/`repr()` of it raise `ValueError`.
+- **No vacuous loops:** a test that asserts inside a `for` over a result first asserts that the result holds the
+  expected entries (`==` on the ids, or at least non-empty and covering every case the loop distinguishes, e.g. a
+  binary and an analog IO). Otherwise a regression that drops the entries passes every assertion in the loop (#32).
 
 ## GitHub Actions
 

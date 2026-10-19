@@ -17,7 +17,7 @@ from aiocomexio.config import ParseOptions, parse_config
 from aiocomexio.const import WebioClass
 from aiocomexio.function_plan.render_geometry import _apply_geometry_target_fields
 from aiocomexio.function_plan.render_values import _element_analog, _pill_parts_io, element_search_id, io_owner
-from aiocomexio.webio import build_io_webio_command, build_webio_commands, generate_webio_json
+from aiocomexio.webio import build_io_webio_command, build_webio_commands, generate_webio_json, quickbus_command_name
 from tests.common import load_json_fixture
 
 _HOOK = "/api/webhook/comexio_test"
@@ -537,6 +537,8 @@ def test_quickbus_ios_without_a_type_row_are_left_out(caplog: pytest.LogCaptureF
     # Kept for plan labels, but a plan must not draw analog pins for an IO of unknown kind.
     ios_by_id = _io_all(result)
     assert {ios_by_id[io_id]["is_binary"] for io_id in ("201", "202", "211")} == {None}
+    # An inactive IO of that type (212) is unknown in io_all too, but not counted in the warning.
+    assert ios_by_id["212"]["is_binary"] is None
     pill = {"reference": {"type": 1, "ref_id": "201"}}
     assert _element_analog(pill, {}, {}, ios_by_id) is None
     assert _element_analog({"reference": {"type": 1, "ref_id": "203"}}, {}, {}, ios_by_id) is True
@@ -544,13 +546,39 @@ def test_quickbus_ios_without_a_type_row_are_left_out(caplog: pytest.LogCaptureF
     # Typed Quickbus IOs and the plain IO stay.
     assert {"11", "203", "204", "213"} <= active
     assert (
-        "3 active Quickbus IOs of extension 1 have no row in the IO type table, so binary or analog is unknown — "
-        "they are left out of the active IOs (no entity, no Web-IO command): MT Flur G1 (type 134), "
+        "3 active Quickbus IOs of extension 1 have no usable row in the IO type table, so binary or analog is "
+        "unknown — they are left out of the active IOs (no entity, no Web-IO command): MT Flur G1 (type 134), "
         "MT Flur G18 (type 134), MT Bad G1 (type 134)"
     ) in caplog.text
+    assert sum("Quickbus IOs of extension" in r.getMessage() for r in caplog.records) == 1
 
 
-@pytest.mark.parametrize("io_types", [None, {}])
+def test_untyped_quickbus_ios_do_not_break_the_command_build() -> None:
+    """io_all holds them with is_binary None (rejected by the builders), so only the active IOs get commands."""
+    # 134 with a non-bool "binary" is no usable row either: the same IOs as without a row.
+    io_types = {**_IO_TYPES, "134": {"binary": None, "min": 0, "max": 1}}
+    result = parse_config(load_json_fixture("config_quickbus.json"), io_types=io_types, io_input_types=_IO_INPUT_TYPES)
+    assert {_io_all(result)[io_id]["is_binary"] for io_id in ("201", "202", "211")} == {None}
+
+    commands = build_webio_commands(_HOOK, result, WebioClass.QUICKBUS)
+    payload = json.loads(generate_webio_json(_HOOK, "HomeAssistant [QB]", result, WebioClass.QUICKBUS))
+
+    assert payload["commands"] == commands
+    expected = [io for io in result["io"] if io["quickbus"]]
+    typed = {io["id"] for io in _parse()["io"] if io["quickbus"]}
+    assert {io["id"] for io in expected} == typed - {"201", "202", "211"}
+    assert [c["Name"] for c in commands] == [quickbus_command_name(io) for io in expected]
+
+
+@pytest.mark.parametrize(
+    "io_types",
+    [
+        None,
+        {},
+        # A table without a single usable row is a failed scrape as well.
+        {"1": {"min": 0, "max": 1}, "134": {"binary": None}, "12": "x"},
+    ],
+)
 def test_missing_type_table_keeps_quickbus_ios(io_types: Any, caplog: pytest.LogCaptureFixture) -> None:
     """A failed scrape must not drop every Quickbus entity for one poll — parse_config warns instead."""
     with caplog.at_level(logging.WARNING):
@@ -566,8 +594,32 @@ def test_missing_type_table_keeps_quickbus_ios(io_types: Any, caplog: pytest.Log
         "301",
         "302",
     }
-    assert "no row in the IO type table" not in caplog.text
+    assert "no usable row in the IO type table" not in caplog.text
+    # io_all keeps every IO (plan labels), the inactive 46 and 212 included, and none of them unknown.
+    assert {io["id"] for io in result["io_all"]} == {io["id"] for io in _parse()["io_all"]}
+    assert {"46", "212"} <= {io["id"] for io in result["io_all"]}
     assert all(isinstance(io["is_binary"], bool) for io in result["io_all"])
+    # Only the table with rows, none of them usable, gets the "handled like a missing table" warning.
+    assert ("has no usable row at all" in caplog.text) is bool(io_types)
+
+
+def test_unusable_rows_beside_usable_ones_do_not_count_as_a_missing_table(caplog: pytest.LogCaptureFixture) -> None:
+    """Rows no IO uses, one null "binary" and one not a mapping, are reported but change nothing else."""
+    with caplog.at_level(logging.WARNING):
+        result = parse_config(
+            load_json_fixture("config_quickbus.json"),
+            io_types={**_IO_TYPES, "998": {"binary": None}, "999": "x"},
+            io_input_types=_IO_INPUT_TYPES,
+        )
+
+    rows_warnings = [r.getMessage() for r in caplog.records if "IO type table rows" in r.getMessage()]
+    assert rows_warnings == [
+        '2 IO type table rows have no boolean "binary" and are ignored — their IOs and KNX objects are '
+        "classified as if the type had no row: '998': None, '999': not a row ('x')"
+    ]
+    assert "has no usable row at all" not in caplog.text
+    assert [io["id"] for io in result["io"]] == [io["id"] for io in _parse()["io"]]
+    assert [io["id"] for io in result["io_all"]] == [io["id"] for io in _parse()["io_all"]]
 
 
 def test_inactive_or_plain_ios_without_a_type_row_give_no_type_warning(caplog: pytest.LogCaptureFixture) -> None:
@@ -582,7 +634,7 @@ def test_inactive_or_plain_ios_without_a_type_row_give_no_type_warning(caplog: p
 
     assert _io_all(result)["11"]["is_binary"] is True
     assert "11" in {io["id"] for io in result["io"]}
-    assert "no row in the IO type table" not in caplog.text
+    assert "no usable row in the IO type table" not in caplog.text
 
 
 def test_huge_integer_type_id_names_no_type_row(caplog: pytest.LogCaptureFixture) -> None:
@@ -593,7 +645,7 @@ def test_huge_integer_type_id_names_no_type_row(caplog: pytest.LogCaptureFixture
         result = _parse(conf)
 
     assert "203" not in {io["id"] for io in result["io"]}
-    assert "1 active Quickbus IOs of extension 1 have no row in the IO type table" in caplog.text
+    assert "1 active Quickbus IOs of extension 1 have no usable row in the IO type table" in caplog.text
     assert "MT Flur TL1 (type <int too large to print>)" in caplog.text
 
 
@@ -611,14 +663,14 @@ def test_non_finite_type_id_names_no_type_row(type_id: float, caplog: pytest.Log
     assert "203" not in {io["id"] for io in result["io"]}
     # A plain IO falls back to its identifier: I1 is a binary input.
     assert (ios["11"]["type_id_raw"], ios["11"]["is_binary"], ios["11"]["is_input"]) == (1, True, True)
-    assert "1 active Quickbus IOs of extension 1 have no row in the IO type table" in caplog.text
+    assert "1 active Quickbus IOs of extension 1 have no usable row in the IO type table" in caplog.text
 
 
 def test_typed_quickbus_ios_give_no_type_warning(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING):
         _parse()
 
-    assert "no row in the IO type table" not in caplog.text
+    assert "no usable row in the IO type table" not in caplog.text
 
 
 def test_scraped_names_cannot_forge_log_lines(caplog: pytest.LogCaptureFixture) -> None:

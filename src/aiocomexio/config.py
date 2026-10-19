@@ -214,6 +214,55 @@ def _table_entry(table: Mapping[str, Any], key: Any) -> Mapping[str, Any]:
     return entry if isinstance(entry, Mapping) else {}
 
 
+def _io_type_row(io_types: Mapping[str, Any], type_id: Any) -> Mapping[str, Any]:
+    """The IO type table row of type_id, or {} if it has none or no bool "binary".
+
+    A row without "binary", or with "binary": null (or "false", 0, ...), cannot tell binary from
+    analog; kept, it would put a None or a guessed kind into an active IO, its Web-IO command or
+    a KNX object. Treated as no row, the IO falls back like one without a type row.
+    """
+    row = _table_entry(io_types, type_id)
+    return row if isinstance(row.get("binary"), bool) else {}
+
+
+def _malformed_type_row(row: Any) -> str | None:
+    """Why _io_type_row ignores this IO type table row, or None for a usable one."""
+    if not isinstance(row, Mapping):
+        return f"not a row ({_short_repr(row)})"
+    if isinstance(row.get("binary"), bool):
+        return None
+    return _short_repr(row["binary"]) if "binary" in row else "missing"
+
+
+def _usable_type_rows(io_types: Mapping[str, Any]) -> dict[Any, Any]:
+    """The IO type table without the rows _io_type_row ignores — warned about once per parse.
+
+    Such rows are a scraper or firmware problem, not a missing row. A non-empty table without a
+    single usable row is handled like a missing table (an empty result): leaving out every
+    Quickbus IO for one poll would make a consumer drop their entities.
+    """
+    usable: dict[Any, Any] = {}
+    malformed: list[str] = []
+    for type_id, row in io_types.items():
+        if (reason := _malformed_type_row(row)) is None:
+            usable[type_id] = row
+        else:
+            malformed.append(f"{_short_repr(type_id)}: {reason}")
+    if malformed:
+        _LOGGER.warning(
+            '%d IO type table rows have no boolean "binary" and are ignored — their IOs and KNX objects are '
+            "classified as if the type had no row: %s",
+            len(malformed),
+            log_excerpt(malformed),
+        )
+    if malformed and not usable:
+        _LOGGER.warning(
+            "The IO type table has no usable row at all — handled like a missing table: IOs are classified by "
+            "their identifier only (a Quickbus IO, whose identifier says nothing, as analog)"
+        )
+    return usable
+
+
 def iter_group(group: Any) -> Iterable[tuple[str, Any]]:
     """Iterate a Comexio id group as (id, member) pairs, ids normalized to str.
 
@@ -323,8 +372,8 @@ def parse_config(
     addressed by its unique "id" only — its ext_name/identifier pair repeats across devices, so
     ComexioClient.set_io_value cannot reach it: treat it as read-only even when is_input is False.
     Active IOs that repeat an identifier of their own device (Quickbus device or extension), and
-    active Quickbus IOs whose type has no row in a non-empty io_types, land only in "io_all" —
-    the latter with "is_binary" None (kind unknown).
+    active Quickbus IOs whose type has no usable row in an io_types with usable rows, land only in "io_all" —
+    the latter with "is_binary" None (kind unknown), as do inactive Quickbus IOs of such a type.
     IOs whose canonical id repeats are left out of "io" (when two active ones share it) and of
     "io_all" (when any two IOs share it, inactive and left-out ones included: a label looked up
     by that id would be arbitrary) — then an active IO can keep its entity but lose its label.
@@ -351,7 +400,7 @@ def parse_config(
             "parse_config called without io_types — IOs are classified by their identifier only (a Quickbus "
             "IO, whose identifier says nothing, as analog) and every KNX object is flagged dpt_ambiguous"
         )
-    io_types = io_types or {}
+    io_types = _usable_type_rows(io_types or {})
 
     _process_device_info(conf, data, options.webio_name, fub_modules)
     data[_KEY_MARKERS].extend(
@@ -581,11 +630,11 @@ def _source_item_type(module_key: str, type_raw: Any, io_types: Mapping[str, Any
 
     KNX Type is a rich catalog code in the same value space as IOs' $IOTypesBinary, not the
     simple {1,2,3} marker scale. A KNX Type without a usable io_types entry (missing, null, no
-    object or an empty one) is reported unresolved and defaults to "digital" — the safer of the two, it
-    never exposes a possibly-binary datapoint to analog writes.
+    object, an empty one or a non-bool "binary") is reported unresolved and defaults to "digital"
+    — the safer of the two, it never exposes a possibly-binary datapoint to analog writes.
     """
     if module_key == _MODULE_KNX:
-        if not (entry := _table_entry(io_types, type_raw)):
+        if not (entry := _io_type_row(io_types, type_raw)):
             return TYPE_DIGITAL, True
         return (TYPE_DIGITAL if entry.get("binary", False) else TYPE_ANALOG), False
     return (TYPE_ANALOG if type_raw in [2, 3] else TYPE_DIGITAL), False
@@ -1149,34 +1198,36 @@ def _type_bounds(type_info: Mapping[str, Any], ext_name: str, ident: str) -> tup
 def _untyped_quickbus_ios(
     ext_id: str, entries: list[dict[str, Any]], type_ids: list[Any], io_types: Mapping[str, Any]
 ) -> set[int]:
-    """Positions of the active Quickbus IOs whose type has no row in the IO type table.
+    """Positions of the Quickbus IOs whose type has no usable row in the IO type table (_io_type_row).
 
     A plain IO falls back to its identifier (I1, Q1, QI1, ...); G1, TL1 or R of a Quickbus
     device say nothing about binary or analog, so its entity and Web-IO command would get a
-    guessed kind and range — those IOs are left out instead. Not when the whole table is
-    missing (a failed scrape, warned about by parse_config): leaving out every Quickbus IO for
-    one poll would make a consumer drop their entities.
+    guessed kind and range — those IOs are left out instead. Inactive ones are included too
+    (io_all keeps them for plan labels, so their kind is unknown as well), but only the active
+    ones, which lose their entity, are warned about. Not when the whole table is missing or has
+    no usable row (a failed scrape, warned about by parse_config): leaving out every Quickbus IO
+    for one poll would make a consumer drop their entities.
     """
     if not io_types:
         return set()
-    untyped = [
+    untyped = {
         pos
         for pos, (entry, type_id) in enumerate(zip(entries, type_ids, strict=True))
-        if entry["quickbus"] and not entry["inactive"] and not _table_entry(io_types, type_id)
-    ]
-    if untyped:
+        if entry["quickbus"] and not _io_type_row(io_types, type_id)
+    }
+    if active := [pos for pos in sorted(untyped) if not entries[pos]["inactive"]]:
         labels = [
             f"{entries[pos]['quickbus']['name']} {entries[pos]['identifier']} (type {_short_repr(type_ids[pos])})"
-            for pos in untyped
+            for pos in active
         ]
         _LOGGER.warning(
-            "%d active Quickbus IOs of extension %s have no row in the IO type table, so binary or analog is "
+            "%d active Quickbus IOs of extension %s have no usable row in the IO type table, so binary or analog is "
             "unknown — they are left out of the active IOs (no entity, no Web-IO command): %s",
-            len(untyped),
-            ext_id,
+            len(active),
+            _log_safe(ext_id),
             log_excerpt(labels),
         )
-    return set(untyped)
+    return untyped
 
 
 def _process_extension_ios(
@@ -1323,7 +1374,7 @@ def _build_io_entry(
     ident = _label(io_item.get("Identifier")) or io_id
     raw_desc = io_item.get("Description")
     description = _io_description(raw_desc if isinstance(raw_desc, str) else "", ident)
-    type_info = _table_entry(io_types, io_item.get("InOutputTypeId"))
+    type_info = _io_type_row(io_types, io_item.get("InOutputTypeId"))
     is_binary = type_info.get("binary", False)
     v_min, v_max = _type_bounds(type_info, ext_name, ident)
     ident_upper = ident.upper()

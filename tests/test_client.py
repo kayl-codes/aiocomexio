@@ -3,7 +3,9 @@
 import asyncio
 import json
 import logging
+from datetime import timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 import pytest
@@ -17,8 +19,11 @@ from aiocomexio import (
     ComexioResponseError,
     IoAddress,
     LiveStates,
+    SystemInfo,
+    TimeServerSettings,
     session_kwargs,
 )
+from tests.common import load_fixture
 from tests.fake_comexio import (
     ADMIN_PATH,
     BUS_WORKLOAD_PATH,
@@ -1105,6 +1110,124 @@ async def test_get_bus_workload_non_object_raises(logged_in: ComexioClient, come
 
     with pytest.raises(ComexioDataError):
         await logged_in.get_bus_workload()
+
+
+_SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
+_RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
+
+
+async def test_get_system_info(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("GET", _SYSTEM_DASHBOARD_PATH, load_fixture("system_dashboard_page.html"))
+
+    assert await logged_in.get_system_info() == SystemInfo(
+        free_storage_percent=43.0,
+        time_server=TimeServerSettings(enabled=True, server="ntp.example.org", update_interval=86400),
+    )
+
+    # The same URL with restart=1 reboots the system: the read must send no query at all.
+    (request,) = comexio.received_at("GET", _SYSTEM_DASHBOARD_PATH)
+    assert request.query == {}
+
+
+async def test_get_system_info_without_any_information_raises(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("GET", _SYSTEM_DASHBOARD_PATH, "<html><body>kein Inhalt</body></html>")
+
+    with pytest.raises(ComexioDataError) as err:
+        await logged_in.get_system_info()
+    assert str(err.value) == "System dashboard page (37 chars) shows no system information"
+
+
+_FREE_STORAGE_ONLY = (
+    '<html><script>var $I18N = {"module": {"free_flash": "Freier Speicherplatz"}};</script>'
+    "<table><tr><td>Freier Speicherplatz:</td><td>43%</td></tr></table></html>"
+)
+_TIME_SERVER_ONLY = (
+    '<html><input type="checkbox" id="use_timeserver" /><input type="text" id="timeserver" value="" /></html>'
+)
+
+
+@pytest.mark.parametrize(
+    ("page", "expected", "missing"),
+    [
+        (_FREE_STORAGE_ONLY, SystemInfo(free_storage_percent=43.0, time_server=None), "time_server"),
+        (
+            _TIME_SERVER_ONLY,
+            SystemInfo(
+                free_storage_percent=None,
+                time_server=TimeServerSettings(enabled=False, server="", update_interval=None),
+            ),
+            "free_storage_percent",
+        ),
+    ],
+)
+async def test_get_system_info_reports_a_missing_part_as_none(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    caplog: pytest.LogCaptureFixture,
+    page: str,
+    expected: SystemInfo,
+    missing: str,
+) -> None:
+    comexio.serve_text("GET", _SYSTEM_DASHBOARD_PATH, page)
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert await logged_in.get_system_info() == expected
+
+    assert [record.getMessage() for record in caplog.records] == [
+        f"System dashboard page of {logged_in.host!r} does not show {missing}"
+    ]
+
+
+async def test_get_system_info_login_form_raises(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("GET", _SYSTEM_DASHBOARD_PATH, LOGIN_PAGE)
+
+    with pytest.raises(ComexioAuthenticationError):
+        await logged_in.get_system_info()
+
+
+async def test_get_uptime(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_json("POST", _RUN_DURATION_PATH, {"duration": "12 Tage 21:16:16"})
+
+    assert await logged_in.get_uptime() == timedelta(days=12, hours=21, minutes=16, seconds=16)
+
+    (request,) = comexio.received_at("POST", _RUN_DURATION_PATH)
+    assert request.form == {}
+    assert request.xhr
+    assert urlsplit(request.referer or "").path == _SYSTEM_DASHBOARD_PATH
+
+
+async def test_get_uptime_non_json_answer_raises(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("POST", _RUN_DURATION_PATH, "kein JSON")
+
+    with pytest.raises(ComexioDataError) as err:
+        await logged_in.get_uptime()
+    assert str(err.value) == "Uptime answer is not JSON: 'kein JSON'"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"duration": "bald"}, {"duration": 12}, {"time": "12 Tage 21:16:16"}, ["12 Tage 21:16:16"], None],
+)
+async def test_get_uptime_without_parseable_duration_raises(
+    logged_in: ComexioClient, comexio: FakeComexio, payload: Any
+) -> None:
+    comexio.serve_json("POST", _RUN_DURATION_PATH, payload)
+
+    with pytest.raises(ComexioDataError) as err:
+        await logged_in.get_uptime()
+    assert str(err.value) == f"Uptime answer carries no parseable duration: {payload!r}"
+
+
+@pytest.mark.parametrize(
+    "page",
+    # The English login form carries no "Anmeldung": the submit button gives it away in any language.
+    [LOGIN_PAGE, LOGIN_PAGE.replace("Anmeldung", "Login").replace("Anmelden", "Log in")],
+)
+async def test_get_uptime_login_form_raises(logged_in: ComexioClient, comexio: FakeComexio, page: str) -> None:
+    comexio.serve_text("POST", _RUN_DURATION_PATH, page)
+
+    with pytest.raises(ComexioAuthenticationError):
+        await logged_in.get_uptime()
 
 
 async def test_is_logged_in(logged_in: ComexioClient, comexio: FakeComexio) -> None:
