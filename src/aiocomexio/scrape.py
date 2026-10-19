@@ -4,9 +4,13 @@ The admin interface embeds its configuration as JS object literals in `<script>`
 These helpers turn a fetched page into plain dicts; they never touch the network.
 """
 
+import html as html_lib
 import json
 import logging
 import re
+from dataclasses import dataclass
+from datetime import timedelta
+from html.parser import HTMLParser
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,6 +35,38 @@ _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _LITERAL_START_RE = re.compile(r"\s*([{\[])")
 _LITERAL_CLOSERS = {"{": "}", "[": "]"}
 _TRAILING_COMMA_RE = re.compile(r",\s*[}\]]")
+# System dashboard page: the general system info is a table of plain two-cell rows, label and value,
+# e.g. <tr><td >Freier Speicherplatz:</td><td >43%</td></tr>. The label is in the UI language;
+# $I18N.module.free_flash on the same page carries it, so the row is found in every language.
+_TWO_CELL_ROW_RE = re.compile(r"<tr[^>]*>\s*<td[^>]*>([^<]*)</td>\s*<td[^>]*>([^<]*)</td>\s*</tr>", re.IGNORECASE)
+_PERCENT_RE = re.compile(r"(\d{1,3}(?:[.,]\d{1,6})?)\s*%", re.ASCII)
+_FREE_STORAGE_I18N_KEY = "free_flash"
+# admin_dashboard/run_duration: "12 Tage 21:16:16" — the day count with a word in the UI language
+# (left out below one day is assumed, not observed), then hours:minutes:seconds.
+_MAX_HOUR_WITH_DAYS = 23
+_RUN_DURATION_RE = re.compile(r"(?:(\d{1,5})\s+[^\s\d:]+\s+)?(\d{1,3}):([0-5]\d):([0-5]\d)", re.ASCII)
+
+
+# System dashboard page: the time settings form, by element id.
+_USE_TIME_SERVER_ID = "use_timeserver"
+_TIME_SERVER_ID = "timeserver"
+_TIME_SERVER_RATE_ID = "timeserver_update_rate"
+_INTERVAL_RE = re.compile(r"\d{1,7}", re.ASCII)
+_SELECT_CONTENT_TAGS = frozenset({"option", "optgroup"})
+
+
+@dataclass(frozen=True, slots=True)
+class TimeServerSettings:
+    """The time server settings of the system dashboard's date & time form.
+
+    enabled is the "use time server" checkbox, server the configured host with surrounding
+    whitespace removed ("" if the field is empty or blank), update_interval the query interval in
+    seconds (None if no option is selected).
+    """
+
+    enabled: bool
+    server: str
+    update_interval: int | None
 
 
 def normalize_js_like_object(obj_str: str) -> str:
@@ -158,6 +194,120 @@ def parse_comexio_version(html: str) -> str | None:
     if match := COMEXIO_VERSION_RE.search(html):
         return match.group(1)
     return None
+
+
+def parse_free_storage_percent(html: str) -> float | None:
+    """Free storage in percent (0-100) from the system dashboard page, or None if the page does not show it.
+
+    The row is found by its label as $I18N.module.free_flash on the same page spells it, so it does
+    not depend on the UI language. None if that label is missing, no row or more than one row
+    carries it, or the value is no percentage within 0-100.
+    """
+    label = _free_storage_label(html)
+    if label is None:
+        return None
+    values = [
+        value
+        for cell_label, value in _TWO_CELL_ROW_RE.findall(html)
+        if _bare_label(html_lib.unescape(cell_label)) == label
+    ]
+    if len(values) != 1:
+        _LOGGER.debug("System dashboard: %d rows labelled %r, expected exactly one", len(values), label[:40])
+        return None
+    match = _PERCENT_RE.fullmatch(html_lib.unescape(values[0]).strip())
+    if match is None:
+        _LOGGER.debug("System dashboard: free storage value %r is no percentage", values[0][:40])
+        return None
+    percent = float(match.group(1).replace(",", "."))
+    if percent > 100:
+        _LOGGER.debug("System dashboard: free storage %r is out of range", percent)
+        return None
+    return percent
+
+
+def parse_run_duration(text: str) -> timedelta | None:
+    """Uptime from admin_dashboard/run_duration's "duration" text (e.g. "12 Tage 21:16:16"), or None if unparsable.
+
+    The day word is in the UI language and therefore not checked, only its count. With a day count
+    the hours stay below 24; a bare "HH:MM:SS" may carry more.
+    """
+    match = _RUN_DURATION_RE.fullmatch(text.strip())
+    if match is None:
+        return None
+    days, hours, minutes, seconds = match.groups()
+    if days is not None and int(hours) > _MAX_HOUR_WITH_DAYS:
+        return None
+    return timedelta(days=int(days or 0), hours=int(hours), minutes=int(minutes), seconds=int(seconds))
+
+
+def parse_time_server(html: str) -> TimeServerSettings | None:
+    """Time server settings from the system dashboard page, or None if the page does not show them.
+
+    None unless the page carries exactly one "use time server" checkbox and one time server field;
+    an interval that is no positive whole number of seconds, or no single selected option, is None.
+    """
+    parser = _TimeServerFormParser()
+    parser.feed(html)
+    parser.close()
+    if len(parser.enabled) != 1 or len(parser.server) != 1:
+        _LOGGER.debug(
+            "System dashboard: %d time server checkboxes and %d fields, expected one each",
+            len(parser.enabled),
+            len(parser.server),
+        )
+        return None
+    interval = None
+    if len(parser.interval) == 1 and _INTERVAL_RE.fullmatch(parser.interval[0]) and int(parser.interval[0]) > 0:
+        interval = int(parser.interval[0])
+    elif parser.interval:
+        _LOGGER.debug("System dashboard: time server interval is unclear: %r", [v[:20] for v in parser.interval[:3]])
+    return TimeServerSettings(enabled=parser.enabled[0], server=parser.server[0].strip(), update_interval=interval)
+
+
+class _TimeServerFormParser(HTMLParser):
+    """Collects the time server checkbox state, field value and selected interval option(s)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.enabled: list[bool] = []
+        self.server: list[str] = []
+        self.interval: list[str] = []
+        self._in_rate_select = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        element_id = attributes.get("id")
+        if tag == "input" and element_id == _USE_TIME_SERVER_ID:
+            self.enabled.append("checked" in attributes)
+        elif tag == "input" and element_id == _TIME_SERVER_ID:
+            self.server.append(attributes.get("value") or "")
+        elif tag == "select":
+            self._in_rate_select = element_id == _TIME_SERVER_RATE_ID
+        elif tag == "option" and self._in_rate_select and "selected" in attributes:
+            self.interval.append(attributes.get("value") or "")
+        elif tag not in _SELECT_CONTENT_TAGS:
+            # Only options belong in a select: anything else means it was left unclosed.
+            self._in_rate_select = False
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "select":
+            self._in_rate_select = False
+
+
+def _free_storage_label(html: str) -> str | None:
+    """The free storage label from $I18N.module.free_flash, or None if the page carries none."""
+    i18n = scrape_js_vars(html, page_label="system dashboard").get("I18N")
+    module = i18n.get("module") if isinstance(i18n, dict) else None
+    label = module.get(_FREE_STORAGE_I18N_KEY) if isinstance(module, dict) else None
+    if not isinstance(label, str) or not _bare_label(label):
+        _LOGGER.debug("System dashboard: no $I18N.module.%s label", _FREE_STORAGE_I18N_KEY)
+        return None
+    return _bare_label(label)
+
+
+def _bare_label(label: str) -> str:
+    """A row label without surrounding whitespace and its trailing colon, as cell and $I18N may spell it."""
+    return label.strip().removesuffix(":").rstrip()
 
 
 def _decode_js_var(html: str, decl_re: re.Pattern[str], var_name: str) -> dict[str, Any] | None:

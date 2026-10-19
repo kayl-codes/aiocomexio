@@ -8,6 +8,7 @@ from .client import (
     IoAddress,
     LiveStates,
     RawConfig,
+    SystemInfo,
     WebioBaseInfo,
     WebioCommandForm,
 )
@@ -20,6 +21,7 @@ from .exceptions import (
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
+from .scrape import TimeServerSettings
 from .session import is_local_address, progress_trace_config, session_kwargs
 
 __version__ = version("aiocomexio")
@@ -37,6 +39,8 @@ __all__ = [
     "IoAddress",
     "LiveStates",
     "RawConfig",
+    "SystemInfo",
+    "TimeServerSettings",
     "WebioBaseInfo",
     "WebioCommandForm",
     "__version__",
