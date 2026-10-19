@@ -1534,9 +1534,11 @@ class ComexioClient:
                     yield resp
                     return
                 url = _pinned_redirect_target(resp, what)
-                # The Location carries its own query; a 303 (and a POST on 301/302) continues as a body-less GET.
+                # The Location carries its own query; like aiohttp, a 303 (except on a HEAD) and a POST on
+                # 301/302 continue as a body-less GET.
                 kwargs.pop("params", None)
-                if resp.status == HTTPStatus.SEE_OTHER or (resp.status in _REDIRECT_STATUSES and method == "POST"):
+                see_other = resp.status == HTTPStatus.SEE_OTHER and method != "HEAD"
+                if see_other or (resp.status in _REDIRECT_STATUSES and method == "POST"):
                     method = "GET"
                     kwargs.pop("data", None)
         raise ComexioResponseError(f"{what} failed: more than {_MAX_REDIRECTS} redirects", status=resp.status)

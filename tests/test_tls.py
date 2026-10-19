@@ -531,6 +531,25 @@ async def test_pinned_client_follows_a_redirect_within_its_origin(
     assert followed_bodies == [b"" if followed_with == "GET" else b"a=1"]
 
 
+async def test_pinned_client_keeps_a_head_request_on_a_303(
+    tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
+) -> None:
+    async def moved(_request: web.Request) -> web.Response:
+        return web.Response(status=303, headers={"Location": _MOVED_PATH})
+
+    async def target(_request: web.Request) -> web.Response:
+        return web.Response()
+
+    tls_comexio.serve("HEAD", _API_PATH, moved)
+    tls_comexio.serve("HEAD", _MOVED_PATH, target)
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+
+    await client._request_text("HEAD", _API_PATH, what="Moved")
+
+    # Like aiohttp (RFC 9110, 15.4.4): a 303 turns a request into a GET, but a HEAD stays a HEAD.
+    assert tls_comexio.requests == [("HEAD", _API_PATH), ("HEAD", _MOVED_PATH)]
+
+
 async def test_pinned_client_resolves_each_hop_against_the_previous_one(
     tls_comexio: FakeComexio, tls_session: aiohttp.ClientSession, certificate: SelfSignedCertificate
 ) -> None:
