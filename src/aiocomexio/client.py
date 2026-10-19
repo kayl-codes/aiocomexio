@@ -148,6 +148,8 @@ _HTML_WHITESPACE = "\t\n\f\r "
 _HTML_WHITESPACE_RE = re.compile(f"[{_HTML_WHITESPACE}]+")
 # Tags that end an open <option>, so text after them is no longer its text.
 _OPTION_ENDING_TAGS = frozenset({"option", "optgroup", "hr"})
+# A CDATA section starts with it in foreign content; elsewhere a browser reads it as a bogus comment.
+_CDATA_START = "<![CDATA["
 # Tag names the element sets below share.
 _CAPTION = "caption"
 _TABLE = "table"
@@ -2087,8 +2089,8 @@ class _FormParser(HTMLParser):
     <tr> around a cell put straight into a table; a formatting element such as <i> that an end tag closed implicitly,
     reopened before most start tags, outside the cell it was opened in) and ignores what a browser ignores (a table
     part outside a <table>, a <form> inside a form).
-    A <![CDATA[ section exists only in foreign content; elsewhere it is a bogus comment up to the next ">" (where
-    html.parser can tell the two apart). Inside an open <select> a browser ignores the start tag of another text-only
+    A <![CDATA[ section exists only in foreign content; elsewhere it is a bogus comment up to the next ">", on every
+    html.parser release. Inside an open <select> a browser ignores the start tag of another text-only
     element, a <style>, <svg> or <math>, and a <select>, <input>, <keygen> or <textarea> start tag ends the select.
     Subclasses get the remaining tags through handle_form_tag and handle_form_endtag, with the attributes from
     _first_attributes, and the end of a select through handle_select_end.
@@ -2108,7 +2110,12 @@ class _FormParser(HTMLParser):
         self._formatting: list[str] = []
         self._foreign: list[_ForeignElement] = []  # open SVG/MathML elements, outermost first
         self._foreign_start = False  # the last start tag was a foreign element: html.parser keeps no text mode for it
+        self._closing = False  # close() is reading the rest of the page: no more of it will come
         self._sync_cdata_support()
+
+    def close(self) -> None:
+        self._closing = True
+        super().close()
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._start(tag, attrs, self_closing=False)
@@ -2136,11 +2143,35 @@ class _FormParser(HTMLParser):
             self._end_html(tag)
         self._sync_cdata_support()
 
+    def parse_html_declaration(self, i: int) -> int:
+        # Older html.parser releases read every <![ as a marked section up to "]]>", which would hide the fields
+        # after it; a browser reads a <![CDATA[ section only in foreign content and any other <![ as a bogus comment.
+        rawdata = self.rawdata
+        if not rawdata.startswith("<![", i):
+            return super().parse_html_declaration(i)
+        if not (self._reads_cdata() and rawdata.startswith(_CDATA_START, i)):
+            return self.parse_bogus_comment(i)
+        end = rawdata.find("]]>", i + len(_CDATA_START))
+        if end < 0:
+            if not self._closing:
+                return -1  # wait for more of the page
+            # A section the page ends in runs to its end; older releases would read it as text up to the next ">".
+            end = len(rawdata)
+            self.unknown_decl(rawdata[i + 3 : end])
+            return end
+        self.unknown_decl(rawdata[i + 3 : end])
+        return end + 3
+
+    def _reads_cdata(self) -> bool:
+        """Whether a <![CDATA[ now starts a CDATA section: in foreign content, with no HTML element open inside it."""
+        return bool(self._foreign) and not self._foreign[-1].html
+
     def _sync_cdata_support(self) -> None:
-        # html.parser releases that can tell a CDATA section from a bogus comment let the caller say which applies.
+        # html.parser releases that can tell a CDATA section from a bogus comment let the caller say which applies
+        # (for one the page ends in, which parse_html_declaration never sees).
         set_support_cdata = getattr(self, "_set_support_cdata", None)
         if set_support_cdata is not None:
-            set_support_cdata(bool(self._foreign) and not self._foreign[-1].html)
+            set_support_cdata(self._reads_cdata())
 
     def _hidden_floor(self) -> int:
         """The depth of the foreign stack below the innermost hidden element, which no foreign tag reaches past."""

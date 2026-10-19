@@ -1257,14 +1257,35 @@ def _emulate_an_older_html_parser(monkeypatch: pytest.MonkeyPatch) -> None:
             set_cdata_mode(self, elem, *args, **kwargs)
 
     monkeypatch.setattr(HTMLParser, "set_cdata_mode", set_cdata_mode_without_plaintext)
+    # They read every <![ as a marked section and let no caller tell a CDATA section from a bogus comment.
+    monkeypatch.delattr(HTMLParser, "_set_support_cdata", raising=False)
+    parse_html_declaration = HTMLParser.parse_html_declaration
+
+    def parse_html_declaration_as_marked_section(self: HTMLParser, i: int) -> int:
+        if self.rawdata.startswith("<![", i):
+            return self.parse_marked_section(i)
+        return parse_html_declaration(self, i)
+
+    monkeypatch.setattr(HTMLParser, "parse_html_declaration", parse_html_declaration_as_marked_section)
 
 
-@pytest.mark.skipif(
-    not hasattr(HTMLParser, "_set_support_cdata"), reason="html.parser reads every <![CDATA[ as a CDATA section"
-)
 @pytest.mark.parametrize(
     ("html", "expected"),
     [
+        ('<![if x]><input id="min_cmd_io_0" value="-5"><![endif]>', (-5.0, None)),
+        ('<svg><![if x]></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><![CDATA [x></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        (
+            '<svg><![cdata[x><input id="min_cmd_io_0" value="-5">]]></svg><input id="min_cmd_io_0" value="0">',
+            (0.0, None),
+        ),
+        (
+            '<math><![CDATA[x><input id="min_cmd_io_0" value="0">]]></math><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        ('<svg><![CDATA[]]></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<input id="max_cmd_io_0" value="5"><svg><![CDATA[x><input id="min_cmd_io_0" value="-5">', (None, 5.0)),
+        ('<![CDATA[x><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
         (
             '<![CDATA[x><input id="min_cmd_io_0" value="-5">]]><input id="min_cmd_io_0" value="0">',
             (-5.0, None),
@@ -1278,6 +1299,14 @@ def _emulate_an_older_html_parser(monkeypatch: pytest.MonkeyPatch) -> None:
         ('<svg><foreignObject><div><![CDATA[x><input id="min_cmd_io_0" value="-5">]]></foreignObject>', (-5.0, None)),
     ],
     ids=[
+        "marked-section-in-html",
+        "marked-section-in-an-svg",
+        "misspelt-cdata-section-in-an-svg",
+        "lowercase-cdata-section-in-an-svg",
+        "cdata-section-in-a-math",
+        "empty-cdata-section-in-an-svg",
+        "cdata-section-the-page-ends-in",
+        "bogus-comment-the-page-ends-in",
         "bogus-comment-in-html",
         "cdata-section-in-an-svg",
         "bogus-comment-after-the-svg-end-tag",
@@ -1285,10 +1314,18 @@ def _emulate_an_older_html_parser(monkeypatch: pytest.MonkeyPatch) -> None:
         "bogus-comment-in-an-html-element-in-a-foreign-object",
     ],
 )
+@pytest.mark.parametrize("older_html_parser", [False, True], ids=["html-parser", "older-html-parser"])
 async def test_get_webio_command_range_reads_cdata_only_in_foreign_content(
-    logged_in: ComexioClient, comexio: FakeComexio, html: str, expected: tuple[float | None, float | None]
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    monkeypatch: pytest.MonkeyPatch,
+    html: str,
+    expected: tuple[float | None, float | None],
+    older_html_parser: bool,
 ) -> None:
     """Outside SVG/MathML a browser reads <![CDATA[ as a bogus comment that ends at the next ">"."""
+    if older_html_parser:
+        _emulate_an_older_html_parser(monkeypatch)
     comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, html)
 
     assert await logged_in.get_webio_command_range(1324, 34) == expected
