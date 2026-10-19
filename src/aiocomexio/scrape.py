@@ -43,6 +43,7 @@ _PERCENT_RE = re.compile(r"(\d{1,3}(?:[.,]\d{1,6})?)\s*%", re.ASCII)
 _FREE_STORAGE_I18N_KEY = "free_flash"
 # admin_dashboard/run_duration: "12 Tage 21:16:16" — the day count with a word in the UI language
 # (left out below one day is assumed, not observed), then hours:minutes:seconds.
+_MAX_HOUR_WITH_DAYS = 23
 _RUN_DURATION_RE = re.compile(r"(?:(\d{1,5})\s+[^\s\d:]+\s+)?(\d{1,3}):([0-5]\d):([0-5]\d)", re.ASCII)
 
 
@@ -226,12 +227,15 @@ def parse_free_storage_percent(html: str) -> float | None:
 def parse_run_duration(text: str) -> timedelta | None:
     """Uptime from admin_dashboard/run_duration's "duration" text (e.g. "12 Tage 21:16:16"), or None if unparsable.
 
-    The day word is in the UI language and therefore not checked, only its count.
+    The day word is in the UI language and therefore not checked, only its count. With a day count
+    the hours stay below 24; a bare "HH:MM:SS" may carry more.
     """
     match = _RUN_DURATION_RE.fullmatch(text.strip())
     if match is None:
         return None
     days, hours, minutes, seconds = match.groups()
+    if days is not None and int(hours) > _MAX_HOUR_WITH_DAYS:
+        return None
     return timedelta(days=int(days or 0), hours=int(hours), minutes=int(minutes), seconds=int(seconds))
 
 

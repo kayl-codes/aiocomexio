@@ -346,7 +346,9 @@ def test_parse_free_storage_percent_returns_none_without_a_clear_value(page: str
         ("3 days 01:02:03", timedelta(days=3, hours=1, minutes=2, seconds=3)),
         ("2 días 10:00:00", timedelta(days=2, hours=10)),
         ("0 Tage 00:00:00", timedelta(0)),
+        ("1 Tag 23:59:59", timedelta(days=1, hours=23, minutes=59, seconds=59)),
         ("21:16:16", timedelta(hours=21, minutes=16, seconds=16)),
+        ("99:00:00", timedelta(hours=99)),
         ("  12 Tage 21:16:16 ", timedelta(days=12, hours=21, minutes=16, seconds=16)),
     ],
 )
@@ -362,6 +364,8 @@ def test_parse_run_duration(text: str, expected: timedelta) -> None:
         "12 Tage 21:16",
         "12 Tage 21:61:16",
         "12 Tage 21:16:60",
+        "1 Tag 24:00:00",
+        "1 Tag 99:00:00",
         "Tage 21:16:16",
         "12 21:16:16",
         "١ Tag 01:02:03",
