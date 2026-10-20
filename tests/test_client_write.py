@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import time
 from collections.abc import Awaitable, Callable
 from html.parser import HTMLParser
 from typing import Any
@@ -1388,6 +1389,91 @@ async def test_get_webio_command_range_ends_a_raw_text_element_at_its_end_tag_in
     )
 
     assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+
+
+# Pages that keep `depth` elements open (or listed as active formatting ones) when the field after them comes.
+_NESTED_PAGES: dict[str, Callable[[int], str]] = {
+    "html": lambda depth: "<div>" * depth,
+    "formatting": lambda depth: "<b>" * depth,
+    "foreign": lambda depth: "<svg>" + "<g>" * (depth - 1) + "</svg>",
+    "integration-point": lambda depth: "<svg><foreignObject>" + "<div>" * (depth - 2),
+    "template": lambda depth: "<template>" * depth + "</template>" * depth,
+}
+_FIELD = '<input id="min_cmd_io_0" value="-5">'
+
+
+@pytest.mark.parametrize("nesting", list(_NESTED_PAGES))
+async def test_get_webio_command_range_reads_a_page_nested_up_to_the_limit(
+    logged_in: ComexioClient, comexio: FakeComexio, nesting: str
+) -> None:
+    page = _NESTED_PAGES[nesting](client_module._MAX_OPEN_ELEMENTS) + _FIELD
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, page)
+
+    assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+
+
+@pytest.mark.parametrize("depth", [client_module._MAX_OPEN_ELEMENTS + 1, 16000], ids=["limit-plus-one", "16000"])
+@pytest.mark.parametrize("nesting", list(_NESTED_PAGES))
+async def test_get_webio_command_range_rejects_a_page_nested_past_the_limit_at_once(
+    logged_in: ComexioClient, comexio: FakeComexio, nesting: str, depth: int
+) -> None:
+    """Each tag searches the open elements: past the limit the parser stops instead of taking quadratic time (16000
+    nested <b> took 6.5 s, blocking the event loop)."""
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, _NESTED_PAGES[nesting](depth) + _FIELD)
+
+    started = time.perf_counter()
+    with pytest.raises(ComexioDataError, match=f"nests more than {client_module._MAX_OPEN_ELEMENTS} elements"):
+        await logged_in.get_webio_command_range(1324, 34)
+    assert time.perf_counter() - started < 1
+
+
+@pytest.mark.parametrize(
+    "repeated",
+    ["<p><b></p>", '<p><b class="x" id="y"></p><p><b id="y" class="x"></p>', "<div><i></div>", "<p><b></p><p><i></p>"],
+)
+async def test_get_webio_command_range_reopens_at_most_three_equal_formatting_elements(
+    logged_in: ComexioClient, comexio: FakeComexio, repeated: str
+) -> None:
+    """A browser lists no more than three equal formatting elements (same tag and attributes, in any order) past the
+    last marker, so an unclosed <b> in every paragraph does not nest the page deeper with each one."""
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, repeated * 10_000 + _FIELD)
+
+    started = time.perf_counter()
+    assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+    assert time.perf_counter() - started < 1
+
+
+async def test_get_webio_command_range_rejects_many_different_implicitly_closed_formatting_elements(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """Formatting elements with different attributes are all reopened, as a browser does, up to the limit."""
+    page = "".join(f'<p><b id="{index}"></p>' for index in range(client_module._MAX_OPEN_ELEMENTS)) + _FIELD
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, page)
+
+    with pytest.raises(ComexioDataError, match=f"nests more than {client_module._MAX_OPEN_ELEMENTS} elements"):
+        await logged_in.get_webio_command_range(1324, 34)
+
+
+@pytest.mark.parametrize(
+    ("nested", "repeated"),
+    [
+        pytest.param("<b>" * 254, "<i></i>", id="formatting-under-formatting"),
+        pytest.param("<b>" + "<div>" * 253, "<x></x>", id="formatting-under-blocks"),
+        pytest.param("<p><object>" + "<div>" * 252, "<div></div>", id="marker-under-blocks"),
+        pytest.param("<span>" * 254, "</i>", id="end-tag-past-the-open-elements"),
+        pytest.param("<svg>" + "<g>" * 253, "<g/>", id="foreign"),
+    ],
+)
+async def test_get_webio_command_range_reads_a_page_nested_near_the_limit_in_linear_time(
+    logged_in: ComexioClient, comexio: FakeComexio, nested: str, repeated: str
+) -> None:
+    """Tag after tag at nearly the most open elements: about 50 KB parse in about 0.1 s, not seconds."""
+    closed = "</svg>" if nested.startswith("<svg>") else ""
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, nested + repeated * (50_000 // len(repeated)) + closed + _FIELD)
+
+    started = time.perf_counter()
+    assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+    assert time.perf_counter() - started < 1
 
 
 @pytest.mark.skipif(not client_module._HTML_PARSER_SCRIPTING, reason="html.parser cannot read a <noscript> as raw text")

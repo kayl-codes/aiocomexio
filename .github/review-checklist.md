@@ -88,7 +88,8 @@ published on PyPI and consumed by the Home Assistant integration
   an `<li>` before the next, a cell before the next or a `<caption>`, a `<select>` with the cell it is in, a
   `<colgroup>` before anything but a `<col>`), opens what a browser inserts (the `<tbody>`/`<tr>` around a cell put
   straight into a table; a formatting element such as `<i>` that an end tag closed implicitly is reopened before most
-  start tags, `<svg>` included, but not outside the cell or template it was opened in), an open `<select>` is a scope
+  start tags, `<svg>` included, but not outside the cell or template it was opened in, and no more than three equal
+  ones — same tag and attributes — as the "Noah's Ark" clause keeps), an open `<select>` is a scope
   boundary, and a table part outside a `<table>` or a `<form>` inside a form opens no element. `<![CDATA[` is a CDATA
   section only in foreign content; elsewhere it is a bogus comment up to the next `>`. In a single `<select>` (no
   `multiple`) the last of several `selected` options counts, and without one the first enabled one (not `disabled`, not
@@ -103,6 +104,11 @@ published on PyPI and consumed by the Home Assistant integration
   that would be a plausible-looking but wrong value. Void elements such as `<input>` have no end tag and are read as
   they are; a cut-off `<input>` tag is dropped, so its field reads as unknown too. A regex that tries to cover these
   cases outgrows SonarQube's regex complexity limit (S5843) and still misses some of them.
+- **Parser work per tag stays bounded:** whatever `_FormParser` does for one tag may search the open elements or the
+  active formatting elements, but only because `_check_depth` keeps both at `_MAX_OPEN_ELEMENTS` (a deeper page
+  raises `ComexioDataError`). A new list that grows with the page, or a search that bypasses that bound, makes a
+  deeply nested page quadratic and blocks the event loop (16000 nested `<b>` took 6.5 s); the nesting tests in
+  `tests/test_client_write.py` cover each list.
 - **Live readings stay at DEBUG:** a WARNING or higher about an unexpected answer to a *value* request (live states,
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
   answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes

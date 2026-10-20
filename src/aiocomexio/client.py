@@ -21,7 +21,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from html.parser import HTMLParser
 from http import HTTPStatus
-from typing import Any, NamedTuple, TypeIs
+from itertools import repeat
+from operator import attrgetter, is_
+from typing import Any, NamedTuple, Self, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import aiohttp
@@ -156,6 +158,10 @@ _HTML_WHITESPACE_RE = re.compile(f"[{_HTML_WHITESPACE}]+")
 _OPTION_ENDING_TAGS = frozenset({"option", "optgroup", "hr"})
 # A CDATA section starts with it in foreign content; elsewhere a browser reads it as a bogus comment.
 _CDATA_START = "<![CDATA["
+# The most elements a form page may keep open (and list as active formatting ones): each tag searches these lists,
+# so without a bound a deeply nested page takes quadratic time. A Comexio page nests a few dozen.
+_MAX_OPEN_ELEMENTS = 256
+_INNER_HTML = attrgetter("html")  # the HTML elements open inside a _ForeignElement
 # Tag names the element sets below share.
 _CAPTION = "caption"
 _TABLE = "table"
@@ -1115,7 +1121,8 @@ class ComexioClient:
 
         The config scrape never carries these fields of Web-IO commands, so the edit form is the
         only source. A field that is missing or not numeric comes back as None; a form without any
-        min/max field raises ComexioDataError (or ComexioAuthenticationError for the login form).
+        min/max field raises ComexioDataError (or ComexioAuthenticationError for the login form), as
+        does a page that nests more than 256 elements.
         """
         html = await self._request_admin_text(
             "GET",
@@ -2018,9 +2025,17 @@ def _foreign_element(tag: str, namespace: str, attrs: list[tuple[str, str | None
 
 
 class _OpenElement(str):
-    """The tag name of one open HTML element: two open elements of a tag are equal names but not the same object."""
+    """The tag name of one open HTML element: two open elements of a tag are equal names but not the same object.
 
-    __slots__ = ()
+    attributes are its start tag's, which a browser compares to tell equal formatting elements apart.
+    """
+
+    attributes: frozenset[tuple[str, str]]
+
+    def __new__(cls, tag: str, attributes: frozenset[tuple[str, str]] = frozenset()) -> Self:
+        element = super().__new__(cls, tag)
+        element.attributes = attributes
+        return element
 
 
 def _bounds_scope(element: _ForeignElement) -> bool:
@@ -2142,13 +2157,14 @@ class _FormParser(HTMLParser):
     as </b> reaches past a <div> and leaves it open, any heading end tag closes the open heading). To know which HTML
     elements are open, it closes what a browser closes implicitly (a <p> before a <div> or, outside quirks mode, a
     <table>; an <li> before the next one, a cell before the next one or a <caption>, a <select> with the cell it is
-    in), opens what a browser inserts (the <tbody> and
-    <tr> around a cell put straight into a table; a formatting element such as <i> that an end tag closed implicitly,
-    reopened before most start tags, outside the cell it was opened in) and ignores what a browser ignores (a table
-    part outside a <table>, a <form> inside a form).
+    in), opens what a browser inserts (the <tbody> and <tr> around a cell put straight into a table; a formatting
+    element such as <i> that an end tag closed implicitly, reopened before most start tags, outside the cell it was
+    opened in, no more than three equal ones) and ignores what a browser ignores (a table part outside a <table>, a
+    <form> inside a form).
     A <![CDATA[ section exists only in foreign content; elsewhere it is a bogus comment up to the next ">", on every
     html.parser release. Inside an open <select> a browser ignores the start tag of another text-only
     element, a <style>, <svg> or <math>, and a <select>, <input>, <keygen> or <textarea> start tag ends the select.
+    A page that keeps more than _MAX_OPEN_ELEMENTS elements open raises ComexioDataError.
     Subclasses get the remaining tags through handle_form_tag and handle_form_endtag, with the attributes from
     _first_attributes, and the end of a select through handle_select_end.
     """
@@ -2164,7 +2180,7 @@ class _FormParser(HTMLParser):
         self._form_open = False  # a form is open (the browser's form element pointer): another <form> is ignored
         # The browser's list of active formatting elements: open (or implicitly closed) formatting elements, and the
         # cells, captions, templates and objects they do not leak into (markers).
-        self._formatting: list[str] = []
+        self._formatting: list[_OpenElement] = []
         self._foreign: list[_ForeignElement] = []  # open SVG/MathML elements, outermost first
         self._foreign_start = False  # the last start tag was a foreign element: html.parser keeps no text mode for it
         self._text_start = False  # the last start tag was text of a text-only element (older html.parser reports it)
@@ -2245,13 +2261,26 @@ class _FormParser(HTMLParser):
             return
         if self._foreign and self._is_foreign(tag, attrs):
             self._start_foreign(tag, attrs, self_closing=self_closing)
+            self._check_depth()
             return
         if self._select_ignores(tag):
             return
         html = self._foreign[-1].html if self._foreign else self._html
         self._prepare_start(tag, html)
         if self._start_html(tag, attrs, self_closing=self_closing) and self._opens(tag, html):
-            self._insert(tag, html)
+            self._insert(tag, attrs, html)
+        self._check_depth()
+
+    def _check_depth(self) -> None:
+        """Raise ComexioDataError once the page keeps more than _MAX_OPEN_ELEMENTS elements open or listed.
+
+        Only a start tag adds to these lists, so _start checks after each one.
+        """
+        open_elements = len(self._html)  # a hidden element is one of the open HTML elements too
+        if self._foreign:
+            open_elements += len(self._foreign) + sum(map(len, map(_INNER_HTML, self._foreign)))
+        if max(open_elements, len(self._formatting)) > _MAX_OPEN_ELEMENTS:
+            raise ComexioDataError(f"form page nests more than {_MAX_OPEN_ELEMENTS} elements")
 
     def _start_foreign(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> None:
         self._foreign_start = True
@@ -2261,12 +2290,28 @@ class _FormParser(HTMLParser):
             svg = tag == "svg" and current.tag == "annotation-xml"
             self._foreign.append(_foreign_element(tag, "svg" if svg else current.namespace, attrs))
 
-    def _insert(self, tag: str, html: list[str]) -> None:
+    def _insert(self, tag: str, attrs: list[tuple[str, str | None]], html: list[str]) -> None:
         """Open an HTML element, listing a formatting element or marker element among the active formatting ones."""
-        element = _OpenElement(tag)
+        element = _OpenElement(tag, frozenset(_first_attributes(attrs).items()))
         html.append(element)
+        if tag in _FORMATTING_ELEMENTS:
+            self._forget_fourth_equal_formatting(element)
         if tag in _FORMATTING_ELEMENTS or tag in _FORMATTING_MARKERS:
             self._formatting.append(element)
+
+    def _forget_fourth_equal_formatting(self, element: _OpenElement) -> None:
+        """Drop the earliest of three active formatting elements equal to a new one (same tag and attributes) past the
+        last marker, as a browser does (the "Noah's Ark" clause): <p><b></p> repeated reopens no more than three <b>."""
+        equal = 0
+        for index in range(len(self._formatting) - 1, -1, -1):
+            entry = self._formatting[index]
+            if entry in _FORMATTING_MARKERS:
+                return
+            if entry == element and entry.attributes == element.attributes:
+                equal += 1
+                if equal == 3:
+                    del self._formatting[index]
+                    return
 
     def _prepare_start(self, tag: str, html: list[str]) -> None:
         """Close and reopen the HTML elements a browser closes or reopens before it inserts a start tag's element."""
@@ -2280,13 +2325,20 @@ class _FormParser(HTMLParser):
             self._reconstruct_formatting(html)
 
     def _open_html_lists(self) -> list[list[str]]:
-        return [self._html, *(element.html for element in self._foreign)]
+        return [self._html, *map(_INNER_HTML, self._foreign)]
 
     def _is_open(self, element: str) -> bool:
-        return any(open_element is element for html in self._open_html_lists() for open_element in html)
+        # Innermost first: the element asked about is almost always one of the last opened. An equal name in a list
+        # comes before the search for the element itself.
+        return any(
+            element in html and any(map(is_, repeat(element), reversed(html)))
+            for html in reversed(self._open_html_lists())
+        )
 
     def _forget_closed_markers(self) -> None:
         """Drop a closed marker element from the active formatting elements, with the entries it bounded."""
+        if _FORMATTING_MARKERS.isdisjoint(self._formatting):
+            return
         for index, entry in enumerate(self._formatting):
             if entry in _FORMATTING_MARKERS and not self._is_open(entry):
                 del self._formatting[index:]
@@ -2330,7 +2382,7 @@ class _FormParser(HTMLParser):
         while start and entries[start - 1] not in _FORMATTING_MARKERS and not self._is_open(entries[start - 1]):
             start -= 1
         for index in range(start, len(entries)):
-            entries[index] = _OpenElement(entries[index])
+            entries[index] = _OpenElement(entries[index], entries[index].attributes)
             html.append(entries[index])
 
     def _opens(self, tag: str, html: list[str]) -> bool:
