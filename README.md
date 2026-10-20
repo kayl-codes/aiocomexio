@@ -8,11 +8,14 @@ provide the communication layer of the
 [homeassistant-comexio](https://github.com/kayl-codes/homeassistant-comexio) integration.
 
 > **Status: pre-alpha.** The code is being moved over from the integration step by step. So far:
-> admin login, read access (including live values of physical IOs), value writes, the Web-IO
-> lifecycle, marker / KNX object management and function plan editing — plans, elements, wires,
-> block instance settings, run / stop (`ComexioClient`), admin page scraping
-> (`aiocomexio.scrape`), config parsing (`aiocomexio.config`), KNX DPT tables
-> (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`), function plan rendering
+> admin login, read access (including live values of physical IOs and system info — free
+> storage, time server settings, uptime), value writes, the Web-IO
+> lifecycle (including the command protocol, HTTP or HTTPS), marker / KNX object management and
+> function plan editing — plans, elements, wires, block instance settings, run / stop
+> (`ComexioClient`), admin page scraping (`aiocomexio.scrape`), config parsing
+> (`aiocomexio.config`, including Quickbus devices such as Multitouch panels and their IOs), KNX
+> DPT tables (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`, with a separate
+> class for Quickbus IOs), function plan rendering
 > (with block settings in the hover text) and diffing (`aiocomexio.function_plan`) and the
 > block-type reference catalog that resolves Comexio catalog ids per server by stable key
 > (`aiocomexio.reference_catalog`). The API may still change.
