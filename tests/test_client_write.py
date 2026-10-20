@@ -1,12 +1,16 @@
 """ComexioClient writes (API values, Web-IO lifecycle, markers) against the fake Comexio server."""
 
 import base64
+import contextlib
 import html
 import json
 import logging
 import math
 import re
+import time
+import tracemalloc
 from collections.abc import Awaitable, Callable
+from html.parser import HTMLParser
 from typing import Any
 
 import aiohttp
@@ -22,6 +26,7 @@ from aiocomexio import (
     WebioBaseInfo,
     WebioCommandForm,
 )
+from aiocomexio import client as client_module
 from aiocomexio.webio import CONTENT_TYPE_JSON, WEBIO_PROTOCOL_HTTPS
 from tests.fake_comexio import LOGIN_PAGE, PASSWORD, USERNAME, FakeComexio
 
@@ -736,7 +741,7 @@ async def test_get_webio_command_range(logged_in: ComexioClient, comexio: FakeCo
     comexio.serve_text(
         "GET",
         WEBIO_EDIT_COMMAND_PATH,
-        '<input type="text" id="min_cmd_io_0" value="-500000"><input id="MAX_cmd_io_0" value="abc">',
+        '<input type="text" id="min_cmd_io_0" value="-500000"><input id="max_cmd_io_0" value="abc">',
     )
 
     assert await logged_in.get_webio_command_range(1324, 34) == (-500000.0, None)
@@ -750,6 +755,860 @@ async def test_get_webio_command_range_field_without_value_is_none(
     comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, '<input id="min_cmd_io_0"><input id="max_cmd_io_0" value="1">')
 
     assert await logged_in.get_webio_command_range(1324, 34) == (None, 1.0)
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        ("<input id='min_cmd_io_0' value='-5'><input id=max_cmd_io_0 value=5>", (-5.0, 5.0)),
+        ('<input id="min_cmd_io_0" value="&#45;5"><input id="max_cmd_io_0" value="1&#46;5" />', (-5.0, 1.5)),
+        ('<input title="a > b" id="min_cmd_io_0" value="-5"><input id="max_cmd_io_0" value="5">', (-5.0, 5.0)),
+        ('<input id="min_cmd_io_0" value="-5" value="0"><input id="max_cmd_io_0" value="5">', (-5.0, 5.0)),
+        ('<input id="min_cmd_io_0" value="-5"><input id="min_cmd_io_0" value="0">', (-5.0, None)),
+        ('<!-- <input id="min_cmd_io_0" value="0"> --><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<input id="min_cmd_io_0_extra" value="0"><input id="max_cmd_io_0" value="5">', (None, 5.0)),
+        ('<input id="max_cmd_io_0" value="5">', (None, 5.0)),
+        ('<input id="min_cmd_io_0"><input id="min_cmd_io_0" value="3">', (None, None)),
+        ('<input id="min_cmd_io_0" value="-5"><input id="max_cmd_io_0" value="5', (-5.0, None)),
+        ('<input id="MIN_cmd_io_0" value="0"><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<textarea><input id="min_cmd_io_0" value="0"></textarea><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<title><input id="max_cmd_io_0" value="0"></title><input id="max_cmd_io_0" value="5">', (None, 5.0)),
+        ('<textarea/><input id="min_cmd_io_0" value="0"></textarea><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        *(
+            (f'<{tag}><input id="min_cmd_io_0" value="0"></{tag}><input id="min_cmd_io_0" value="-5">', (-5.0, None))
+            for tag in ("xmp", "iframe", "noembed", "noframes", "noscript")
+        ),
+        ('<input id="max_cmd_io_0" value="5"><plaintext></plaintext><input id="min_cmd_io_0" value="-5">', (None, 5.0)),
+        ('<template><input id="min_cmd_io_0" value="0"></template><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        # An SVG or MathML element is no form field; an integration point reads HTML again, a breakout tag ends it.
+        ('<svg><input id="min_cmd_io_0" value="0"></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<math><input id="min_cmd_io_0" value="0"></math><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><foreignObject><input id="min_cmd_io_0" value="-5"></foreignObject></svg>', (-5.0, None)),
+        ('<math><mi><input id="min_cmd_io_0" value="-5"></mi></math>', (-5.0, None)),
+        ('<math><annotation-xml encoding="Text/HTML"><input id="min_cmd_io_0" value="-5"></math>', (-5.0, None)),
+        (
+            '<math><annotation-xml><input id="min_cmd_io_0" value="0"></math><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        ('<math><annotation-xml><svg><foreignObject><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><mi><input id="min_cmd_io_0" value="0"></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        (
+            '<math><mi><mglyph><input id="min_cmd_io_0" value="0"></math><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        ('<svg><g><div><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><font color="red"><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><font><input id="min_cmd_io_0" value="0"></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg/><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><title></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><style></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        *(
+            (
+                f'<svg></{tag}><input id="min_cmd_io_0" value="-5"></svg><input id="min_cmd_io_0" value="0">',
+                (-5.0, None),
+            )
+            for tag in ("p", "br")
+        ),
+        (
+            '<svg><foreignObject><div></foreignObject><input id="min_cmd_io_0" value="-5"></svg>'
+            '<input id="min_cmd_io_0" value="0">',
+            (-5.0, None),
+        ),
+        (
+            '<svg><foreignObject><div></div></foreignObject><input id="min_cmd_io_0" value="0"></svg>'
+            '<input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        ('<math><mi><span><mglyph><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><g><g></g><input id="min_cmd_io_0" value="0"></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        (
+            '<svg></svg><style><input id="min_cmd_io_0" value="0"></style><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        (
+            '<svg><foreignObject/><input id="min_cmd_io_0" value="0"></svg><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        ('<math><svg><mi><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        (
+            '<math><annotation-xml><mi><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        (
+            '<svg><foreignObject><svg><div></div></foreignObject><input id="min_cmd_io_0" value="0"></svg>'
+            '<input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        *((f'<math><{tag}><input id="min_cmd_io_0" value="-5">', (-5.0, None)) for tag in ("mo", "mn", "ms", "mtext")),
+        *((f'<svg><{tag}><input id="min_cmd_io_0" value="-5">', (-5.0, None)) for tag in ("desc", "title")),
+        ('<math><annotation-xml encoding="application/xhtml+xml"><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        (
+            '<math><mi><malignmark><input id="min_cmd_io_0" value="0"></math><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        ('<math><annotation-xml encoding="text/html"><mglyph><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        *((f'<svg><font {attr}=x><input id="min_cmd_io_0" value="-5">', (-5.0, None)) for attr in ("face", "size")),
+        (
+            '<template><svg><style></template><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        (
+            '<svg><foreignObject><template><svg></template></foreignObject><input id="min_cmd_io_0" value="0"></svg>'
+            '<input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        *(
+            (
+                f'<svg><foreignObject><{tag}><svg><circle></{tag}><input id="min_cmd_io_0" value="-5">'
+                '</foreignObject></svg><input id="min_cmd_io_0" value="0">',
+                (-5.0, None),
+            )
+            for tag in ("div", "span")
+        ),
+        *(
+            (f'<{tag}><svg><circle></{tag}><input id="min_cmd_io_0" value="-5">', (-5.0, None))
+            for tag in ("div", "span")
+        ),
+        ('<span><math><mi></span><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        (
+            '<svg><foreignObject><span><svg><foreignObject></span></foreignObject><input id="min_cmd_io_0" value="0">'
+            '</svg></span></foreignObject></svg><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        (
+            '<input id="max_cmd_io_0" value="5"><svg><foreignObject><span><svg><foreignObject></span></foreignObject>'
+            '</svg></span></foreignObject><input id="min_cmd_io_0" value="0">',
+            (None, 5.0),
+        ),
+        ('<svg><g><div></div><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        (
+            '<math><mi><b><span></b><mglyph><input id="min_cmd_io_0" value="0"></math>'
+            '<input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        (
+            '<svg><foreignObject><select><input id="min_cmd_io_0" value="-5"></foreignObject>'
+            '<input id="min_cmd_io_0" value="0">',
+            (-5.0, None),
+        ),
+        (
+            '<input id="min_cmd_io_0" value="-5"><svg><foreignObject><br></foreignObject>'
+            '<input id="max_cmd_io_0" value="9">',
+            (-5.0, None),
+        ),
+        (
+            '<input id="max_cmd_io_0" value="5"><svg><foreignObject><select><select></foreignObject>'
+            '<input id="min_cmd_io_0" value="0">',
+            (None, 5.0),
+        ),
+        (
+            '<input id="max_cmd_io_0" value="5"><svg><foreignObject><textarea></textarea></foreignObject>'
+            '<input id="min_cmd_io_0" value="0">',
+            (None, 5.0),
+        ),
+        ('<template><svg><foreignObject></template></foreignObject><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        (
+            '<input id="max_cmd_io_0" value="5"><svg><a><foreignObject><a><svg></a>'
+            '<input id="min_cmd_io_0" value="-5">',
+            (-5.0, 5.0),
+        ),
+    ],
+    ids=[
+        "single-quoted-and-unquoted",
+        "entities-and-self-closing",
+        "quoted-gt-before-the-id",
+        "first-duplicate-attribute-wins",
+        "first-input-of-an-id-wins",
+        "commented-out-input",
+        "longer-id-is-another-input",
+        "max-only",
+        "first-input-without-value-wins",
+        "cut-off-input-is-unknown",
+        "upper-case-id-is-another-input",
+        "input-written-into-a-textarea",
+        "input-written-into-the-title",
+        "input-after-a-self-closing-textarea",
+        "input-written-into-an-xmp",
+        "input-written-into-an-iframe",
+        "input-written-into-a-noembed",
+        "input-written-into-a-noframes",
+        "input-written-into-a-noscript",
+        "no-end-tag-ends-a-plaintext",
+        "input-in-a-template",
+        "input-in-an-svg",
+        "input-in-a-math",
+        "input-in-a-foreign-object",
+        "input-in-a-mathml-text-integration-point",
+        "input-in-an-html-annotation",
+        "input-in-an-annotation-without-html-encoding",
+        "svg-in-an-annotation",
+        "mathml-tag-in-an-svg-is-no-integration-point",
+        "mglyph-stays-mathml",
+        "breakout-tag-ends-the-svg",
+        "font-with-color-ends-the-svg",
+        "font-without-attributes-stays-svg",
+        "self-closing-svg",
+        "svg-title-is-no-text-element",
+        "svg-style-is-no-raw-text",
+        "p-end-tag-ends-the-svg",
+        "br-end-tag-ends-the-svg",
+        "open-html-element-keeps-the-foreign-object",
+        "closed-html-element-lets-the-foreign-object-end",
+        "html-element-in-a-mathml-text-point-makes-mglyph-html",
+        "inner-element-of-the-same-name-ends-alone",
+        "style-after-a-closed-svg-is-raw-text",
+        "self-closing-foreign-object",
+        "svg-in-math-is-mathml",
+        "annotation-child-stays-mathml",
+        "breakout-stops-at-the-integration-point",
+        "input-in-an-mo",
+        "input-in-an-mn",
+        "input-in-an-ms",
+        "input-in-an-mtext",
+        "input-in-an-svg-desc",
+        "input-in-an-svg-title",
+        "input-in-an-xhtml-annotation",
+        "malignmark-stays-mathml",
+        "mglyph-in-an-html-annotation-is-html",
+        "font-with-face-ends-the-svg",
+        "font-with-size-ends-the-svg",
+        "svg-in-a-template",
+        "template-end-tag-ends-the-svg-inside-it",
+        "div-end-tag-in-a-foreign-object-ends-the-svg-inside-it",
+        "span-end-tag-in-a-foreign-object-ends-the-svg-inside-it",
+        "div-end-tag-ends-the-svg-inside-it",
+        "span-end-tag-ends-the-svg-inside-it",
+        "span-end-tag-ends-the-math-inside-it",
+        "end-tag-reaches-no-element-outside-the-integration-point",
+        "ignored-end-tag-leaves-the-inner-svg-open",
+        "closed-breakout-element-leaves-no-svg-open",
+        "end-tag-closes-the-elements-above-its-own",
+        "select-ended-by-an-input-is-closed",
+        "void-element-stays-closed",
+        "select-in-a-select-only-ends-it",
+        "textarea-is-closed-by-its-end-tag",
+        "template-end-tag-ends-the-foreign-elements-inside-it",
+        "html-end-tag-skips-a-foreign-element-of-the-same-name",
+    ],
+)
+async def test_get_webio_command_range_reads_the_inputs_as_a_browser_does(
+    logged_in: ComexioClient, comexio: FakeComexio, html: str, expected: tuple[float | None, float | None]
+) -> None:
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, html)
+
+    assert await logged_in.get_webio_command_range(1324, 34) == expected
+
+
+# The special elements an end tag can meet open, and the elements whose end tag looks for them in scope.
+_OPEN_SPECIAL_ELEMENTS = [
+    *("address", "applet", "article", "aside", "blockquote", "button", "center", "dd", "details", "dir", "div", "dl"),
+    *("dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header"),
+    *("hgroup", "li", "listing", "main", "marquee", "menu", "nav", "object", "ol", "p", "pre", "search", "section"),
+    *("summary", "table", "ul"),
+]
+_SCOPED_ELEMENTS = [
+    *("address", "applet", "article", "aside", "blockquote", "button", "center", "details", "dialog", "dir", "div"),
+    *("dl", "dd", "dt", "fieldset", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header"),
+    *("hgroup", "listing", "main", "marquee", "menu", "nav", "object", "ol", "pre", "search", "section", "summary"),
+    "ul",
+]
+# Start tags that close an open <p> (besides <p>, list items, headings, <hr> and <table>), and formatting elements.
+_P_CLOSING_BLOCKS = [
+    *("address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "dl", "fieldset"),
+    *("figcaption", "figure", "footer", "header", "hgroup", "main", "menu", "nav", "ol", "search", "section"),
+    *("summary", "ul", "pre", "listing"),
+]
+_FORMATTING_TAGS = ["big", "code", "em", "nobr", "s", "small", "strike", "strong", "tt", "u"]
+_TABLE_PART_PREFIXES = {
+    "caption": "<table><caption>",
+    "tbody": "<table><tbody>",
+    "thead": "<table><thead>",
+    "tfoot": "<table><tfoot>",
+    "tr": "<table><tr>",
+    "td": "<table><tr><td>",
+    "th": "<table><tr><th>",
+}
+
+
+@pytest.mark.parametrize(
+    ("opening", "closed"),
+    [
+        # An end tag does not reach past a special element or a scope boundary.
+        *(
+            pytest.param(f"<span><{tag}><svg></span>", False, id=f"span-end-tag-stops-at-{tag}")
+            for tag in _OPEN_SPECIAL_ELEMENTS
+        ),
+        pytest.param("<div><object><svg></div>", False, id="div-end-tag-stops-at-an-object"),
+        pytest.param("<div><table><svg></div>", False, id="div-end-tag-stops-at-a-table"),
+        pytest.param("<li><marquee><svg></li>", False, id="li-end-tag-stops-at-a-marquee"),
+        pytest.param("<li><ul><svg></li>", False, id="li-end-tag-stops-at-a-ul"),
+        pytest.param("<li><ol><svg></li>", False, id="li-end-tag-stops-at-an-ol"),
+        pytest.param("<div><math><annotation-xml></div>", False, id="div-end-tag-stops-at-an-annotation"),
+        pytest.param("<table><tr><td><table><svg></td>", False, id="td-end-tag-stops-at-a-nested-table"),
+        pytest.param("<form><svg></form>", False, id="form-end-tag-removes-the-form-alone"),
+        # Outside a table a browser ignores the start tag of a table part, and a <head> in the body.
+        *(
+            pytest.param(f"<{tag}><svg></{tag}>", False, id=f"{tag}-outside-a-table-is-ignored")
+            for tag in ("td", "caption", "tr")
+        ),
+        pytest.param("<head><svg></head>", False, id="head-in-the-body-is-ignored"),
+        *(
+            pytest.param(f"<span><{tag}><svg></span>", True, id=f"ignored-{tag}-is-no-barrier")
+            for tag in ("td", "th", "tr", "tbody", "thead", "tfoot", "caption", "colgroup", "head", "body", "html")
+        ),
+        # An end tag looked for in scope closes the elements above its own, special or not.
+        *(
+            pytest.param(
+                f"<{tag}><{'section' if tag == 'center' else 'center'}><svg></{tag}>",
+                True,
+                id=f"{tag}-end-tag-in-scope",
+            )
+            for tag in _SCOPED_ELEMENTS
+        ),
+        pytest.param("<li><div><svg></li>", True, id="li-end-tag-in-scope"),
+        pytest.param("<table><svg></table>", True, id="table-end-tag"),
+        pytest.param("<table><center><svg></table>", True, id="table-end-tag-in-table-scope"),
+        *(
+            pytest.param(f"{prefix}<center><svg></{part}>", True, id=f"{part}-end-tag-in-table-scope")
+            for part, prefix in _TABLE_PART_PREFIXES.items()
+        ),
+        pytest.param("<table><tr><td><svg></td>", True, id="td-end-tag-ends-the-svg-inside-it"),
+        pytest.param("<table><tr><td><svg></tr>", True, id="tr-end-tag-ends-the-cell-and-the-svg-inside-it"),
+        pytest.param("<ul><li><svg></li>", True, id="li-end-tag-ends-the-svg-inside-it"),
+        pytest.param("<span><b><svg></span>", True, id="span-end-tag-ends-a-formatting-element-and-the-svg"),
+        pytest.param("<div><span><svg></div>", True, id="div-end-tag-ends-a-span-and-the-svg"),
+        pytest.param(
+            "<span><template><div></template><svg></span>", True, id="template-end-tag-ends-everything-inside"
+        ),
+        pytest.param("<p><button><svg></p>", True, id="p-end-tag-breaks-out-of-the-svg"),
+        # Any heading end tag closes the innermost open heading.
+        pytest.param("<h1><svg></h2>", True, id="h2-end-tag-ends-an-h1"),
+        pytest.param("<h2><svg></h1>", True, id="h1-end-tag-ends-an-h2"),
+        pytest.param("<h1><center><svg></h2>", True, id="heading-end-tag-in-scope"),
+        # A formatting end tag (adoption agency) keeps the special elements inside it open and ends the svg above.
+        pytest.param("<b><div><svg></b>", True, id="b-end-tag-keeps-a-div"),
+        pytest.param("<a><p><svg></a>", True, id="a-end-tag-keeps-a-p"),
+        pytest.param("<font><li><svg></font>", True, id="font-end-tag-keeps-an-li"),
+        pytest.param("<i><button><svg></i>", True, id="i-end-tag-keeps-a-button"),
+        pytest.param("<span><b><div><svg></b><svg></span>", False, id="div-kept-by-a-formatting-end-tag-stays-special"),
+        # A start tag closes what a browser closes before it: no closed element is left as a barrier.
+        pytest.param("<span><p>a<div>b</div><svg></span>", True, id="div-start-tag-closes-a-p"),
+        pytest.param("<b><p>x<h1>y</h1><svg></b>", True, id="heading-start-tag-closes-a-p"),
+        pytest.param("<span><li>a<li>b</li><svg></span>", True, id="li-start-tag-closes-an-li"),
+        pytest.param("<span><dd>a<dt>b</dt><svg></span>", True, id="dt-start-tag-closes-a-dd"),
+        pytest.param("<span><h1>a<h2>b</h2><svg></span>", True, id="heading-start-tag-closes-a-heading"),
+        pytest.param("<span><table><tr><td>a<td>b</td></table><svg></span>", True, id="td-start-tag-closes-a-td"),
+        pytest.param("<span><button>a<button>b</button><svg></span>", True, id="button-start-tag-closes-a-button"),
+        pytest.param("<span><form><form></form><svg></span>", True, id="form-in-a-form-is-ignored"),
+        pytest.param("<span><form><div></form></div><svg></span>", True, id="form-end-tag-reaches-past-a-div"),
+        pytest.param(
+            "<span><form><span></form><svg></span><svg></span>", True, id="form-end-tag-removes-only-the-form"
+        ),
+        *(
+            pytest.param(f"<p><{tag}><h1><svg></{tag}>", True, id=f"{tag}-start-tag-closes-a-p")
+            for tag in _P_CLOSING_BLOCKS
+        ),
+        pytest.param("<p><li><form><svg></li>", True, id="li-start-tag-closes-a-p"),
+        pytest.param("<p><dd><p><svg></dd>", True, id="dd-start-tag-closes-a-p"),
+        pytest.param("<p><dt><ol><svg></dt>", True, id="dt-start-tag-closes-a-p"),
+        pytest.param("<p><p><h1><div><svg></h1>", True, id="p-start-tag-closes-a-p"),
+        pytest.param("<p><hr><a><h3><svg></a>", True, id="hr-start-tag-closes-a-p"),
+        pytest.param("<p><h3><hr></ol><svg></h3>", True, id="h3-start-tag-closes-a-p"),
+        pytest.param("<span><p><table></table><svg></span>", True, id="table-start-tag-closes-a-p-without-quirks"),
+        pytest.param("<p><b></ul><span><svg></b>", True, id="span-start-tag-keeps-a-p"),
+        pytest.param("<p><b><button><svg></b></form>", True, id="button-start-tag-keeps-a-p"),
+        pytest.param("<table><p><button></p><svg></button>", True, id="p-end-tag-stops-at-a-button"),
+        pytest.param("<p><button><dd></p><svg></button>", True, id="p-in-a-button-is-no-p-to-close"),
+        pytest.param("<p><p><object><h2><svg></object>", True, id="p-start-tag-closes-a-p-in-button-scope"),
+        pytest.param("<p><li><center><p><svg></li>", True, id="li-start-tag-closes-a-p-and-then-a-p"),
+        *(pytest.param(f"<h1><svg></h{level}>", True, id=f"h{level}-end-tag-ends-an-h1") for level in range(3, 7)),
+        pytest.param("<h1><table><svg></h1>", False, id="heading-end-tag-stops-at-a-table"),
+        pytest.param("<h1><b><h2><svg></b>", True, id="heading-start-tag-closes-a-heading-below-a-b"),
+        *(pytest.param(f"<{tag}><p><svg></{tag}>", True, id=f"{tag}-end-tag-keeps-a-p") for tag in _FORMATTING_TAGS),
+        pytest.param("<b><i><div></b><svg></i>", True, id="b-end-tag-keeps-an-i-before-a-div"),
+        pytest.param("<b><div><i><div></b><svg></i>", True, id="b-end-tag-keeps-an-i-before-the-last-div"),
+        pytest.param("<b></ul><div></b><svg></b>", False, id="b-end-tag-closes-the-b"),
+        pytest.param("<b><table><p><svg></b>", False, id="b-end-tag-stops-at-a-table"),
+        pytest.param("<a><applet><svg></a>", False, id="a-end-tag-stops-at-an-applet"),
+        pytest.param("<li><div><li><svg></div>", False, id="li-start-tag-closes-an-li-past-a-div"),
+        pytest.param("<li><address><li></h2><svg></address>", False, id="li-start-tag-closes-an-li-past-an-address"),
+        pytest.param("<dd><address><dt><svg></address>", False, id="dt-start-tag-closes-a-dd-past-an-address"),
+        pytest.param("<dd><ul><dd><svg></ul>", True, id="dd-start-tag-stops-at-a-ul"),
+        pytest.param("<dt><section><dd><svg></section>", True, id="dd-start-tag-stops-at-a-section"),
+        pytest.param("<dt><h2><dd><a><svg></dt></h3>", True, id="dd-start-tag-stops-at-a-heading"),
+        pytest.param("<dd><section><b><dt><a><address><svg></section>", True, id="dt-start-tag-closes-the-inner-dd"),
+        pytest.param("<li><dd><svg></li>", True, id="dd-start-tag-closes-no-li"),
+        pytest.param("<dd><dt><dd><svg></dt>", False, id="dd-start-tag-closes-a-dt"),
+        pytest.param("<button><ul><button><svg></ul>", False, id="button-start-tag-closes-a-button-past-a-ul"),
+        pytest.param("<b><table><td><caption><th><svg></td>", False, id="th-start-tag-closes-a-caption"),
+        pytest.param("<table><tbody><tbody></tbody><svg></tbody>", False, id="tbody-start-tag-closes-a-tbody"),
+        pytest.param("<table><tfoot><tbody><svg></tfoot>", False, id="tbody-start-tag-closes-a-tfoot"),
+        pytest.param("<td><table><tr><dt><tr><svg></dt>", False, id="tr-start-tag-closes-a-tr"),
+        pytest.param("<table><dl><tbody><tr><tbody><svg></tr>", False, id="tbody-start-tag-closes-a-tr"),
+        pytest.param("<table><thead><tbody><svg></thead>", False, id="tbody-start-tag-closes-a-thead"),
+        pytest.param("<table><dd><caption><svg><caption></dd>", False, id="dd-end-tag-stops-at-a-caption"),
+        pytest.param("<table><h2><td></dl><svg><th></h2>", False, id="h2-end-tag-stops-at-a-td"),
+        pytest.param("<select><h2></select><svg></h1>", False, id="select-end-tag-closes-a-heading"),
+        # The current HTML standard: an end tag does not reach past an open <select>.
+        pytest.param("<span><div><select></div></select><svg></span>", False, id="div-end-tag-stops-at-a-select"),
+        pytest.param("<span><p><select><div></select></div><svg></span>", False, id="div-in-a-select-keeps-a-p"),
+        # Only MathML's <annotation-xml> bounds the scope; SVG's is an ordinary SVG element.
+        pytest.param("<span><svg><annotation-xml></span>", True, id="svg-annotation-xml-is-no-barrier"),
+        # A browser inserts the <tbody> and <tr> a row or cell put straight into a table lacks; a table part ends a
+        # caption.
+        pytest.param("<table><tr><svg></tbody>", True, id="tr-in-a-table-gets-a-tbody"),
+        pytest.param("<table><td><svg></tr>", True, id="td-in-a-table-gets-a-tr"),
+        pytest.param("<table><td><svg></tbody>", True, id="td-in-a-table-gets-a-tbody"),
+        pytest.param("<table><tbody><td><svg></tr>", True, id="td-in-a-tbody-gets-a-tr"),
+        pytest.param("<table><div><td><svg></td>", True, id="td-start-tag-closes-a-div-in-a-table"),
+        pytest.param("<table><caption><td><svg></tr>", True, id="td-start-tag-closes-a-caption"),
+        pytest.param("<table><div><tbody><svg></div>", False, id="tbody-start-tag-closes-a-div-in-a-table"),
+        pytest.param("<table><td><caption><svg></td>", False, id="caption-start-tag-closes-a-cell"),
+        pytest.param("<table><td><caption><math></tbody>", False, id="caption-in-a-cell-gets-no-tbody"),
+        pytest.param("<table><td><col><svg></td>", False, id="col-start-tag-closes-a-cell"),
+        pytest.param("<table><td><colgroup><svg></td>", False, id="colgroup-start-tag-closes-a-cell"),
+        pytest.param("<table><colgroup><svg></colgroup>", False, id="colgroup-is-closed-by-its-content"),
+        pytest.param("<div><table><colgroup><th><svg></colgroup>", False, id="colgroup-end-tag-after-a-cell"),
+        pytest.param("<table><h1><thead><caption><svg></thead>", False, id="caption-start-tag-closes-a-thead"),
+        pytest.param("<table><td><select></td><svg>", False, id="cell-end-tag-ends-a-select"),
+        pytest.param("<table><tr><td><select></tr><math>", False, id="row-end-tag-ends-a-select"),
+        pytest.param("<table><caption><select></caption><svg>", False, id="caption-end-tag-ends-a-select"),
+        pytest.param(
+            "<table><td><svg><foreignObject><svg></td>", True, id="cell-end-tag-reaches-past-a-foreign-object"
+        ),
+        *(
+            pytest.param(f"<table>{prefix}<svg></{end}>", True, id=f"th-after-{prefix}-ends-with-{end}")
+            for prefix, end in (("<th>", "tbody"), ("<th>", "tr"), ("<tbody><th>", "tr"), ("<tr><th>", "tr"))
+        ),
+        pytest.param("<table><thead><tr><svg></thead>", True, id="thead-end-tag-ends-a-row"),
+        pytest.param("<table><tfoot><tr><svg></tfoot>", True, id="tfoot-end-tag-ends-a-row"),
+        pytest.param("<p><b>x<div><table><tr><td></td><td><svg></b>", False, id="b-is-not-reopened-in-a-second-cell"),
+        pytest.param(
+            "<p><b>x<div><table><caption>a</caption><caption><svg></b>",
+            False,
+            id="b-is-not-reopened-in-a-second-caption",
+        ),
+        # A browser reopens a formatting element an end tag closed implicitly before most start tags, an <svg> too.
+        pytest.param("<b><i></b><svg></i>", True, id="i-closed-by-a-b-end-tag-is-reopened"),
+        pytest.param("<h1><i><pre></h4><svg></i>", True, id="i-closed-by-a-heading-end-tag-is-reopened"),
+        pytest.param("<a><button><ol><font></ol><math></annotation-xml></font>", True, id="font-is-reopened"),
+        pytest.param("<b><i></b></i><svg></i>", False, id="i-end-tag-forgets-a-closed-i"),
+        pytest.param("<table><td><i></td><svg></i>", False, id="i-is-not-reopened-outside-its-cell"),
+        pytest.param("<template><b></template><svg></b>", False, id="b-is-not-reopened-outside-its-template"),
+        pytest.param("<table><th><i></th><svg></i>", False, id="i-is-not-reopened-outside-its-th"),
+        *(
+            pytest.param(f"<b><{tag}><i></{tag}><svg></i>", False, id=f"i-is-not-reopened-outside-its-{tag}")
+            for tag in ("applet", "marquee", "object")
+        ),
+        pytest.param("<b><applet></applet><i></b><svg></i>", True, id="closed-applet-leaves-no-marker"),
+        pytest.param("<i><b><u></i><div><svg></b>", True, id="every-closed-formatting-element-is-reopened"),
+        pytest.param("<b><svg><foreignObject><i></b><div><svg></i>", True, id="i-in-a-foreign-object-is-open"),
+        pytest.param("<svg><foreignObject><b><i></b><svg></i>", True, id="i-is-reopened-in-a-foreign-object"),
+        pytest.param("<a><span><a><svg></span>", False, id="a-start-tag-closes-an-a-and-a-span"),
+        pytest.param("<b><i></b><table><svg></i>", True, id="table-does-not-reopen-an-i"),
+        pytest.param("<b><i></b><table><tr><svg></i>", True, id="tr-is-no-marker"),
+        pytest.param("<b><i></b><a><svg></i>", True, id="a-reopens-an-i"),
+        pytest.param("<i><button><b><caption></button><svg></b>", True, id="button-is-no-marker"),
+        pytest.param("<a>x<a><svg></a>", True, id="a-start-tag-closes-an-a"),
+    ],
+)
+async def test_get_webio_command_range_ends_foreign_content_as_a_browser_does(
+    logged_in: ComexioClient, comexio: FakeComexio, opening: str, closed: bool
+) -> None:
+    """Whether an end tag closes an open <svg>/<math> depends on the HTML elements open around it.
+
+    With the SVG/MathML element closed, the min input after it is a form field; left open, the input is SVG/MathML.
+    """
+    comexio.serve_text(
+        "GET",
+        WEBIO_EDIT_COMMAND_PATH,
+        f'<input id="max_cmd_io_0" value="5">{opening}<input id="min_cmd_io_0" value="0">',
+    )
+
+    assert await logged_in.get_webio_command_range(1324, 34) == ((0.0 if closed else None), 5.0)
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        pytest.param("<svg><foreignObject><p>a<div>b</div></foreignObject>", id="p-closed-by-a-div"),
+        pytest.param("<svg><foreignObject><li>a<li>b</li></foreignObject>", id="li-closed-by-an-li"),
+    ],
+)
+async def test_get_webio_command_range_ends_a_foreign_object_after_implicitly_closed_html(
+    logged_in: ComexioClient, comexio: FakeComexio, html: str
+) -> None:
+    """An HTML element a start tag closed implicitly does not keep the integration point open."""
+    comexio.serve_text(
+        "GET",
+        WEBIO_EDIT_COMMAND_PATH,
+        f'<input id="max_cmd_io_0" value="5">{html}<input id="min_cmd_io_0" value="0">',
+    )
+
+    assert await logged_in.get_webio_command_range(1324, 34) == (None, 5.0)
+
+
+def _emulate_an_older_html_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make html.parser behave as an older 3.13 release: only <script> and <style> content is raw text."""
+    monkeypatch.setattr(client_module, "_HTML_PARSER_SCRIPTING", {})
+    monkeypatch.setattr(HTMLParser, "RCDATA_CONTENT_ELEMENTS", (), raising=False)
+    monkeypatch.setattr(HTMLParser, "CDATA_CONTENT_ELEMENTS", ("script", "style"))
+    set_cdata_mode = HTMLParser.set_cdata_mode
+
+    def set_cdata_mode_without_plaintext(self: HTMLParser, elem: str, *args: Any, **kwargs: Any) -> None:
+        if elem != "plaintext":
+            set_cdata_mode(self, elem, *args, **kwargs)
+
+    monkeypatch.setattr(HTMLParser, "set_cdata_mode", set_cdata_mode_without_plaintext)
+    # They read every <![ as a marked section and let no caller tell a CDATA section from a bogus comment.
+    monkeypatch.delattr(HTMLParser, "_set_support_cdata", raising=False)
+    parse_html_declaration = HTMLParser.parse_html_declaration
+
+    def parse_html_declaration_as_marked_section(self: HTMLParser, i: int) -> int:
+        if self.rawdata.startswith("<![", i):
+            return self.parse_marked_section(i)
+        return parse_html_declaration(self, i)
+
+    monkeypatch.setattr(HTMLParser, "parse_html_declaration", parse_html_declaration_as_marked_section)
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        ('<![if x]><input id="min_cmd_io_0" value="-5"><![endif]>', (-5.0, None)),
+        ('<svg><![if x]></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><![CDATA [x></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        (
+            '<svg><![cdata[x><input id="min_cmd_io_0" value="-5">]]></svg><input id="min_cmd_io_0" value="0">',
+            (0.0, None),
+        ),
+        (
+            '<math><![CDATA[x><input id="min_cmd_io_0" value="0">]]></math><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        ('<svg><![CDATA[]]></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<input id="max_cmd_io_0" value="5"><svg><![CDATA[x><input id="min_cmd_io_0" value="-5">', (None, 5.0)),
+        ('<![CDATA[x><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        (
+            '<![CDATA[x><input id="min_cmd_io_0" value="-5">]]><input id="min_cmd_io_0" value="0">',
+            (-5.0, None),
+        ),
+        (
+            '<svg><![CDATA[x><div><input id="min_cmd_io_0" value="0">]]></svg><input id="min_cmd_io_0" value="-5">',
+            (-5.0, None),
+        ),
+        ('<svg></svg><![CDATA[x><input id="min_cmd_io_0" value="-5">]]>', (-5.0, None)),
+        ('<svg><foreignObject><div/><![CDATA[x><input id="min_cmd_io_0" value="-5">]]>', (-5.0, None)),
+        ('<svg><foreignObject><div><![CDATA[x><input id="min_cmd_io_0" value="-5">]]></foreignObject>', (-5.0, None)),
+    ],
+    ids=[
+        "marked-section-in-html",
+        "marked-section-in-an-svg",
+        "misspelt-cdata-section-in-an-svg",
+        "lowercase-cdata-section-in-an-svg",
+        "cdata-section-in-a-math",
+        "empty-cdata-section-in-an-svg",
+        "cdata-section-the-page-ends-in",
+        "bogus-comment-the-page-ends-in",
+        "bogus-comment-in-html",
+        "cdata-section-in-an-svg",
+        "bogus-comment-after-the-svg-end-tag",
+        "bogus-comment-after-a-self-closing-html-tag-in-a-foreign-object",
+        "bogus-comment-in-an-html-element-in-a-foreign-object",
+    ],
+)
+@pytest.mark.parametrize("older_html_parser", [False, True], ids=["html-parser", "older-html-parser"])
+async def test_get_webio_command_range_reads_cdata_only_in_foreign_content(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    monkeypatch: pytest.MonkeyPatch,
+    html: str,
+    expected: tuple[float | None, float | None],
+    older_html_parser: bool,
+) -> None:
+    """Outside SVG/MathML a browser reads <![CDATA[ as a bogus comment that ends at the next ">"."""
+    if older_html_parser:
+        _emulate_an_older_html_parser(monkeypatch)
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, html)
+
+    assert await logged_in.get_webio_command_range(1324, 34) == expected
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        # Every raw-text and escapable raw-text element, written out so that a slash after a new one is checked too.
+        *(
+            (f'<{tag}/><input id="min_cmd_io_0" value="0"></{tag}><input id="min_cmd_io_0" value="-5">', (-5.0, None))
+            for tag in ("script", "style", "xmp", "iframe", "noembed", "noframes", "noscript", "textarea", "title")
+        ),
+        ('<script/><textarea></script><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<svg><style/></svg><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<select><style/><input id="min_cmd_io_0" value="-5"></select>', (-5.0, None)),
+        ('<textarea><style></textarea><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+        ('<textarea><style/></textarea><input id="min_cmd_io_0" value="-5">', (-5.0, None)),
+    ],
+    ids=[
+        *(
+            f"{tag}-with-a-slash"
+            for tag in ("script", "style", "xmp", "iframe", "noembed", "noframes", "noscript", "textarea", "title")
+        ),
+        "script-with-a-slash-ends-at-its-end-tag",
+        "svg-style-with-a-slash-is-closed",
+        "style-with-a-slash-in-a-select-is-ignored",
+        "style-in-a-textarea-is-text",
+        "style-with-a-slash-in-a-textarea-is-text",
+    ],
+)
+@pytest.mark.parametrize("older_html_parser", [False, True], ids=["html-parser", "older-html-parser"])
+async def test_get_webio_command_range_reads_a_text_element_with_a_slash_as_text(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    monkeypatch: pytest.MonkeyPatch,
+    html: str,
+    expected: tuple[float | None, float | None],
+    older_html_parser: bool,
+) -> None:
+    """A browser ignores the slash of an HTML start tag: what follows <style/> is its text up to </style>."""
+    if older_html_parser:
+        _emulate_an_older_html_parser(monkeypatch)
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, html)
+
+    assert await logged_in.get_webio_command_range(1324, 34) == expected
+
+
+@pytest.mark.parametrize("tag", ["style", "xmp", "iframe", "noembed", "noframes"])
+@pytest.mark.parametrize("slash", ["", "/"], ids=["start-tag", "start-tag-with-a-slash"])
+async def test_get_webio_command_range_ends_a_raw_text_element_at_its_end_tag_inside_a_comment(
+    logged_in: ComexioClient, comexio: FakeComexio, tag: str, slash: str
+) -> None:
+    """Raw text knows no comment: the first </xmp> ends an <xmp>, with or without a slash on its start tag."""
+    comexio.serve_text(
+        "GET",
+        WEBIO_EDIT_COMMAND_PATH,
+        f'<{tag}{slash}><!-- </{tag}> --><input id="min_cmd_io_0" value="-5">'
+        f'</{tag}><input id="min_cmd_io_0" value="0">',
+    )
+
+    assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+
+
+# Pages that keep `depth` elements open (or listed as active formatting ones) when the field after them comes.
+_NESTED_PAGES: dict[str, Callable[[int], str]] = {
+    "html": lambda depth: "<div>" * depth,
+    "formatting": lambda depth: "<b>" * depth,
+    "foreign": lambda depth: "<svg>" + "<g>" * (depth - 1) + "</svg>",
+    "integration-point": lambda depth: "<svg><foreignObject>" + "<div>" * (depth - 2),
+    "template": lambda depth: "<template>" * depth + "</template>" * depth,
+}
+_FIELD = '<input id="min_cmd_io_0" value="-5">'
+
+
+@pytest.mark.parametrize("nesting", list(_NESTED_PAGES))
+async def test_get_webio_command_range_reads_a_page_nested_up_to_the_limit(
+    logged_in: ComexioClient, comexio: FakeComexio, nesting: str
+) -> None:
+    page = _NESTED_PAGES[nesting](client_module._MAX_OPEN_ELEMENTS) + _FIELD
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, page)
+
+    assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+
+
+@pytest.mark.parametrize("depth", [client_module._MAX_OPEN_ELEMENTS + 1, 16000], ids=["limit-plus-one", "16000"])
+@pytest.mark.parametrize("nesting", list(_NESTED_PAGES))
+async def test_get_webio_command_range_rejects_a_page_nested_past_the_limit_at_once(
+    logged_in: ComexioClient, comexio: FakeComexio, nesting: str, depth: int
+) -> None:
+    """Each tag searches the open elements: past the limit the parser stops instead of taking quadratic time (16000
+    nested <b> took 6.5 s, blocking the event loop). Rejecting the page takes at most a few times as long as reading
+    the page nested up to the limit."""
+    page = _NESTED_PAGES[nesting](depth) + _FIELD
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, page)
+
+    with pytest.raises(ComexioDataError, match=f"nests more than {client_module._MAX_OPEN_ELEMENTS} elements"):
+        await logged_in.get_webio_command_range(1324, 34)
+    limit_page = _NESTED_PAGES[nesting](client_module._MAX_OPEN_ELEMENTS) + _FIELD
+    assert _parse_seconds(page, rejected=True) < 10 * _parse_seconds(limit_page)
+
+
+@pytest.mark.parametrize(
+    "repeated",
+    ["<p><b></p>", '<p><b class="x" id="y"></p><p><b id="y" class="x"></p>', "<div><i></div>", "<p><b></p><p><i></p>"],
+)
+async def test_get_webio_command_range_reopens_at_most_three_equal_formatting_elements(
+    logged_in: ComexioClient, comexio: FakeComexio, repeated: str
+) -> None:
+    """A browser lists no more than three equal formatting elements (same tag and attributes, in any order) past the
+    last marker, so an unclosed <b> in every paragraph does not nest the page deeper with each one."""
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, repeated * 10_000 + _FIELD)
+
+    assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+    # Four times the page takes about four times as long (sixteen times if each tag searched a growing list).
+    assert _parse_seconds(repeated * 10_000 + _FIELD) < 8 * _parse_seconds(repeated * 2_500 + _FIELD)
+
+
+async def test_get_webio_command_range_rejects_many_different_implicitly_closed_formatting_elements(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """Formatting elements with different attributes are all reopened, as a browser does, up to the limit."""
+    page = "".join(f'<p><b id="{index}"></p>' for index in range(client_module._MAX_OPEN_ELEMENTS)) + _FIELD
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, page)
+
+    with pytest.raises(ComexioDataError, match=f"nests more than {client_module._MAX_OPEN_ELEMENTS} elements"):
+        await logged_in.get_webio_command_range(1324, 34)
+
+
+@pytest.mark.parametrize(
+    ("nested", "repeated"),
+    [
+        pytest.param(lambda depth: "<b>" * depth, "<i></i>", id="formatting-under-formatting"),
+        pytest.param(lambda depth: "<b>" + "<div>" * (depth - 1), "<x></x>", id="formatting-under-blocks"),
+        pytest.param(lambda depth: "<p><object>" + "<div>" * (depth - 2), "<div></div>", id="marker-under-blocks"),
+        pytest.param(lambda depth: "<span>" * depth, "</i>", id="end-tag-past-the-open-elements"),
+        pytest.param(lambda depth: "<svg>" + "<g>" * (depth - 1), "<g/>", id="foreign"),
+    ],
+)
+async def test_get_webio_command_range_reads_a_page_nested_near_the_limit_in_linear_time(
+    logged_in: ComexioClient, comexio: FakeComexio, nested: Callable[[int], str], repeated: str
+) -> None:
+    """Tag after tag at nearly the most open elements: about 50 KB parse at most a few times slower than with two
+    open elements, not seconds (a search of all open elements for every tag)."""
+
+    def page(depth: int) -> str:
+        closed = "</svg>" if repeated == "<g/>" else ""
+        return nested(depth) + repeated * (50_000 // len(repeated)) + closed + _FIELD
+
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, page(254))
+
+    assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+    assert _parse_seconds(page(254)) < 10 * _parse_seconds(page(2))
+
+
+def _parse_seconds(page: str, *, rejected: bool = False) -> float:
+    """The fastest of three form parser runs over page: a ratio of two such times holds on a slow or traced run.
+
+    rejected: the parser must reject page as nested too deep.
+    """
+    durations = []
+    for _ in range(3):
+        parser = client_module._FormParser()
+        started = time.perf_counter()
+        with pytest.raises(ComexioDataError, match="nests more than") if rejected else contextlib.nullcontext():
+            parser.feed(page)
+            parser.close()
+        durations.append(time.perf_counter() - started)
+    return min(durations)
+
+
+@pytest.mark.skipif(not client_module._HTML_PARSER_SCRIPTING, reason="html.parser cannot read a <noscript> as raw text")
+async def test_get_webio_command_range_reads_a_noscript_as_raw_text(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """A browser runs scripts, so a <noscript> is raw text: its end tag ends it even inside a comment-like text."""
+    comexio.serve_text(
+        "GET", WEBIO_EDIT_COMMAND_PATH, '<noscript><!--</noscript><input id="min_cmd_io_0" value="-5">-->'
+    )
+
+    assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+
+
+@pytest.mark.parametrize(
+    "tag",
+    # The breakout start tags of the HTML standard, written out so that the list in client.py is checked.
+    [
+        *("b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed", "h1"),
+        *("h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing", "menu", "meta", "nobr", "ol", "p"),
+        *("pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", "table", "tt", "u", "ul", "var"),
+    ],
+)
+async def test_get_webio_command_range_reads_html_after_a_breakout_tag(
+    logged_in: ComexioClient, comexio: FakeComexio, tag: str
+) -> None:
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, f'<svg><g><{tag}><input id="min_cmd_io_0" value="-5">')
+
+    assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
+
+
+@pytest.mark.parametrize(
+    "opening",
+    [
+        "<textarea>",
+        "<title>",
+        "<textarea/>",
+        "<TEXTAREA>",
+        "<xmp>",
+        "<iframe>",
+        "<noembed>",
+        "<noframes>",
+        "<noscript>",
+    ],
+    ids=["textarea", "title", "slash", "upper", "xmp", "iframe", "noembed", "noframes", "noscript"],
+)
+async def test_get_webio_command_form_reads_text_only_content_as_text_on_an_older_html_parser(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, opening: str
+) -> None:
+    """Older 3.13 releases of html.parser report markup inside a <textarea>, <title> or raw-text element as tags.
+
+    Another end tag inside it (here </b> and </select>) does not end it, only its own does.
+    """
+    _emulate_an_older_html_parser(monkeypatch)
+    closing = "</" + opening.strip("</>").lower() + ">"
+    comexio.serve_text(
+        "GET",
+        WEBIO_EDIT_COMMAND_PATH,
+        f'{opening}</b><select id="protocol"><option value="5" selected></select><input id="min_cmd_io_0" value="0">'
+        f'{closing}<input id="min_cmd_io_0" value="-5"><select id="protocol"><option value="1" selected></select>',
+    )
+
+    assert await logged_in.get_webio_command_form(1324, 34) == WebioCommandForm(min=-5.0, max=None, protocol=1)
+
+
+async def test_get_webio_command_form_reads_the_rest_after_a_plaintext_as_text_on_an_older_html_parser(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _emulate_an_older_html_parser(monkeypatch)
+    comexio.serve_text(
+        "GET",
+        WEBIO_EDIT_COMMAND_PATH,
+        '<input id="max_cmd_io_0" value="5"><plaintext></plaintext><input id="min_cmd_io_0" value="-5">'
+        '<select id="protocol"><option value="1" selected></select>',
+    )
+
+    assert await logged_in.get_webio_command_form(1324, 34) == WebioCommandForm(min=None, max=5.0, protocol=None)
+
+
+@pytest.mark.parametrize("older_parser", [False, True], ids=["this-parser", "older-parser"])
+@pytest.mark.parametrize("tag", ["title", "xmp", "plaintext", "style"])
+async def test_get_webio_command_form_ignores_a_text_only_tag_in_the_select(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, tag: str, older_parser: bool
+) -> None:
+    """Inside an open select a browser ignores the tag, so neither the options nor the inputs after it are text."""
+    if older_parser:
+        _emulate_an_older_html_parser(monkeypatch)
+    comexio.serve_text(
+        "GET",
+        WEBIO_EDIT_COMMAND_PATH,
+        f'<select id="protocol"><option value="1"><{tag}><option value="5" selected></{tag}></select>{_RANGE_FIELDS}',
+    )
+
+    assert await logged_in.get_webio_command_form(1324, 34) == WebioCommandForm(min=0.0, max=1.0, protocol=5)
+
+
+@pytest.mark.parametrize(
+    ("tag", "value"),
+    [(f'<input id="min_cmd_io_0" value="{text}">', text) for text in ("inf", "-inf", "nan", "1e999")]
+    + [('<input id="min_cmd_io_0" value>', "")],  # a bare value is "", as for value=""
+)
+async def test_get_webio_command_range_rejects_a_value_that_is_not_finite(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, tag: str, value: str
+) -> None:
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, tag)
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        assert await logged_in.get_webio_command_range(1324, 34) == (None, None)
+
+    (warning,) = caplog.records
+    assert warning.getMessage() == f"Web-IO command 1324 has a non-numeric min value: {value!r}"
 
 
 async def test_get_webio_command_range_caps_a_long_non_numeric_value_in_the_warning(
@@ -862,6 +1721,205 @@ _RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" val
         pytest.param('<select id="protocol-extra"><option value="1" selected></option></select>', None, id="prefix-id"),
         pytest.param("", None, id="no-select"),
         pytest.param('<select id="protocol"></select>', None, id="no-options"),
+        pytest.param(
+            '<textarea><select id="protocol"><option value="5" selected></select></textarea>'
+            '<select id="protocol"><option value="1" selected></select>',
+            1,
+            id="select-written-into-a-textarea",
+        ),
+        pytest.param('<select id="protocol"><option selected>\n 5 </option></select>', 5, id="text-as-value"),
+        pytest.param(
+            '<select id="protocol"><option>1</option><option>5</option></select>', 1, id="text-of-first-option"
+        ),
+        pytest.param(
+            '<select id="protocol" multiple><option value="1" selected><option value="5" selected></select>',
+            None,
+            id="multiple-select",
+        ),
+        pytest.param('<select id="protocol" multiple><option value="1"></select>', None, id="multiple-none-selected"),
+        pytest.param(
+            '<select id="protocol"><option value="1" selected><select id="x"><option value="5" selected>',
+            1,
+            id="nested-select-ends-it",
+        ),
+        pytest.param(
+            '<select id="a"><option>1<select id="protocol"><option value="5" selected></select>',
+            None,
+            id="protocol-select-inside-another-select-is-ignored",
+        ),
+        pytest.param('<select id="protocol"><option>1 5</option></select>', None, id="inner-whitespace-is-kept"),
+        pytest.param('<select id="protocol"><option>&nbsp;5</option></select>', None, id="nbsp-is-no-whitespace"),
+        pytest.param('<select id="protocol"><option>1<!-- x -->5</option></select>', 15, id="text-in-parts"),
+        pytest.param('<select id="protocol"><option>1</option>x</select>', 1, id="text-after-the-option"),
+        pytest.param('<select id="protocol"><option>1<optgroup label=x>2</select>', 1, id="optgroup-ends-the-option"),
+        pytest.param('<select id="protocol"><option>1<hr>2</select>', 1, id="hr-ends-the-option"),
+        pytest.param('<select id="protocol"><option>1</select>x', 1, id="text-after-the-select"),
+        # An <input> or <textarea> start tag ends an open select; a later option is outside it.
+        pytest.param(
+            '<select id="protocol"><option value="1"><textarea></textarea><option value="5" selected></select>',
+            1,
+            id="textarea-ends-the-select",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><input><option value="5" selected></select>',
+            1,
+            id="input-ends-the-select",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><keygen><option value="5" selected></select>',
+            1,
+            id="keygen-ends-the-select",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><template></script><option value="5" selected></template>'
+            "</select>",
+            1,
+            id="only-its-own-end-tag-ends-a-template",
+        ),
+        # Inside an open select a browser ignores another text-only element or a <style>: what follows is markup.
+        *(
+            pytest.param(
+                f'<select id="protocol"><option value="1"><{tag}><option value="5" selected></{tag}></select>',
+                5,
+                id=f"{tag}-in-the-select-is-ignored",
+            )
+            for tag in ("title", "xmp", "iframe", "noembed", "noframes", "style", "svg", "math")
+        ),
+        pytest.param(
+            '<svg><select id="protocol"><option value="5" selected></select></svg>'
+            '<select id="protocol"><option value="1" selected></select>',
+            1,
+            id="select-in-an-svg",
+        ),
+        pytest.param(
+            '<svg><foreignObject><select id="protocol"><option value="5" selected></select></foreignObject></svg>',
+            5,
+            id="select-in-a-foreign-object",
+        ),
+        pytest.param(
+            '<svg><foreignObject><div><svg></div><select id="protocol"><option value="5" selected></select>'
+            '</foreignObject></svg><select id="protocol"><option value="1" selected></select>',
+            5,
+            id="select-after-an-end-tag-that-ends-the-inner-svg",
+        ),
+        pytest.param(
+            '<table><tr><td><select id="protocol"><option value="1"></td><option value="2" selected></select></table>',
+            1,
+            id="cell-end-tag-ends-the-select",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><plaintext><option value="5" selected></select>',
+            5,
+            id="plaintext-in-the-select-is-ignored",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><script><option value="5" selected></script></select>',
+            1,
+            id="script-in-the-select-stays-source",
+        ),
+        pytest.param('<select id="protocol"><option value="0000000001" selected></select>', 1, id="leading-zeros"),
+        pytest.param(
+            '<select id="protocol"><option value="' + "0" * 5000 + '2" selected></select>', 2, id="many-leading-zeros"
+        ),
+        pytest.param('<select id="protocol"><option value="0000000000" selected></select>', 0, id="only-zeros"),
+        # An option's text leaves out script source but keeps a title's text; </hr> and a stray </optgroup> are ignored.
+        pytest.param(
+            '<select id="protocol"><option>1<script>5</script></option></select>', 1, id="script-in-the-option"
+        ),
+        pytest.param(
+            '<select id="protocol"><option>1<script>5</script>7</option></select>', 17, id="text-after-the-script"
+        ),
+        pytest.param(
+            '<select id="protocol"><option>1<template>5</template></option></select>', 1, id="template-in-the-option"
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"><template><option value="5" selected></template></select>',
+            1,
+            id="option-in-a-template",
+        ),
+        pytest.param(
+            '<template><select id="protocol"><option value="5" selected></select></template>'
+            '<select id="protocol"><option value="1" selected></select>',
+            1,
+            id="select-in-a-template",
+        ),
+        # A browser ignores the slash of <script/>: the rest of the page is its source.
+        pytest.param(
+            '<script/><select id="protocol"><option value="1" selected></select>', None, id="self-closing-script"
+        ),
+        pytest.param('<select id="protocol"><option>1<title>5</title></option></select>', 15, id="title-in-the-option"),
+        pytest.param('<select id="protocol"><option>1</hr>5</option></select>', 15, id="hr-end-tag-is-ignored"),
+        pytest.param('<select id="protocol"><option>1</optgroup>5</option></select>', 15, id="stray-optgroup-end-tag"),
+        pytest.param(
+            '<select id="protocol"><optgroup><option>1</optgroup>5</select>', 1, id="optgroup-end-tag-ends-the-option"
+        ),
+        # Without a selected option a browser shows the first enabled one; a list box shows none.
+        pytest.param(
+            '<select id="protocol"><option value="0" disabled><option value="1"></select>', 1, id="skips-disabled"
+        ),
+        pytest.param(
+            '<select id="protocol"><optgroup disabled><option value="0"></optgroup><option value="1"></select>',
+            1,
+            id="skips-a-disabled-group",
+        ),
+        pytest.param(
+            '<select id="protocol"><optgroup disabled><option value="0"><optgroup><option value="1"></select>',
+            1,
+            id="next-group-ends-the-disabled-one",
+        ),
+        pytest.param(
+            '<select id="protocol"><optgroup disabled><option value="0"><hr><option value="1"></select>',
+            1,
+            id="hr-ends-the-disabled-group",
+        ),
+        pytest.param(
+            '<optgroup disabled><select id="protocol"><option value="0"><option value="1"></select>',
+            0,
+            id="group-outside-the-select",
+        ),
+        pytest.param(
+            '<select><optgroup disabled></select><select id="protocol"><option value="0"></select>',
+            0,
+            id="group-of-another-select",
+        ),
+        pytest.param('<select id="protocol"><option value="0" disabled></select>', None, id="only-disabled"),
+        pytest.param(
+            '<select id="protocol"><option value="0" disabled selected><option value="1"></select>',
+            0,
+            id="selected-disabled-counts",
+        ),
+        pytest.param('<select id="protocol" size="2"><option value="1"></select>', None, id="list-box"),
+        pytest.param('<select id="protocol" size=" +3rows"><option value="1"></select>', None, id="list-box-size-text"),
+        pytest.param(
+            '<select id="protocol" size="2"><option value="1" selected></select>', 1, id="list-box-with-selected"
+        ),
+        pytest.param('<select id="protocol" size="1"><option value="1"></select>', 1, id="size-one"),
+        pytest.param('<select id="protocol" size="0"><option value="1"></select>', 1, id="size-zero"),
+        pytest.param('<select id="protocol" size="001"><option value="1"></select>', 1, id="size-zero-padded-one"),
+        pytest.param('<select id="protocol" size="x"><option value="1"></select>', 1, id="size-invalid"),
+        pytest.param('<select id="protocol" size="-2"><option value="1"></select>', 1, id="size-negative"),
+        # A browser ignores the slash of a start tag: <select/> and <option/> open their element.
+        pytest.param('<select id="protocol"/><option value="1"></select>', 1, id="self-closing-select-opens-it"),
+        pytest.param('<select id="protocol"><option/>1</select>', 1, id="self-closing-option-keeps-its-text"),
+        # The text after the first enabled option belongs to the next option, which no longer counts.
+        pytest.param('<select id="protocol"><option>1</option><option>x</option></select>', 1, id="later-option-text"),
+        pytest.param('<select id="protocol"><option>1<option>x</select>', 1, id="later-option-text-unclosed"),
+        pytest.param(
+            '<select id="protocol"><option>1</option><option selected>5</option></select>',
+            5,
+            id="text-of-selected-after-first-enabled",
+        ),
+        pytest.param(
+            '<select id="protocol"><option>1<option selected>2<option selected>5</select>',
+            5,
+            id="text-of-last-selected-replaces-earlier",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"></select>'
+            '<select id="protocol"><option value="5" selected></select>',
+            1,
+            id="second-protocol-select-is-ignored",
+        ),
     ],
 )
 async def test_get_webio_command_form_reads_protocol(
@@ -885,10 +1943,13 @@ async def test_get_webio_command_form_reads_protocol(
         ('<option value="٣" selected>', "'٣'"),
         ('<option value="-1" selected>', "'-1'"),
         ('<option value="" selected>', "''"),
-        ("<option selected>", "None"),
+        ("<option selected>", "'HTTPS'"),  # without a value attribute the option's text is its value
         ("<option value=1=2 selected>", "'1=2'"),  # an unquoted value keeps its "="
         # The last selected option counts, even when an earlier one has a number.
         ('<option value="0" selected>HTTP</option><option value="x" selected>', "'x'"),
+        ('<option value="1234567890" selected>', "'1234567890'"),  # no protocol is that large
+        # int() refuses more than 4300 digits; the value is shown capped.
+        ('<option value="' + "9" * 5000 + '" selected>', "'" + "9" * 199 + "..."),
     ],
 )
 async def test_get_webio_command_form_non_numeric_protocol_warns(
@@ -902,7 +1963,7 @@ async def test_get_webio_command_form_non_numeric_protocol_warns(
 
     assert form == WebioCommandForm(min=0.0, max=1.0, protocol=None)
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.WARNING, f"Web-IO command 1324 has a non-numeric protocol value: {shown}")
+        (logging.WARNING, f"Web-IO command 1324 has an unknown protocol value: {shown}")
     ]
 
 
@@ -911,6 +1972,14 @@ async def test_get_webio_command_form_non_numeric_protocol_warns(
     [
         ("", ["Web-IO command 1324 edit form has no protocol select"]),
         ('<select id="protocol"></select>', ["Web-IO command 1324 protocol select has no option"]),
+        (
+            '<select id="protocol" size="2"><option value="1"></select>',
+            ["Web-IO command 1324 protocol select is a list box without a selected option"],
+        ),
+        (
+            '<select id="protocol"><option value="1" disabled></select>',
+            ["Web-IO command 1324 protocol select has no enabled option"],
+        ),
         ('<select id="protocol"><option value="1" selected>', ["Web-IO command 1324 protocol select is not closed"]),
         (
             '<select id="protocol"><option value="0" selected><option value="1" selected></select>',
@@ -931,6 +2000,49 @@ async def test_get_webio_command_form_protocol_debug_log(
     assert messages == logged
 
 
+@pytest.mark.parametrize("selected", [False, True], ids=["none-selected", "all-selected"])
+def test_protocol_select_parser_keeps_only_the_options_that_can_be_chosen(selected: bool) -> None:
+    """Only the last selected and the first enabled option count: a select with 20000 options (620 KB) kept 7.8 MB
+    of attributes and text for all of them."""
+    option = '<option value="1" selected>HTTP</option>' if selected else '<option value="1">HTTP</option>'
+    page = '<select id="protocol">' + option * 20_000 + "</select>"
+    tracemalloc.start()
+    try:
+        parser = client_module._ProtocolSelectParser()
+        parser.feed(page)
+        parser.close()
+        kept, _ = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    attributes = {"value": "1", "selected": ""} if selected else {"value": "1"}
+    assert (parser.options, parser.selections) == (20_000, 20_000 if selected else 0)
+    kept_options = [parser.first_enabled, parser.selected]
+    assert [None if option is None else (option.attributes, option.text) for option in kept_options] == [
+        (attributes, "HTTP"),
+        (attributes, "HTTP") if selected else None,
+    ]
+    assert kept < len(page) // 100
+
+
+def test_protocol_select_parser_keeps_option_text_split_by_comments_compactly() -> None:
+    """The text of a chosen option that comments split into 100000 chunks: a list of the chunks peaked at 5.7 times
+    the page, the text itself takes a fifth of it."""
+    page = '<select id="protocol"><option>' + "12<!---->" * 100_000 + "</select>"
+    tracemalloc.start()
+    try:
+        parser = client_module._ProtocolSelectParser()
+        parser.feed(page)
+        parser.close()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert parser.first_enabled is not None
+    assert parser.first_enabled.text == "12" * 100_000
+    assert peak < len(page) // 2
+
+
 # --- markers and KNX objects ------------------------------------------------------------------------
 
 
@@ -945,7 +2057,12 @@ async def test_create_marker(logged_in: ComexioClient, comexio: FakeComexio, bin
 
 @pytest.mark.parametrize(
     ("answer", "error"),
-    [({"ok": False}, ComexioRequestRejectedError), ({"ok": True}, ComexioDataError), ("x", ComexioDataError)],
+    [
+        ({"ok": False}, ComexioRequestRejectedError),
+        ({"ok": True}, ComexioDataError),
+        ("x", ComexioDataError),
+        ({"ok": True, "saved": math.inf}, ComexioDataError),  # int() raises OverflowError, not ValueError
+    ],
 )
 async def test_create_marker_without_id_raises(
     logged_in: ComexioClient, comexio: FakeComexio, answer: Any, error: type[Exception]

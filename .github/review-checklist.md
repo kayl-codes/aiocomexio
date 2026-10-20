@@ -47,6 +47,9 @@ published on PyPI and consumed by the Home Assistant integration
   The documented fallbacks — the generic KNX range when the DPT chain or its `KNX_DPT_ANALOG_RANGES` entry is
   missing, and the identifier-based IO classification when the type row is missing — are intentional and not
   findings unless the diff changes them.
+- **One bad entry does not stop the other classes:** a filter or conversion that runs over every class (markers,
+  IOs, KNX objects) must not fail on malformed data of one class: an invalid value falls back to a default with a
+  warning instead of aborting the upload or build of all the others.
 - **An unknown kind stays unknown:** when the data cannot tell what an entry is (binary or analog, input or output,
   its type), the parsed field is `None`, not a silent default such as `False`/`0`/analog, and every reader of
   that field (e.g. the function plan renderers) handles `None` as unknown. A default turns missing data into a
@@ -63,8 +66,54 @@ published on PyPI and consumed by the Home Assistant integration
 
 - **Numbers from outside:** a float from Comexio or the caller is checked with `math.isfinite` before use; `nan`
   and `inf` pass every `isinstance` check and every `<`/`>` range check (a comparison with `nan` is always false).
+  A handler that catches `ValueError` around `int()`/`float()` also catches `OverflowError`: `int(float("inf"))`
+  and `float(10**400)` raise it, not `ValueError` (`tests/test_conventions.py` enforces this).
 - **Digits in protocol regexes:** write `\d` (SonarQube S6353 wants it instead of `[0-9]`) and compile with
   `re.ASCII`; without it `\d` also matches non-ASCII digits such as `٣`, which Comexio never sends.
+- **HTML forms are read with `html.parser`, not regexes:** a form field (a `<select>`, its `<option>`s, an `<input>`) is
+  read as a browser reads it: attribute values unquoted and entities resolved, the first of two equal attribute names
+  wins, a bare attribute is `""`, a `>` inside a quoted value does not end the tag. An element is matched by its exact
+  `id`/`name` (case included), not a prefix, and the first element of an id counts. Markup inside a `<textarea>`,
+  `<title>` or raw-text element (`<xmp>`, `<iframe>`, `<noembed>`, `<noframes>`, `<noscript>` as scripts run; a
+  `<plaintext>` up to the end of the page) is text, not a field (older 3.13 releases of `html.parser` report it as tags;
+  `_FormParser` in `client.py` skips it), and so is the content of a `<script>` or `<template>`. An SVG or MathML
+  element is no field either (an `<input>` inside `<svg>` is SVG), except inside an integration point such as
+  `<foreignObject>`, whose content is HTML again; a breakout tag such as `<div>` or `</p>` ends the foreign content,
+  `<svg/>` closes itself, and while an HTML element is open inside an integration point a foreign end tag such as
+  `</foreignObject>` is ignored, while the end tag of an open HTML element closes the SVG or MathML elements opened
+  inside it — unless a special element or a scope boundary lies between (`</span>` stops at a `<div>`, `</div>` at an
+  `<object>`; a formatting end tag such as `</b>` reaches past a `<div>` and leaves it open, any heading end tag closes
+  the open heading). The open HTML elements are tracked as a browser tracks them: a start tag closes what it closes
+  implicitly (a `<p>` before a `<div>` or — Comexio's pages declare `<!DOCTYPE html>`, so no quirks mode — a `<table>`;
+  an `<li>` before the next, a cell before the next or a `<caption>`, a `<select>` with the cell it is in, a
+  `<colgroup>` before anything but a `<col>`), opens what a browser inserts (the `<tbody>`/`<tr>` around a cell put
+  straight into a table; a formatting element such as `<i>` that an end tag closed implicitly is reopened before most
+  start tags, `<svg>` included, but not outside the cell or template it was opened in, and no more than three equal
+  ones — same tag and attributes — as the "Noah's Ark" clause keeps), an open `<select>` is a scope
+  boundary, and a table part outside a `<table>` or a `<form>` inside a form opens no element. `<![CDATA[` is a CDATA
+  section only in foreign content; elsewhere it is a bogus comment up to the next `>`. In a single `<select>` (no
+  `multiple`) the last of several `selected` options counts, and without one the first enabled one (not `disabled`, not
+  in a disabled `<optgroup>`) — unless its `size` makes it a list box, which selects none; a `<select multiple>` keeps
+  every selected option and none when none is selected, so a field that holds one value reads it as unknown. An
+  `<option>` without a `value` attribute has its text (whitespace collapsed, the content of a `<script>` or `<template>`
+  left out, a `<title>`'s text kept) as value; `</hr>` and a `</optgroup>` without an open optgroup do not end it, and a
+  `<select>`, `<input>`, `<keygen>` or `<textarea>` start tag inside an open select ends that select; any other
+  text-only start tag, a `<style>`, `<svg>` or `<math>` inside an open select is ignored, so the markup after it still
+  counts. The slash of a start tag is ignored: `<select/>` and `<option/>` open their element. A cut-off answer — a
+  `<select>` without its `</select>`, so its options may be incomplete — reads as unknown, never as the first option:
+  that would be a plausible-looking but wrong value. Void elements such as `<input>` have no end tag and are read as
+  they are; a cut-off `<input>` tag is dropped, so its field reads as unknown too. A regex that tries to cover these
+  cases outgrows SonarQube's regex complexity limit (S5843) and still misses some of them.
+- **Parser work per tag stays bounded:** whatever `_FormParser` does for one tag may search the open elements or the
+  active formatting elements, but only because `_check_depth` keeps both at `_MAX_OPEN_ELEMENTS` (a deeper page
+  raises `ComexioDataError`). A new list that grows with the page, or a search that bypasses that bound, makes a
+  deeply nested page quadratic and blocks the event loop (16000 nested `<b>` took 6.5 s); the nesting tests in
+  `tests/test_client_write.py` cover each list. Their time limits are ratios to a shallower or shorter page, never
+  seconds: a coverage run is several times slower.
+- **Parser memory stays bounded:** a `_FormParser` subclass keeps attributes and text only for the elements that can
+  still decide its result (the protocol select keeps its last selected and first enabled option, not every option);
+  a page with thousands of elements must not grow the parser's state with each one
+  (`test_protocol_select_parser_keeps_only_the_options_that_can_be_chosen` measures it).
 - **Live readings stay at DEBUG:** a WARNING or higher about an unexpected answer to a *value* request (live states,
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
   answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes
@@ -112,6 +161,10 @@ published on PyPI and consumed by the Home Assistant integration
   present where the contract keeps it (e.g. an inactive IO leaves `io` but stays in `io_all` for labels). A test
   that asserts entries are kept compares the complete expected result — `==` on a list, a sorted list or a
   `collections.Counter`, not on a `set`, which hides duplicates — not a subset or a single member.
+- **Global interpreter settings are restored:** a test that changes one (e.g. `sys.set_int_max_str_digits`) does it
+  in a fixture or `try`/`finally`, never bare; the digit limit goes through the `int_max_str_digits` fixture in
+  `conftest.py` (`tests/test_conventions.py` enforces this). A `pytest.mark.parametrize` with an int beyond 4300
+  digits gets explicit `ids=`: `str()`/`repr()` of it raise `ValueError`.
 - **No vacuous loops:** a test that asserts inside a `for` over a result first asserts that the result holds the
   expected entries (`==` on the ids, or at least non-empty and covering every case the loop distinguishes, e.g. a
   binary and an analog IO). Otherwise a regression that drops the entries passes every assertion in the loop (#32).

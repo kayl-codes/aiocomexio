@@ -40,7 +40,7 @@ def _int(value: Any, default: int) -> int:
     """int(value), or default for a missing/non-numeric field."""
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -48,7 +48,7 @@ def _float(value: Any, default: float) -> float:
     """float(value), or default for a missing/non-numeric/non-finite ("nan", "inf") field."""
     try:
         parsed = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return parsed if math.isfinite(parsed) else default
 

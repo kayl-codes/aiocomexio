@@ -171,10 +171,12 @@ def clean_value(val: Any) -> float:
         val = val.replace(",", ".")
     try:
         result = float(val)
-    except (ValueError, TypeError):
+    except (ValueError, OverflowError, TypeError):
         result = math.nan
     if not math.isfinite(result):
-        _LOGGER.warning("Failed to clean value: %s", val)
+        # str() of an int beyond Python's int-to-str digit limit raises; its size says enough.
+        shown = f"an int of {val.bit_length()} bits" if isinstance(val, int) else val
+        _LOGGER.warning("Failed to clean value: %s", shown)
         return 0.0
     return result
 
