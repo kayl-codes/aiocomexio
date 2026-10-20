@@ -1,6 +1,7 @@
 """ComexioClient writes (API values, Web-IO lifecycle, markers) against the fake Comexio server."""
 
 import base64
+import contextlib
 import html
 import json
 import logging
@@ -1419,13 +1420,15 @@ async def test_get_webio_command_range_rejects_a_page_nested_past_the_limit_at_o
     logged_in: ComexioClient, comexio: FakeComexio, nesting: str, depth: int
 ) -> None:
     """Each tag searches the open elements: past the limit the parser stops instead of taking quadratic time (16000
-    nested <b> took 6.5 s, blocking the event loop)."""
-    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, _NESTED_PAGES[nesting](depth) + _FIELD)
+    nested <b> took 6.5 s, blocking the event loop). Rejecting the page takes at most a few times as long as reading
+    the page nested up to the limit."""
+    page = _NESTED_PAGES[nesting](depth) + _FIELD
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, page)
 
-    started = time.perf_counter()
     with pytest.raises(ComexioDataError, match=f"nests more than {client_module._MAX_OPEN_ELEMENTS} elements"):
         await logged_in.get_webio_command_range(1324, 34)
-    assert time.perf_counter() - started < 1
+    limit_page = _NESTED_PAGES[nesting](client_module._MAX_OPEN_ELEMENTS) + _FIELD
+    assert _parse_seconds(page, rejected=True) < 10 * _parse_seconds(limit_page)
 
 
 @pytest.mark.parametrize(
@@ -1481,14 +1484,18 @@ async def test_get_webio_command_range_reads_a_page_nested_near_the_limit_in_lin
     assert _parse_seconds(page(254)) < 10 * _parse_seconds(page(2))
 
 
-def _parse_seconds(page: str) -> float:
-    """The fastest of three form parser runs over page: a ratio of two such times holds on a slow or traced run."""
+def _parse_seconds(page: str, *, rejected: bool = False) -> float:
+    """The fastest of three form parser runs over page: a ratio of two such times holds on a slow or traced run.
+
+    rejected: the parser must reject page as nested too deep.
+    """
     durations = []
     for _ in range(3):
         parser = client_module._FormParser()
         started = time.perf_counter()
-        parser.feed(page)
-        parser.close()
+        with pytest.raises(ComexioDataError, match="nests more than") if rejected else contextlib.nullcontext():
+            parser.feed(page)
+            parser.close()
         durations.append(time.perf_counter() - started)
     return min(durations)
 
