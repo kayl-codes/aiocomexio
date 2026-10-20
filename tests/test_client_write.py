@@ -7,6 +7,7 @@ import logging
 import math
 import re
 import time
+import tracemalloc
 from collections.abc import Awaitable, Callable
 from html.parser import HTMLParser
 from typing import Any
@@ -1438,9 +1439,9 @@ async def test_get_webio_command_range_reopens_at_most_three_equal_formatting_el
     last marker, so an unclosed <b> in every paragraph does not nest the page deeper with each one."""
     comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, repeated * 10_000 + _FIELD)
 
-    started = time.perf_counter()
     assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
-    assert time.perf_counter() - started < 1
+    # Four times the page takes about four times as long (sixteen times if each tag searched a growing list).
+    assert _parse_seconds(repeated * 10_000 + _FIELD) < 8 * _parse_seconds(repeated * 2_500 + _FIELD)
 
 
 async def test_get_webio_command_range_rejects_many_different_implicitly_closed_formatting_elements(
@@ -1457,23 +1458,39 @@ async def test_get_webio_command_range_rejects_many_different_implicitly_closed_
 @pytest.mark.parametrize(
     ("nested", "repeated"),
     [
-        pytest.param("<b>" * 254, "<i></i>", id="formatting-under-formatting"),
-        pytest.param("<b>" + "<div>" * 253, "<x></x>", id="formatting-under-blocks"),
-        pytest.param("<p><object>" + "<div>" * 252, "<div></div>", id="marker-under-blocks"),
-        pytest.param("<span>" * 254, "</i>", id="end-tag-past-the-open-elements"),
-        pytest.param("<svg>" + "<g>" * 253, "<g/>", id="foreign"),
+        pytest.param(lambda depth: "<b>" * depth, "<i></i>", id="formatting-under-formatting"),
+        pytest.param(lambda depth: "<b>" + "<div>" * (depth - 1), "<x></x>", id="formatting-under-blocks"),
+        pytest.param(lambda depth: "<p><object>" + "<div>" * (depth - 2), "<div></div>", id="marker-under-blocks"),
+        pytest.param(lambda depth: "<span>" * depth, "</i>", id="end-tag-past-the-open-elements"),
+        pytest.param(lambda depth: "<svg>" + "<g>" * (depth - 1), "<g/>", id="foreign"),
     ],
 )
 async def test_get_webio_command_range_reads_a_page_nested_near_the_limit_in_linear_time(
-    logged_in: ComexioClient, comexio: FakeComexio, nested: str, repeated: str
+    logged_in: ComexioClient, comexio: FakeComexio, nested: Callable[[int], str], repeated: str
 ) -> None:
-    """Tag after tag at nearly the most open elements: about 50 KB parse in about 0.1 s, not seconds."""
-    closed = "</svg>" if nested.startswith("<svg>") else ""
-    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, nested + repeated * (50_000 // len(repeated)) + closed + _FIELD)
+    """Tag after tag at nearly the most open elements: about 50 KB parse at most a few times slower than with two
+    open elements, not seconds (a search of all open elements for every tag)."""
 
-    started = time.perf_counter()
+    def page(depth: int) -> str:
+        closed = "</svg>" if repeated == "<g/>" else ""
+        return nested(depth) + repeated * (50_000 // len(repeated)) + closed + _FIELD
+
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, page(254))
+
     assert await logged_in.get_webio_command_range(1324, 34) == (-5.0, None)
-    assert time.perf_counter() - started < 1
+    assert _parse_seconds(page(254)) < 10 * _parse_seconds(page(2))
+
+
+def _parse_seconds(page: str) -> float:
+    """The fastest of three form parser runs over page: a ratio of two such times holds on a slow or traced run."""
+    durations = []
+    for _ in range(3):
+        parser = client_module._FormParser()
+        started = time.perf_counter()
+        parser.feed(page)
+        parser.close()
+        durations.append(time.perf_counter() - started)
+    return min(durations)
 
 
 @pytest.mark.skipif(not client_module._HTML_PARSER_SCRIPTING, reason="html.parser cannot read a <noscript> as raw text")
@@ -1877,6 +1894,25 @@ _RANGE_FIELDS = '<input id="min_cmd_io_0" value="0"><input id="max_cmd_io_0" val
         # A browser ignores the slash of a start tag: <select/> and <option/> open their element.
         pytest.param('<select id="protocol"/><option value="1"></select>', 1, id="self-closing-select-opens-it"),
         pytest.param('<select id="protocol"><option/>1</select>', 1, id="self-closing-option-keeps-its-text"),
+        # The text after the first enabled option belongs to the next option, which no longer counts.
+        pytest.param('<select id="protocol"><option>1</option><option>x</option></select>', 1, id="later-option-text"),
+        pytest.param('<select id="protocol"><option>1<option>x</select>', 1, id="later-option-text-unclosed"),
+        pytest.param(
+            '<select id="protocol"><option>1</option><option selected>5</option></select>',
+            5,
+            id="text-of-selected-after-first-enabled",
+        ),
+        pytest.param(
+            '<select id="protocol"><option>1<option selected>2<option selected>5</select>',
+            5,
+            id="text-of-last-selected-replaces-earlier",
+        ),
+        pytest.param(
+            '<select id="protocol"><option value="1"></select>'
+            '<select id="protocol"><option value="5" selected></select>',
+            1,
+            id="second-protocol-select-is-ignored",
+        ),
     ],
 )
 async def test_get_webio_command_form_reads_protocol(
@@ -1955,6 +1991,28 @@ async def test_get_webio_command_form_protocol_debug_log(
 
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG and "protocol" in r.getMessage()]
     assert messages == logged
+
+
+@pytest.mark.parametrize("selected", [False, True], ids=["none-selected", "all-selected"])
+def test_protocol_select_parser_keeps_only_the_options_that_can_be_chosen(selected: bool) -> None:
+    """Only the last selected and the first enabled option count: a select with 20000 options (620 KB) kept 7.8 MB
+    of attributes and text for all of them."""
+    option = '<option value="1" selected>HTTP</option>' if selected else '<option value="1">HTTP</option>'
+    page = '<select id="protocol">' + option * 20_000 + "</select>"
+    tracemalloc.start()
+    try:
+        parser = client_module._ProtocolSelectParser()
+        parser.feed(page)
+        parser.close()
+        kept, _ = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    attributes = {"value": "1", "selected": ""} if selected else {"value": "1"}
+    assert (parser.options, parser.selections) == (20_000, 20_000 if selected else 0)
+    assert parser.selected == (client_module._Option(attributes, ["HTTP"]) if selected else None)
+    assert parser.first_enabled == client_module._Option(attributes, ["HTTP"])
+    assert kept < len(page) // 100
 
 
 # --- markers and KNX objects ------------------------------------------------------------------------

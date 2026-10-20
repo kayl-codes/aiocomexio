@@ -2623,14 +2623,25 @@ class _CommandRangeParser(_FormParser):
             self.fields.setdefault(field, attributes.get("value"))
 
 
+class _Option(NamedTuple):
+    attributes: dict[str, str]
+    chunks: list[str]  # its text chunks, joined once it is chosen
+
+    @property
+    def text(self) -> str:
+        return "".join(self.chunks)
+
+
 class _ProtocolSelectParser(_FormParser):
     """The <option>s of a page's first <select id="protocol">, read as a browser does.
 
     Attribute values come unquoted with entities resolved, the first of a name wins and a bare one is "";
-    a ">" inside a quoted value does not end its tag. options holds each option's attributes, texts its text and
-    disabled whether it or its <optgroup> is disabled. closed says the select ended (see _FormParser), so its options
-    are complete (a cut-off answer drops a half-read option tag); multiple says it allows several selected options
-    and listbox that its size shows more than one row, so it selects no option by default.
+    a ">" inside a quoted value does not end its tag. options counts the options and selections the selected ones;
+    selected is the last selected option and first_enabled the first one that neither it nor its <optgroup> disables.
+    Only those two keep their attributes and text, so a select with many options holds no more than two of them.
+    closed says the select ended (see _FormParser), so its options are complete (a cut-off answer drops a half-read
+    option tag); multiple says it allows several selected options and listbox that its size shows more than one row,
+    so it selects no option by default.
     """
 
     def __init__(self) -> None:
@@ -2639,11 +2650,12 @@ class _ProtocolSelectParser(_FormParser):
         self.closed = False
         self.multiple = False
         self.listbox = False
-        self.options: list[dict[str, str]] = []
-        self.texts: list[list[str]] = []  # the text chunks of each option, joined once at the end
-        self.disabled: list[bool] = []
+        self.options = 0
+        self.selections = 0
+        self.selected: _Option | None = None
+        self.first_enabled: _Option | None = None
         self._inside = False  # the open select is the protocol select
-        self._in_option = False
+        self._chunks: list[str] | None = None  # the text chunks of the open option, if it is kept
         self._group: bool | None = None  # whether the open <optgroup> is disabled; None: no optgroup is open
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
@@ -2662,28 +2674,41 @@ class _ProtocolSelectParser(_FormParser):
     def _start_option_ending_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag != "option":  # an <optgroup> outside the protocol select does not group its options
             self._group = "disabled" in attributes if tag == "optgroup" and self._inside else None
-        self._in_option = tag == "option" and self._inside
-        if self._in_option:
-            self.options.append(attributes)
-            self.texts.append([])
-            self.disabled.append("disabled" in attributes or bool(self._group))
+        self._chunks = None
+        if tag == "option" and self._inside:
+            self._start_option(attributes)
+
+    def _start_option(self, attributes: dict[str, str]) -> None:
+        self.options += 1
+        selected = "selected" in attributes
+        first_enabled = self.first_enabled is None and not ("disabled" in attributes or self._group)
+        if not (selected or first_enabled):
+            return  # neither selected nor the first enabled option: it is never the chosen one
+        option = _Option(attributes, [])
+        self._chunks = option.chunks
+        if selected:
+            self.selections += 1
+            self.selected = option
+        if first_enabled:
+            self.first_enabled = option
 
     def handle_form_endtag(self, tag: str) -> None:
         # A browser ignores </hr>, and </optgroup> without an open optgroup; </option> and </optgroup> end the option.
         if tag == "option":
-            self._in_option = False
+            self._chunks = None
         elif tag == "optgroup" and self._group is not None:
-            self._in_option = False
+            self._chunks = None
             self._group = None
 
     def handle_data(self, data: str) -> None:
         # The text of a <title> in an option is part of its text; the content of a <script> or <template> is not.
-        if self._in_option and not self._hidden:
-            self.texts[-1].append(data)
+        if self._chunks is not None and not self._hidden:
+            self._chunks.append(data)
 
     def handle_select_end(self) -> None:
         self.closed = self.closed or self._inside
-        self._inside = self._in_option = False
+        self._inside = False
+        self._chunks = None
         self._group = None
 
 
@@ -2695,33 +2720,21 @@ def _shows_several_rows(size: str) -> bool:
     return len(digits) > 1 or digits > "1"
 
 
-class _Option(NamedTuple):
-    attributes: dict[str, str]
-    text: str
-    disabled: bool
-
-
 def _chosen_option(parser: _ProtocolSelectParser, command_id: str | int) -> _Option | None:
     """The option a single select shows: its last selected one, else its first enabled one unless it is a list box."""
-    options = [
-        _Option(attributes, "".join(chunks), disabled)
-        for attributes, chunks, disabled in zip(parser.options, parser.texts, parser.disabled, strict=True)
-    ]
-    selected = [option for option in options if "selected" in option.attributes]
-    if len(selected) > 1:
+    if parser.selections > 1:
         _LOGGER.debug(
-            "Web-IO command %r protocol select has %d selected options, the last counts", command_id, len(selected)
+            "Web-IO command %r protocol select has %d selected options, the last counts", command_id, parser.selections
         )
-    if selected:
-        return selected[-1]
+    if parser.selected is not None:
+        return parser.selected
     if parser.listbox:
         _LOGGER.debug("Web-IO command %r protocol select is a list box without a selected option", command_id)
         return None
-    enabled = [option for option in options if not option.disabled]
-    if not enabled:
+    if parser.first_enabled is None:
         _LOGGER.debug("Web-IO command %r protocol select has no enabled option", command_id)
         return None
-    return enabled[0]
+    return parser.first_enabled
 
 
 def _option_value(attributes: dict[str, str], text: str) -> str:

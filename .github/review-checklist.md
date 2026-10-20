@@ -108,7 +108,12 @@ published on PyPI and consumed by the Home Assistant integration
   active formatting elements, but only because `_check_depth` keeps both at `_MAX_OPEN_ELEMENTS` (a deeper page
   raises `ComexioDataError`). A new list that grows with the page, or a search that bypasses that bound, makes a
   deeply nested page quadratic and blocks the event loop (16000 nested `<b>` took 6.5 s); the nesting tests in
-  `tests/test_client_write.py` cover each list.
+  `tests/test_client_write.py` cover each list. Their time limits are ratios to a shallower or shorter page, never
+  seconds: a coverage run is several times slower.
+- **Parser memory stays bounded:** a `_FormParser` subclass keeps attributes and text only for the elements that can
+  still decide its result (the protocol select keeps its last selected and first enabled option, not every option);
+  a page with thousands of elements must not grow the parser's state with each one
+  (`test_protocol_select_parser_keeps_only_the_options_that_can_be_chosen` measures it).
 - **Live readings stay at DEBUG:** a WARNING or higher about an unexpected answer to a *value* request (live states,
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
   answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes
