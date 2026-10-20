@@ -2017,9 +2017,30 @@ def test_protocol_select_parser_keeps_only_the_options_that_can_be_chosen(select
 
     attributes = {"value": "1", "selected": ""} if selected else {"value": "1"}
     assert (parser.options, parser.selections) == (20_000, 20_000 if selected else 0)
-    assert parser.selected == (client_module._Option(attributes, ["HTTP"]) if selected else None)
-    assert parser.first_enabled == client_module._Option(attributes, ["HTTP"])
+    kept_options = [parser.first_enabled, parser.selected]
+    assert [None if option is None else (option.attributes, option.text) for option in kept_options] == [
+        (attributes, "HTTP"),
+        (attributes, "HTTP") if selected else None,
+    ]
     assert kept < len(page) // 100
+
+
+def test_protocol_select_parser_keeps_option_text_split_by_comments_compactly() -> None:
+    """The text of a chosen option that comments split into 100000 chunks: a list of the chunks peaked at 5.7 times
+    the page, the text itself takes a fifth of it."""
+    page = '<select id="protocol"><option>' + "12<!---->" * 100_000 + "</select>"
+    tracemalloc.start()
+    try:
+        parser = client_module._ProtocolSelectParser()
+        parser.feed(page)
+        parser.close()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert parser.first_enabled is not None
+    assert parser.first_enabled.text == "12" * 100_000
+    assert peak < len(page) // 2
 
 
 # --- markers and KNX objects ------------------------------------------------------------------------

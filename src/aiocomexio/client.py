@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from html.parser import HTMLParser
 from http import HTTPStatus
+from io import StringIO
 from itertools import repeat
 from operator import attrgetter, is_
 from typing import Any, NamedTuple, Self, TypeIs
@@ -2625,11 +2626,12 @@ class _CommandRangeParser(_FormParser):
 
 class _Option(NamedTuple):
     attributes: dict[str, str]
-    chunks: list[str]  # its text chunks, joined once it is chosen
+    # Its text, written as it comes: a list of the chunks a comment splits it into would hold an object per chunk.
+    buffer: StringIO
 
     @property
     def text(self) -> str:
-        return "".join(self.chunks)
+        return self.buffer.getvalue()
 
 
 class _ProtocolSelectParser(_FormParser):
@@ -2655,7 +2657,7 @@ class _ProtocolSelectParser(_FormParser):
         self.selected: _Option | None = None
         self.first_enabled: _Option | None = None
         self._inside = False  # the open select is the protocol select
-        self._chunks: list[str] | None = None  # the text chunks of the open option, if it is kept
+        self._text: StringIO | None = None  # the text of the open option, if it is kept
         self._group: bool | None = None  # whether the open <optgroup> is disabled; None: no optgroup is open
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
@@ -2674,7 +2676,7 @@ class _ProtocolSelectParser(_FormParser):
     def _start_option_ending_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag != "option":  # an <optgroup> outside the protocol select does not group its options
             self._group = "disabled" in attributes if tag == "optgroup" and self._inside else None
-        self._chunks = None
+        self._text = None
         if tag == "option" and self._inside:
             self._start_option(attributes)
 
@@ -2684,8 +2686,8 @@ class _ProtocolSelectParser(_FormParser):
         first_enabled = self.first_enabled is None and not ("disabled" in attributes or self._group)
         if not (selected or first_enabled):
             return  # neither selected nor the first enabled option: it is never the chosen one
-        option = _Option(attributes, [])
-        self._chunks = option.chunks
+        option = _Option(attributes, StringIO())
+        self._text = option.buffer
         if selected:
             self.selections += 1
             self.selected = option
@@ -2695,20 +2697,20 @@ class _ProtocolSelectParser(_FormParser):
     def handle_form_endtag(self, tag: str) -> None:
         # A browser ignores </hr>, and </optgroup> without an open optgroup; </option> and </optgroup> end the option.
         if tag == "option":
-            self._chunks = None
+            self._text = None
         elif tag == "optgroup" and self._group is not None:
-            self._chunks = None
+            self._text = None
             self._group = None
 
     def handle_data(self, data: str) -> None:
         # The text of a <title> in an option is part of its text; the content of a <script> or <template> is not.
-        if self._chunks is not None and not self._hidden:
-            self._chunks.append(data)
+        if self._text is not None and not self._hidden:
+            self._text.write(data)
 
     def handle_select_end(self) -> None:
         self.closed = self.closed or self._inside
         self._inside = False
-        self._chunks = None
+        self._text = None
         self._group = None
 
 
