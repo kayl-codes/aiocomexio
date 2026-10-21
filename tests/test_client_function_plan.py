@@ -18,6 +18,7 @@ from aiocomexio import (
     ComexioRequestRejectedError,
     ComexioResponseError,
     CreatedFunctionPlan,
+    PlacedModuleBlock,
 )
 from tests.fake_comexio import FUNCTION_MODULE_PATH, LOAD_ELEMENTS_PATH, LOGIN_PAGE, FakeComexio
 
@@ -32,6 +33,8 @@ SAVE_POSITIONS_PATH = "/admin/function_function_module/saveelementspos/"
 DELETE_ELEMENTS_PATH = "/admin/function_function_module/deleteelements/"
 SAVE_COMMENT_PATH = "/admin/function_function_module/savefupcommentelement/"
 SAVE_BLOCK_SETTINGS_PATH = "/admin/function_function_module/savefubbaseconfig/"
+SAVE_SCENE_PATH = "/admin/function_function_module/save_scene/"
+SAVE_QUANTUM_SETTINGS_PATH = "/admin/function_function_module/savecombinedmoduleconfig/"
 
 _HOME = "/admin/function_function_module/home"
 _TIMESTAMP_RE = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z"
@@ -688,6 +691,316 @@ async def test_save_function_plan_block_settings_refuses_bad_arguments_before_se
     assert comexio.received_at("POST", SAVE_BLOCK_SETTINGS_PATH) == []
 
 
+# --- scene blocks and Quantum modules ------------------------------------------------------------
+
+# Synthetic answers in the shape Comexio gives (add_element of a Quantum module lists the new
+# module with its default settings and rules).
+_QUANTUM_ADDED = {
+    "element": {
+        "Id": 7,
+        "TypeId": 2,
+        "DefaultValue": "0;0",
+        "settings": {"31": {"Id": 31, "CombinedModuleId": 7, "Name": "modus", "Value": "shutter"}},
+        "rules": None,
+    },
+    "id": 1201,
+    "ref_id": 7,
+}
+_SCENE_CONFIG = {
+    "name": "Szene Flur",
+    "category": "1",
+    "scene_toggle_off": "0",
+    "allow_save": "2",
+    "common": {"1": {"value": "latch_s_r"}},
+    "scene": {
+        "1": {"name": "Aus", "user_save": True, "default_scene": False, "data": {"1": {"value": "0", "common_id": "1"}}}
+    },
+}
+
+
+async def test_add_function_plan_scene(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_json("POST", ADD_ELEMENT_PATH, {"id": 1200, "ref_id": 3})
+
+    assert await logged_in.add_function_plan_scene(4, x=390, y=405.5) == PlacedModuleBlock(1200, 3)
+
+    (request,) = comexio.received_at("POST", ADD_ELEMENT_PATH)
+    form = dict(request.form)
+    assert re.fullmatch(_TIMESTAMP_RE, form.pop("timestamp"))
+    assert form == {"fubid": "4", "name": "", "ref_id": "-1", "type": "13", "id": "0", "x": "390", "y": "405.5"}
+    assert request.xhr
+
+
+@pytest.mark.parametrize(("central", "element_type"), [(False, "20"), (True, "21")])
+async def test_add_function_plan_quantum_module(
+    logged_in: ComexioClient, comexio: FakeComexio, central: bool, element_type: str
+) -> None:
+    comexio.serve_json("POST", ADD_ELEMENT_PATH, _QUANTUM_ADDED)
+
+    placed = await logged_in.add_function_plan_quantum_module(4, 2, central=central, x=135, y=240)
+
+    assert placed == PlacedModuleBlock(1201, 7)
+    (request,) = comexio.received_at("POST", ADD_ELEMENT_PATH)
+    form = dict(request.form)
+    assert re.fullmatch(_TIMESTAMP_RE, form.pop("timestamp"))
+    assert form == {
+        "fubid": "4",
+        "name": "",
+        "ref_id": "2",
+        "type": element_type,
+        "id": "undefined",
+        "x": "135",
+        "y": "240",
+    }
+
+
+async def test_add_function_plan_scene_accepts_a_digit_string_ref_id(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_json("POST", ADD_ELEMENT_PATH, {"id": "1200", "ref_id": "3"})
+
+    assert await logged_in.add_function_plan_scene(4, x=0, y=0) == PlacedModuleBlock(1200, 3)
+
+
+@pytest.mark.parametrize(
+    ("answer", "error", "match"),
+    [
+        ({"error": "data faulty"}, ComexioRequestRejectedError, "refused"),
+        ({"ref_id": 3}, ComexioDataError, "no id"),
+        ({"id": 1200}, ComexioDataError, "element 1200 was placed, but the answer carries no ref_id"),
+        ({"id": 1200, "ref_id": None}, ComexioDataError, "element 1200 was placed"),
+        ({"id": 1200, "ref_id": 0}, ComexioDataError, "element 1200 was placed"),
+        ({"id": 1200, "ref_id": -1}, ComexioDataError, "element 1200 was placed"),
+        ({"id": 1200, "ref_id": True}, ComexioDataError, "element 1200 was placed"),
+        ({"id": 1200, "ref_id": "neu"}, ComexioDataError, "element 1200 was placed"),
+    ],
+)
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda client: client.add_function_plan_scene(4, x=0, y=0),
+        lambda client: client.add_function_plan_quantum_module(4, 2, x=0, y=0),
+    ],
+)
+async def test_add_module_block_without_both_ids_raises(
+    logged_in: ComexioClient, comexio: FakeComexio, answer: Any, error: type[Exception], match: str, call: PlanCall
+) -> None:
+    comexio.serve_json("POST", ADD_ELEMENT_PATH, answer)
+
+    with pytest.raises(error, match=match):
+        await call(logged_in)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"type_id": 0}, ValueError),
+        ({"type_id": -2}, ValueError),
+        ({"type_id": "2"}, TypeError),
+        ({"type_id": True}, TypeError),
+        ({"type_id": 2, "central": 1}, TypeError),
+        ({"type_id": 2, "central": None}, TypeError),
+    ],
+)
+async def test_add_function_plan_quantum_module_refuses_bad_arguments_before_sending(
+    logged_in: ComexioClient, comexio: FakeComexio, kwargs: dict[str, Any], error: type[Exception]
+) -> None:
+    with pytest.raises(error):
+        await logged_in.add_function_plan_quantum_module(4, x=0, y=0, **kwargs)
+    assert comexio.received_at("POST", ADD_ELEMENT_PATH) == []
+
+
+async def test_save_function_plan_scene(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_json("POST", SAVE_SCENE_PATH, {"result": 1, "io": {"in": [], "out": []}})
+
+    await logged_in.save_function_plan_scene(3, {**_SCENE_CONFIG, "id": "99"})
+
+    (request,) = comexio.received_at("POST", SAVE_SCENE_PATH)
+    assert request.form["id"] == "3"
+    # The config's own id is the scene saved to, whatever the caller's copy said.
+    assert json.loads(request.form["json"]) == {**_SCENE_CONFIG, "id": "3"}
+    assert request.xhr
+
+
+@pytest.mark.parametrize("result", [1, "1"])
+async def test_save_function_plan_scene_accepts_string_or_int_flag(
+    logged_in: ComexioClient, comexio: FakeComexio, result: Any
+) -> None:
+    comexio.serve_json("POST", SAVE_SCENE_PATH, {"result": result})
+
+    await logged_in.save_function_plan_scene(3, _SCENE_CONFIG)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"result": 0},
+        {"result": True},
+        {"result": 1.0},
+        {"result": 1, "error": "x"},
+        {"result": 1, "error": None},
+        {"error": True, "error_text": "Name fehlt"},
+        {},
+    ],
+)
+async def test_save_function_plan_scene_unconfirmed_is_rejected(
+    logged_in: ComexioClient, comexio: FakeComexio, answer: dict[str, Any]
+) -> None:
+    comexio.serve_json("POST", SAVE_SCENE_PATH, answer)
+
+    with pytest.raises(ComexioRequestRejectedError, match="scene 3 was not confirmed"):
+        await logged_in.save_function_plan_scene(3, _SCENE_CONFIG)
+
+
+def _deeply_nested() -> dict[str, Any]:
+    config: dict[str, Any] = {"name": "x"}
+    for _ in range(5000):
+        config = {"scene": config}
+    return config
+
+
+def _circular() -> dict[str, Any]:
+    config: dict[str, Any] = {"name": "x"}
+    config["scene"] = config
+    return config
+
+
+@pytest.mark.parametrize(
+    ("scene_id", "config", "error", "match"),
+    [
+        ("3", _SCENE_CONFIG, TypeError, "scene_id"),
+        (True, _SCENE_CONFIG, TypeError, "scene_id"),
+        (0, _SCENE_CONFIG, ValueError, "scene_id must be a positive id"),
+        (-1, _SCENE_CONFIG, ValueError, "scene_id must be a positive id"),
+        # An empty config would delete every channel and scene.
+        (3, {}, ValueError, "No scene config given"),
+        (3, None, TypeError, "must be a mapping"),
+        (3, [_SCENE_CONFIG], TypeError, "must be a mapping"),
+        (3, {"name": object()}, TypeError, "not JSON-serializable"),
+        (3, {"value": float("nan")}, TypeError, "not JSON-serializable"),
+        # json.dumps would turn these keys into "1" / "null" silently.
+        (3, {"scene": {1: {"name": "Aus"}}}, TypeError, "not a str"),
+        (3, {"scene": [{None: "x"}]}, TypeError, "not a str"),
+        (3, _circular(), TypeError, "not JSON-serializable"),
+        (3, _deeply_nested(), TypeError, "not JSON-serializable"),
+    ],
+)
+async def test_save_function_plan_scene_refuses_bad_arguments_before_sending(
+    logged_in: ComexioClient, comexio: FakeComexio, scene_id: Any, config: Any, error: type[Exception], match: str
+) -> None:
+    with pytest.raises(error, match=match):
+        await logged_in.save_function_plan_scene(scene_id, config)
+    assert comexio.received_at("POST", SAVE_SCENE_PATH) == []
+
+
+async def test_save_function_plan_scene_leaves_the_callers_config_alone(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_json("POST", SAVE_SCENE_PATH, {"result": 1})
+    config = {**_SCENE_CONFIG, "id": "99"}
+
+    await logged_in.save_function_plan_scene(3, config)
+
+    assert config == {**_SCENE_CONFIG, "id": "99"}
+
+
+async def test_save_function_plan_quantum_settings(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_json("POST", SAVE_QUANTUM_SETTINGS_PATH, {"saved": 1, "data": [], "ref_data": {}})
+
+    await logged_in.save_function_plan_quantum_settings(
+        1201, 7, {"modus": "jalousie", "min_stay": "1.8"}, name="Q Flur"
+    )
+
+    (request,) = comexio.received_at("POST", SAVE_QUANTUM_SETTINGS_PATH)
+    form = dict(request.form)
+    assert re.fullmatch(_TIMESTAMP_RE, form.pop("timestamp"))
+    assert form == {"id": "1201", "element_name": "Q Flur", "7_modus": "jalousie", "7_min_stay": "1.8"}
+    assert request.xhr
+
+
+async def test_save_function_plan_quantum_settings_without_name_or_central(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_json("POST", SAVE_QUANTUM_SETTINGS_PATH, {"saved": 1})
+
+    await logged_in.save_function_plan_quantum_settings(1201, 7, {"modus": "shutter"})
+
+    (request,) = comexio.received_at("POST", SAVE_QUANTUM_SETTINGS_PATH)
+    form = dict(request.form)
+    form.pop("timestamp")
+    assert form == {"id": "1201", "7_modus": "shutter"}
+
+
+async def test_save_function_plan_quantum_settings_of_a_central_module(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_json("POST", SAVE_QUANTUM_SETTINGS_PATH, {"saved": "1"})
+
+    await logged_in.save_function_plan_quantum_settings(1202, 5, {"central_lock": "false"}, central=True)
+
+    (request,) = comexio.received_at("POST", SAVE_QUANTUM_SETTINGS_PATH)
+    form = dict(request.form)
+    form.pop("timestamp")
+    assert form == {"id": "1202", "5_central_lock": "false", "central_module": "true"}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"saved": 0},
+        {"saved": True},
+        {"saved": 1.0},
+        {"saved": "true"},
+        {"saved": 1, "error": "x"},
+        {"error_text": "x"},
+        {},
+    ],
+)
+async def test_save_function_plan_quantum_settings_unconfirmed_is_rejected(
+    logged_in: ComexioClient, comexio: FakeComexio, answer: dict[str, Any]
+) -> None:
+    comexio.serve_json("POST", SAVE_QUANTUM_SETTINGS_PATH, answer)
+
+    with pytest.raises(ComexioRequestRejectedError, match="not confirmed") as excinfo:
+        await logged_in.save_function_plan_quantum_settings(1201, 7, {"modus": "shutter"})
+
+    assert "Quantum module 7 (element 1201)" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("args", "kwargs", "error", "match"),
+    [
+        # No settings would delete every setting of the module.
+        ((1201, 7, {}), {}, ValueError, "No Quantum module settings given"),
+        ((1201, 7, {"": "1"}), {}, ValueError, "setting name must not be empty"),
+        ((1201, 7, {"modus": "x"}), {"central": True, "name": "Q"}, ValueError, "has no name of its own"),
+        ((1201, 7, {"modus": "x"}), {"name": ""}, ValueError, "name must not be empty"),
+        ((1201, 0, {"modus": "x"}), {}, ValueError, "module_id must be a positive id"),
+        ((-5, 7, {"modus": "x"}), {}, ValueError, "element_id must be a positive id"),
+        ((1201, 7, {"time_up": 12}), {}, TypeError, "time_up"),
+        ((1201, 7, {1: "1"}), {}, TypeError, "setting name must be a str"),
+        # Rendering this key would raise ValueError (int-to-str digit limit) before the type check.
+        ((1201, 7, {10**5000: "1"}), {}, TypeError, "setting name must be a str"),
+        ((1201, 7, "modus"), {}, TypeError, "must be a mapping"),
+        ((1201, 7, None), {}, TypeError, "must be a mapping"),
+        ((1201, "7", {"modus": "x"}), {}, TypeError, "module_id"),
+        (("1201", 7, {"modus": "x"}), {}, TypeError, "element_id"),
+        ((1201, 7, {"modus": "x"}), {"central": "true"}, TypeError, "central must be a bool"),
+        ((1201, 7, {"modus": "x"}), {"name": 5}, TypeError, "name"),
+    ],
+)
+async def test_save_function_plan_quantum_settings_refuses_bad_arguments_before_sending(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    error: type[Exception],
+    match: str,
+) -> None:
+    with pytest.raises(error, match=match):
+        await logged_in.save_function_plan_quantum_settings(*args, **kwargs)
+    assert comexio.received_at("POST", SAVE_QUANTUM_SETTINGS_PATH) == []
+
+
 async def test_save_function_plan_connection(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve_json("POST", SAVE_CONNECTION_PATH, {"id": "31"})
 
@@ -786,6 +1099,12 @@ _SETTINGS = {"name": "P", "comment": "", "active": False, "paper_format": "A4", 
         lambda c: c.add_function_plan_comment(4, "t", x=float("nan"), y=0),
         lambda c: c.add_function_plan_comment(4, None, x=0, y=0),
         lambda c: c.add_function_plan_constant(4, True, x=0, y=0),
+        lambda c: c.add_function_plan_scene(4.7, x=0, y=0),
+        lambda c: c.add_function_plan_scene(True, x=0, y=0),
+        lambda c: c.add_function_plan_scene(4, x="10", y=0),
+        lambda c: c.add_function_plan_scene(4, x=0, y=float("nan")),
+        lambda c: c.add_function_plan_quantum_module("4", 2, x=0, y=0),
+        lambda c: c.add_function_plan_quantum_module(4, 2, x=True, y=0),
         lambda c: c.save_function_plan_comment(12, None, width=2),
         lambda c: c.save_function_plan_comment("12", "t", width=2),
         lambda c: c.save_function_plan_connection(4, 4.7, [(56, 0, False)], value_type="binary"),
@@ -887,6 +1206,10 @@ _PLAN_JSON_CALLS: list[tuple[str, PlanCall]] = [
     (ADD_ELEMENT_PATH, lambda client: client.add_function_plan_comment(4, "x", x=0, y=0)),
     (SAVE_COMMENT_PATH, lambda client: client.save_function_plan_comment(5, "x", width=5)),
     (SAVE_BLOCK_SETTINGS_PATH, lambda client: client.save_function_plan_block_settings(5, {"autohide": "1"})),
+    (ADD_ELEMENT_PATH, lambda client: client.add_function_plan_scene(4, x=0, y=0)),
+    (ADD_ELEMENT_PATH, lambda client: client.add_function_plan_quantum_module(4, 2, x=0, y=0)),
+    (SAVE_SCENE_PATH, lambda client: client.save_function_plan_scene(3, {"name": "x"})),
+    (SAVE_QUANTUM_SETTINGS_PATH, lambda client: client.save_function_plan_quantum_settings(5, 2, {"a": "1"})),
     (
         SAVE_CONNECTION_PATH,
         lambda client: client.save_function_plan_connection(4, 5, [(6, 0, False)], value_type="binary"),
