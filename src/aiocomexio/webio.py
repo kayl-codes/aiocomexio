@@ -350,20 +350,21 @@ def build_webio_commands(
     ignored_marker_ids / ignored_knx_ids exclude items the consumer does not expose — they
     need no command pushing their values.
     """
-    commands: list[tuple[WebioClass, dict[str, Any]]] = []
-    for m in parsed_data.get("markers", []):
-        if not _is_ignored(m["id"], ignored_marker_ids):
-            commands.append((WebioClass.MARKER, build_marker_webio_command(m, webhook_path, protocol=protocol)))
+    commands: list[tuple[WebioClass, dict[str, Any]]] = [
+        (WebioClass.MARKER, build_marker_webio_command(m, webhook_path, protocol=protocol))
+        for m in parsed_data.get("markers", [])
+        if not _is_ignored(m["id"], ignored_marker_ids)
+    ]
     for io in parsed_data.get("io", []):
         if io.get("quickbus"):
             commands.append((WebioClass.QUICKBUS, build_quickbus_webio_command(io, webhook_path, protocol=protocol)))
         else:
             commands.append((WebioClass.IO, build_io_webio_command(io, webhook_path, protocol=protocol)))
-    for knx_item in parsed_data.get("knx", []):
-        if not _is_ignored(knx_item["id"], ignored_knx_ids):
-            commands.append(
-                (WebioClass.KNX, build_marker_webio_command(knx_item, webhook_path, WebioClass.KNX, protocol=protocol))
-            )
+    commands.extend(
+        (WebioClass.KNX, build_marker_webio_command(knx_item, webhook_path, WebioClass.KNX, protocol=protocol))
+        for knx_item in parsed_data.get("knx", [])
+        if not _is_ignored(knx_item["id"], ignored_knx_ids)
+    )
     # Collisions are found across all classes, so a per-class upload leaves out the same ones.
     return [cmd for cls, cmd in _without_colliding_names(commands) if webio_class in (None, cls)]
 

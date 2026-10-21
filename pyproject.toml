@@ -62,7 +62,8 @@ line-length = 120
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["ASYNC", "B", "C4", "E", "F", "I", "SIM", "UP", "W"]
+# FURB/PERF/PIE/PLE/PLW/RET/RSE: a local pre-check for Sourcery-style refactorings (PLR/TRY left out as noise).
+select = ["ASYNC", "B", "C4", "E", "F", "FURB", "I", "PERF", "PIE", "PLE", "PLW", "RET", "RSE", "SIM", "UP", "W"]
 
 [tool.mypy]
 python_version = "3.13"
