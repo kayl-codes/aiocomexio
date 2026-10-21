@@ -40,7 +40,7 @@ Pre-alpha. Planned order of the move:
 
 ```bash
 pip install -e ".[dev]"   # once
-ruff check .              # lint (ASYNC, B, C4, E, F, I, SIM, UP, W; py313, line-length 120)
+ruff check .              # lint (ASYNC, B, C4, E, F, FURB, I, PERF, PIE, PLE, PLW, RET, RSE, SIM, UP, W; py313, line-length 120)
 ruff format --check .     # formatting check; drop --check to auto-format
 mypy                      # strict, blocking in CI
 pytest                    # tests; pytest --cov=aiocomexio for coverage

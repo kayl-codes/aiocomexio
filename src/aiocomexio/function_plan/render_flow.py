@@ -316,8 +316,7 @@ def _reorder_row(row_ids: list[str], reference: dict[str, set[str]], position: d
     """Sorts one row in place by the average column position of its neighbors in the adjacent,
     already-fixed row (its barycenter) — nodes with no such neighbor keep their current spot."""
     row_ids.sort(key=lambda eid: _row_barycenter(eid, reference, position))
-    for i, eid in enumerate(row_ids):
-        position[eid] = i
+    position.update({eid: i for i, eid in enumerate(row_ids)})
 
 
 def _row_barycenter(eid: str, reference: dict[str, set[str]], position: dict[str, int]) -> float:

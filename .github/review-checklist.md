@@ -13,7 +13,7 @@ published on PyPI and consumed by the Home Assistant integration
 - Focus on correctness: logic errors, unhandled edge cases in parsing/scraping of Comexio responses, resource
   leaks, silent failures (swallowed exceptions, fallbacks that hide missing or malformed data), and async misuse.
 - Do **not** comment on formatting, import order or line length — ruff (`ruff check` + `ruff format`, line length
-  120, rule sets ASYNC, B, C4, E, F, I, SIM, UP, W) and mypy strict enforce those in CI.
+  120, rule sets ASYNC, B, C4, E, F, FURB, I, PERF, PIE, PLE, PLW, RET, RSE, SIM, UP, W) and mypy strict enforce those in CI.
 - Where a contract guarantees a dict key exists, prefer `data["key"]` over `data.get("key")` so contract violations
   surface instead of being masked.
 
