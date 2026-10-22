@@ -64,6 +64,7 @@ __all__ = [
     "CreatedFunctionPlan",
     "IoAddress",
     "LiveStates",
+    "PlacedModuleBlock",
     "RawConfig",
     "SystemInfo",
     "WebioBaseInfo",
@@ -113,6 +114,8 @@ _PLAN_SAVE_POSITIONS_PATH = "/admin/function_function_module/saveelementspos/"
 _PLAN_DELETE_ELEMENTS_PATH = "/admin/function_function_module/deleteelements/"
 _PLAN_SAVE_COMMENT_PATH = "/admin/function_function_module/savefupcommentelement/"
 _PLAN_SAVE_BLOCK_SETTINGS_PATH = "/admin/function_function_module/savefubbaseconfig/"
+_PLAN_SAVE_SCENE_PATH = "/admin/function_function_module/save_scene/"
+_PLAN_SAVE_QUANTUM_SETTINGS_PATH = "/admin/function_function_module/savecombinedmoduleconfig/"
 
 # The admin page still shows the login form ("Anmeldung") when the session is not logged in.
 _LOGIN_PAGE_MARKER = "Anmeldung"
@@ -329,6 +332,12 @@ _PLAN_DELETED_CONFIRMATION = ("delete", "ok")
 # Element types and the catalog ref_id add_element needs for blocks that have no catalog entry.
 _ELEMENT_TYPE_COMMENT = 14
 _ELEMENT_TYPE_CONSTANT = 16
+_ELEMENT_TYPE_SCENE = 13
+_ELEMENT_TYPE_QUANTUM = 20
+_ELEMENT_TYPE_QUANTUM_CENTRAL = 21
+# add_element creates a new, empty scene for a scene block placed with this ref_id.
+_NEW_SCENE_REF_ID = "-1"
+_REF_ID_KEY = "ref_id"
 _COMMENT_REF_ID = "3"
 # Comexio normalizes a constant's ref_id to 0 once saved, but refuses ref_id 0 on create.
 _CONSTANT_REF_ID = "1"
@@ -377,6 +386,19 @@ class CreatedFunctionPlan:
 
     fub_id: int
     fubs_entry: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class PlacedModuleBlock:
+    """A scene block or Quantum module placed on a plan, and the object Comexio created behind it.
+
+    element_id is the plan element's id, ref_id the id of the new scene or Quantum module (the
+    element's reference ref_id) — what save_function_plan_scene / save_function_plan_quantum_settings
+    write to.
+    """
+
+    element_id: int
+    ref_id: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1444,6 +1466,35 @@ class ComexioClient:
         form = {"name": text, "ref_id": _COMMENT_REF_ID, "type": str(_ELEMENT_TYPE_COMMENT), "id": "0"}
         return await self._add_plan_element(fub_id, form, x, y, what=f"Placing a comment on function plan {fub_id}")
 
+    async def add_function_plan_scene(self, fub_id: int, *, x: float, y: float) -> PlacedModuleBlock:
+        """Place a new scene block on a plan; returns its element id and the id of the scene Comexio created.
+
+        The new scene has Comexio's default content (one scene "Alles Aus", no channels);
+        save_function_plan_scene gives it its config, and with it its pins.
+        """
+        form = {"name": "", _REF_ID_KEY: _NEW_SCENE_REF_ID, "type": str(_ELEMENT_TYPE_SCENE), "id": "0"}
+        return await self._add_module_block(fub_id, form, x, y, what=f"Placing a scene block on function plan {fub_id}")
+
+    async def add_function_plan_quantum_module(
+        self, fub_id: int, type_id: int, *, central: bool = False, x: float, y: float
+    ) -> PlacedModuleBlock:
+        """Place a new Quantum module of type_id on a plan; returns its element id and the new module's id.
+
+        type_id is the module type ($CombinedModuleBaseSettings key, the TypeId of a $FubModules
+        row), not the id of an existing module: Comexio always creates a new module, with that
+        type's default settings and rules. central places the type's central module (element type
+        21) instead of a single one (20).
+        """
+        _require_ints(type_id=type_id)
+        if type_id <= 0:
+            raise ValueError(f"type_id must be a positive Quantum module type, not {type_id}")
+        if not isinstance(central, bool):
+            raise TypeError(f"central must be a bool, not {type(central).__name__}")
+        element_type = _ELEMENT_TYPE_QUANTUM_CENTRAL if central else _ELEMENT_TYPE_QUANTUM
+        form = {"name": "", _REF_ID_KEY: str(type_id), "type": str(element_type), "id": "undefined"}
+        what = f"Placing a Quantum module of type {type_id} (element type {element_type}) on function plan {fub_id}"
+        return await self._add_module_block(fub_id, form, x, y, what=what)
+
     async def save_function_plan_comment(self, element_id: int, text: str, *, width: int) -> None:
         """Save a comment block's text and width (1 = narrow ... 5 = Comexio's "very wide").
 
@@ -1551,6 +1602,84 @@ class ComexioClient:
         result = await self._plan_json(_PLAN_SAVE_BLOCK_SETTINGS_PATH, form, what=what)
         saved_key, saved_value = _PLAN_SAVED_CONFIRMATION
         if str(result.get(saved_key)) != saved_value:
+            raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
+
+    async def save_function_plan_scene(self, scene_id: int, config: Mapping[str, Any]) -> None:
+        """Save a scene block's config the way Comexio's scene dialog does.
+
+        config has the shape of a $CurrentSceneConfig entry (name, category, allow_save,
+        scene_toggle_off, common channels, scenes with their values); its "id" is set to scene_id.
+        It replaces the whole config: channel, scene and value rows without an "id" are created,
+        rows it leaves out are deleted, and Comexio derives the block's pins from it. Raises
+        TypeError for a config that is not a JSON-serializable mapping with str keys, ValueError for
+        a scene id that is not positive or an empty config (it would delete the whole scene; nothing
+        is sent either way) and ComexioRequestRejectedError if Comexio does not confirm the save.
+        """
+        _require_positive_ids(scene_id=scene_id)
+        if not isinstance(config, Mapping):
+            raise TypeError(f"config must be a mapping, not {type(config).__name__}")
+        if not config:
+            raise ValueError("No scene config given")
+        try:
+            if _has_non_str_key(config):
+                raise TypeError("config has a key that is not a str")
+            payload = json.dumps({**config, _ID_KEY: str(scene_id)}, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError, RecursionError) as err:
+            raise TypeError(f"config is not JSON-serializable: {err}") from err
+        what = f"Saving the config of scene {scene_id}"
+        result = await self._plan_json(_PLAN_SAVE_SCENE_PATH, {"id": str(scene_id), "json": payload}, what=what)
+        if "error" in result or str(result.get(_RESULT_KEY)) != "1":
+            raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
+
+    async def save_function_plan_quantum_settings(
+        self,
+        element_id: int,
+        module_id: int,
+        settings: Mapping[str, str],
+        *,
+        central: bool = False,
+        name: str | None = None,
+    ) -> None:
+        """Save a Quantum module's settings the way Comexio's module dialog does.
+
+        element_id is the module's plan element, module_id the module itself (the element's
+        ref_id). settings REPLACES the module's whole setting set: a setting it leaves out is
+        deleted, so pass every setting, not only the changed ones. The module's rule names follow
+        its user_event_N settings; no other rule field is written. central saves a central module
+        (element type 21); name renames a single one (a central module has no name of its own).
+        Raises TypeError / ValueError for bad arguments (nothing is sent; no settings is refused,
+        it would delete them all) and ComexioRequestRejectedError if Comexio does not confirm the save.
+        """
+        _require_positive_ids(element_id=element_id, module_id=module_id)
+        if not isinstance(settings, Mapping):
+            raise TypeError(f"settings must be a mapping of names to values, not {type(settings).__name__}")
+        if not settings:
+            raise ValueError("No Quantum module settings given")
+        # Key types first: a key is rendered into the value check's message.
+        if not all(isinstance(setting, str) for setting in settings):
+            raise TypeError("Every Quantum module setting name must be a str")
+        if "" in settings:
+            raise ValueError("A Quantum module setting name must not be empty")
+        _require_strs(**{f"settings[{setting!r}]": value for setting, value in settings.items()})
+        if not isinstance(central, bool):
+            raise TypeError(f"central must be a bool, not {type(central).__name__}")
+        if name is not None:
+            _require_strs(name=name)
+            if not name:
+                raise ValueError("A Quantum module name must not be empty")
+            if central:
+                raise ValueError("A central Quantum module has no name of its own")
+        what = f"Saving {len(settings)} settings of Quantum module {module_id} (element {element_id})"
+        form = {"id": str(element_id)}
+        if name is not None:
+            form["element_name"] = name
+        form |= {f"{module_id}_{setting}": value for setting, value in settings.items()}
+        if central:
+            form["central_module"] = "true"
+        form["timestamp"] = _js_timestamp()
+        result = await self._plan_json(_PLAN_SAVE_QUANTUM_SETTINGS_PATH, form, what=what)
+        saved_key, saved_value = _PLAN_SAVED_CONFIRMATION
+        if "error" in result or str(result.get(saved_key)) != saved_value:
             raise ComexioRequestRejectedError(f"{what} was not confirmed: {_excerpt(result)}")
 
     async def delete_function_plan_elements(self, element_ids: Sequence[int]) -> None:
@@ -1681,10 +1810,30 @@ class ComexioClient:
 
     async def _add_plan_element(self, fub_id: int, form: dict[str, str], x: float, y: float, *, what: str) -> int:
         """add_element with the fields every element shares; returns the new element id."""
+        return _answer_id(await self._add_plan_element_answer(fub_id, form, x, y, what=what), what)
+
+    async def _add_module_block(
+        self, fub_id: int, form: dict[str, str], x: float, y: float, *, what: str
+    ) -> PlacedModuleBlock:
+        """add_element of a scene block or Quantum module: its element id and the created object's id."""
+        result = await self._add_plan_element_answer(fub_id, form, x, y, what=what)
+        element_id = _answer_id(result, what)
+        ref_id = _positive_id(result.get(_REF_ID_KEY))
+        if ref_id is None:
+            # The block is placed already: name it, so the caller can delete it.
+            raise ComexioDataError(
+                f"{what}: element {element_id} was placed, but the answer carries no ref_id: {_excerpt(result)}"
+            )
+        return PlacedModuleBlock(element_id, ref_id)
+
+    async def _add_plan_element_answer(
+        self, fub_id: int, form: dict[str, str], x: float, y: float, *, what: str
+    ) -> dict[str, Any]:
+        """The add_element answer, sent with the fields every element shares."""
         _require_ints(fub_id=fub_id)
         _require_numbers(x=x, y=y)
         form.update({"fubid": str(fub_id), "x": str(x), "y": str(y), "timestamp": _js_timestamp()})
-        return _answer_id(await self._plan_json(_PLAN_ADD_ELEMENT_PATH, form, what=what), what)
+        return await self._plan_json(_PLAN_ADD_ELEMENT_PATH, form, what=what)
 
     async def _plan_json(self, path: str, form: dict[str, str], *, what: str) -> dict[str, Any]:
         """POST one function plan editor action and return its JSON object answer."""
@@ -1914,6 +2063,23 @@ def _require_numbers(**values: Any) -> None:
     _require(
         "finite numbers", lambda value: _is_int(value) or (isinstance(value, float) and math.isfinite(value)), values
     )
+
+
+def _require_positive_ids(**values: Any) -> None:
+    """Raise TypeError for a value that is not an int, ValueError for one that is not positive."""
+    _require_ints(**values)
+    for label, value in values.items():
+        if value <= 0:
+            raise ValueError(f"{label} must be a positive id, not {value}")
+
+
+def _has_non_str_key(value: Any) -> bool:
+    """Whether a JSON-bound value holds a mapping key that is not a str (json.dumps would coerce it)."""
+    if isinstance(value, Mapping):
+        return any(not isinstance(key, str) or _has_non_str_key(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return any(_has_non_str_key(item) for item in value)
+    return False
 
 
 def _require_strs(**values: Any) -> None:
