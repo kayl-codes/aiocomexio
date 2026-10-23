@@ -11,7 +11,8 @@ provide the communication layer of the
 > admin login, read access (including live values of physical IOs and system info — free
 > storage, time server settings, uptime), value writes, the Web-IO
 > lifecycle (including the command protocol, HTTP or HTTPS), marker / KNX object management and
-> function plan editing — plans, elements, wires, block instance settings, run / stop
+> function plan editing — plans, elements, wires, block instance settings, scene blocks and
+> Quantum modules with their configs, run / stop
 > (`ComexioClient`), admin page scraping (`aiocomexio.scrape`), config parsing
 > (`aiocomexio.config`, including Quickbus devices such as Multitouch panels and their IOs), KNX
 > DPT tables (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`, with a separate
