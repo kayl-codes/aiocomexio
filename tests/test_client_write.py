@@ -132,18 +132,19 @@ async def test_set_io_value_percent_encodes_spaces_in_the_extension_name(
     assert request.query["ext"] == "LED-Dimmer A3"
 
 
-@pytest.mark.parametrize(
-    ("call", "target", "query"),
-    [
-        (
-            lambda c: c.set_io_value("LED-Dimmer A3", "Q1", 50),
-            "IO 'Q1' of 'LED-Dimmer A3'",
-            {"action": "set", "value": "50", "ext": "LED-Dimmer A3", "io": "Q1"},
-        ),
-        (lambda c: c.set_marker_value(5, 1), "marker M5", {"action": "set", "value": "1", "marker": "M5"}),
-        (lambda c: c.set_knx_value(3, 1), "KNX object K3", {"action": "set", "value": "1", "knx": "K3"}),
-    ],
-)
+# Every /api/ value write: the call, the target as its messages name it, and the query it sends.
+_SET_VALUE_CALLS = [
+    (
+        lambda c: c.set_io_value("LED-Dimmer A3", "Q1", 50),
+        "IO 'Q1' of 'LED-Dimmer A3'",
+        {"action": "set", "value": "50", "ext": "LED-Dimmer A3", "io": "Q1"},
+    ),
+    (lambda c: c.set_marker_value(5, 1), "marker M5", {"action": "set", "value": "1", "marker": "M5"}),
+    (lambda c: c.set_knx_value(3, 1), "KNX object K3", {"action": "set", "value": "1", "knx": "K3"}),
+]
+
+
+@pytest.mark.parametrize(("call", "target", "query"), _SET_VALUE_CALLS)
 async def test_set_value_not_found_answer_raises_naming_the_target(
     api_client: ComexioClient,
     comexio: FakeComexio,
@@ -207,7 +208,7 @@ async def test_set_value_padded_or_numbered_not_found_answer_raises(
     assert request.query == {"action": "set", "value": "1", "marker": "M5"}
 
 
-@pytest.mark.parametrize("answer", ["error: not_found in table", "", "0", "ok"])
+@pytest.mark.parametrize("answer", ["error: not_found in table", "", "00", "2", "ok"])
 async def test_set_value_unknown_answer_warns_without_raising(
     api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, answer: str
 ) -> None:
@@ -217,9 +218,7 @@ async def test_set_value_unknown_answer_warns_without_raising(
         await api_client.set_marker_value(5, 1)
 
     (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert "Writing marker M5" in record.getMessage()
-    assert "instead of '1'" in record.getMessage()
-    assert (answer or "''") in record.getMessage()
+    assert record.getMessage() == f"Writing marker M5: Comexio answered {answer!r} instead of '0' or '1'"
 
 
 async def test_set_io_value_warning_quotes_names_so_a_newline_cannot_forge_a_log_line(
@@ -237,10 +236,12 @@ async def test_set_io_value_warning_quotes_names_so_a_newline_cannot_forge_a_log
     assert "Writing IO 'Q1\\r' of 'UD 1\\nWARNING forged'" in message
 
 
+# "1" as observed earlier; "0" is what firmware 11.1.5 answers to every stored marker write.
+@pytest.mark.parametrize("answer", [" 1\n", "1", "0", "0\r\n"])
 async def test_set_value_accepted_answer_does_not_warn(
-    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture, answer: str
 ) -> None:
-    comexio.serve_text("GET", API_PATH, " 1\n")
+    comexio.serve_text("GET", API_PATH, answer)
 
     with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
         await api_client.set_marker_value(5, 1)
@@ -248,6 +249,28 @@ async def test_set_value_accepted_answer_does_not_warn(
     assert not caplog.records
     (request,) = comexio.received_at("GET", API_PATH)
     assert request.query == {"action": "set", "value": "1", "marker": "M5"}
+
+
+# All three setters share _api_set, so neither success answer ("0" seen on marker writes) may warn for any.
+@pytest.mark.parametrize("answer", ["0", "0\r\n", "1"])
+@pytest.mark.parametrize(("call", "target", "query"), _SET_VALUE_CALLS)
+async def test_every_set_value_accepts_the_success_answers_without_warning(
+    api_client: ComexioClient,
+    comexio: FakeComexio,
+    caplog: pytest.LogCaptureFixture,
+    call: Callable[[ComexioClient], Awaitable[None]],
+    target: str,
+    query: dict[str, str],
+    answer: str,
+) -> None:
+    comexio.serve_text("GET", API_PATH, answer)
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
+        await call(api_client)
+
+    assert not caplog.records, target
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query == query
 
 
 @pytest.mark.parametrize(("value", "expected"), [(0.5, "0.5"), (-1, "-1"), (50.0, "50.0"), (1, "1")])
