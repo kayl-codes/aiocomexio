@@ -35,6 +35,11 @@ Pre-alpha. Planned order of the move:
    Home Assistant: the caller injects an `aiohttp.ClientSession` (HA Core requirement — never create
    a session inside the library), CPU-bound work is not pushed to a HA executor, and nothing reads
    `hass.config` or a `ConfigEntry`.
+   - Done: `aiocomexio.client.ComexioClient` — RSA admin login and session check, raw config and
+     live values (markers, KNX objects, physical IOs via `get_io_live_states`), system info, uptime,
+     bus workload and extension firmware, value writes (`set_*_value`), the Web-IO lifecycle
+     (class upload, device, commands), marker / KNX object management and function plan editing
+     (plans, elements, wires, block settings, scenes, Quantum modules, run / stop).
 
 ## Commands
 
