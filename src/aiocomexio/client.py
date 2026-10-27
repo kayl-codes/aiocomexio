@@ -312,8 +312,10 @@ _WEBIO_LIST_ID_FIELD = "Id"
 _NOT_RUNNING_SENTINEL_RE = re.compile(r"\d+:not_found", re.ASCII)  # ASCII digits only, like Comexio's ids
 # A plain decimal as dashboard/refresh sends a live value: sign, ASCII digits, optional fraction (comma or dot).
 _PLAIN_DECIMAL_RE = re.compile(r"[+-]?\d+(?:[.,]\d+)?", re.ASCII)
-# What /api/?action=set answers on success (observed live); anything else is logged at WARNING.
-_API_SET_OK_ANSWER = "1"
+# What /api/?action=set answers on success; anything else is logged at WARNING. "1" was observed
+# live earlier, firmware 11.1.5 answers "0" to every write it stores (verified by reading the
+# marker back, 2026-10-27). An unknown target answers "<n>:not_found" instead.
+_API_SET_OK_ANSWERS = ("0", "1")
 
 # save_fub form values: paper format ids and orientation ids as Comexio's plan dialog sends them.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
@@ -888,7 +890,7 @@ class ComexioClient:
     async def set_marker_value(self, marker_id: int, value: float) -> None:
         """Write a marker's value through the /api/ interface.
 
-        Success is only confirmed by the answer "1". A "<n>:not_found" answer raises
+        Success is only confirmed by the answer "0" or "1". A "<n>:not_found" answer raises
         ComexioRequestRejectedError without a warning; any other unexpected answer is logged at WARNING.
         A non-finite float (nan, inf) raises ValueError.
         """
@@ -898,7 +900,7 @@ class ComexioClient:
     async def set_knx_value(self, knx_id: int, value: float) -> None:
         """Write a KNX object's value through the /api/ interface (query parameter knx=K<id>).
 
-        Success is only confirmed by the answer "1". A "<n>:not_found" answer raises
+        Success is only confirmed by the answer "0" or "1". A "<n>:not_found" answer raises
         ComexioRequestRejectedError without a warning; any other unexpected answer is logged at WARNING.
         A non-finite float (nan, inf) raises ValueError.
         """
@@ -908,7 +910,7 @@ class ComexioClient:
     async def set_io_value(self, ext: str, io: str, value: float) -> None:
         """Write an IO's value through the /api/ interface; ext is the extension name, io its identifier.
 
-        Success is only confirmed by the answer "1". A "<n>:not_found" answer raises
+        Success is only confirmed by the answer "0" or "1". A "<n>:not_found" answer raises
         ComexioRequestRejectedError without a warning; any other unexpected answer is logged at WARNING.
         A non-finite float (nan, inf) raises ValueError.
         """
@@ -1745,10 +1747,15 @@ class ComexioClient:
         # A target Comexio does not know answers "0:not_found" with HTTP 200 — not a stored value.
         if _NOT_RUNNING_SENTINEL_RE.fullmatch(body.strip()):
             raise ComexioRequestRejectedError(f"{what} was not accepted: Comexio answered {_excerpt(body)}")
-        # It is not verified that Comexio answers "1" on every success, so any other answer is only
-        # logged (an empty one included), never raised.
-        if body.strip() != _API_SET_OK_ANSWER:
-            _LOGGER.warning("%s: Comexio answered %s instead of %r", what, _excerpt(body), _API_SET_OK_ANSWER)
+        # The success answers are observations, not a documented contract, so any other answer is
+        # only logged (an empty one included), never raised.
+        if body.strip() not in _API_SET_OK_ANSWERS:
+            _LOGGER.warning(
+                "%s: Comexio answered %s instead of %s",
+                what,
+                _excerpt(body),
+                " or ".join(map(repr, _API_SET_OK_ANSWERS)),
+            )
             return
         _LOGGER.debug("%s: %s", what, _excerpt(body))
 
