@@ -76,6 +76,8 @@ _MODULE_KNX = "11"
 # Key of an extension's Quickbus device table in $FubModules["1"], and of its IO-Id -> device-Id
 # map under the extension's "mapping" (Comexio's internal name for the Quickbus is "lowcan").
 _QUICKBUS_KEY = "lowcan"
+# Key of an IO row's direction flag: 0 = Comexio never writes the IO, 1 = it may.
+_INT_IS_OUTPUT_KEY = "IntIsOutput"
 
 # Entries named in one aggregated warning before the rest is only counted.
 _MAX_LOGGED_ENTRIES = 5
@@ -1045,7 +1047,7 @@ def _int_is_output_direction(io_item: Mapping[str, Any]) -> bool | None:
     Multitouch gestures (type 134) as not an input, which would make every gesture a writable
     output. A plain IO uses it only to be read-only, see _io_direction.
     """
-    raw = io_item.get("IntIsOutput")
+    raw = io_item.get(_INT_IS_OUTPUT_KEY)
     if isinstance(raw, int) and not isinstance(raw, bool) and raw in (0, 1):
         return raw == 0
     if isinstance(raw, str) and raw in ("0", "1"):
@@ -1069,16 +1071,16 @@ class _QuickbusContext:
         if dev_id is None:
             # A plain IO without the flag is normal; one with an unreadable flag (null included) loses
             # the read-only guard.
-            if "IntIsOutput" in io_item and _int_is_output_direction(io_item) is None:
+            if _INT_IS_OUTPUT_KEY in io_item and _int_is_output_direction(io_item) is None:
                 ident = _short_repr(io_item.get("Identifier"))
-                self.bad_plain_flags.append(f"{ident}: {_short_repr(io_item.get('IntIsOutput'))}")
+                self.bad_plain_flags.append(f"{ident}: {_short_repr(io_item.get(_INT_IS_OUTPUT_KEY))}")
             return None, None
         device = self.devices[dev_id]
         is_input = _int_is_output_direction(io_item)
         if is_input is None:
             # Read-only is the safe side: a wrong guess must never turn a gesture into an output.
             ident = _short_repr(io_item.get("Identifier"))
-            self.bad_flags.append(f"{device['name']} {ident}: {_short_repr(io_item.get('IntIsOutput'))}")
+            self.bad_flags.append(f"{device['name']} {ident}: {_short_repr(io_item.get(_INT_IS_OUTPUT_KEY))}")
             is_input = True
         return device, is_input
 
@@ -1088,7 +1090,7 @@ class _QuickbusContext:
                 "%d Quickbus IOs of extension %s have no usable IntIsOutput flag and are treated as read-only "
                 "inputs: %s",
                 len(self.bad_flags),
-                self.ext_id,
+                _log_safe(self.ext_id),
                 log_excerpt(self.bad_flags),
             )
         if self.bad_plain_flags:
@@ -1096,7 +1098,7 @@ class _QuickbusContext:
                 "%d IOs of extension %s have no usable IntIsOutput flag, their direction comes from the identifier "
                 "and the IO type table: %s",
                 len(self.bad_plain_flags),
-                self.ext_id,
+                _log_safe(self.ext_id),
                 log_excerpt(self.bad_plain_flags),
             )
 

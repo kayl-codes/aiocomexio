@@ -999,10 +999,10 @@ def test_unusable_int_is_output_makes_a_read_only_input(flag: Any, caplog: pytes
 
     assert ios["201"]["is_input"] is True
     assert ios["204"]["is_input"] is True
-    assert (
+    assert [r.getMessage() for r in caplog.records if "Quickbus IOs of extension" in r.getMessage()] == [
         "2 Quickbus IOs of extension 1 have no usable IntIsOutput flag and are treated as read-only inputs: "
         f"MT Flur 'G1': {flag!r}, MT Flur 'R': {flag!r}"
-    ) in caplog.text
+    ]
 
 
 @pytest.mark.parametrize(("flag", "is_input"), [("0", True), ("1", False)])
@@ -1036,7 +1036,7 @@ def test_unusable_int_is_output_of_a_plain_io_is_logged(flag: Any, caplog: pytes
     assert records[0].levelno == logging.WARNING
     assert records[0].getMessage() == (
         "1 IOs of extension 1 have no usable IntIsOutput flag, their direction comes from the identifier and the "
-        f"IO type table: {ios['11']['identifier']!r}: {flag!r}"
+        f"IO type table: 'I1': {flag!r}"
     )
 
 
@@ -1050,7 +1050,10 @@ def test_unusable_int_is_output_flags_of_one_extension_share_one_line(caplog: py
 
     records = _plain_flag_records(caplog)
     assert len(records) == 1
-    assert records[0].getMessage().startswith("2 IOs of extension 1 have no usable IntIsOutput flag")
+    assert records[0].getMessage() == (
+        "2 IOs of extension 1 have no usable IntIsOutput flag, their direction comes from the identifier and the "
+        "IO type table: 'I1': 'yes', 'TL1': 'no'"
+    )
 
 
 @pytest.mark.parametrize("flag", [None, 0, 1, "0", "1"])
@@ -1077,7 +1080,11 @@ def test_unusable_int_is_output_of_a_quickbus_io_stays_out_of_the_plain_io_line(
     with caplog.at_level(logging.WARNING):
         _parse(conf)
 
-    assert "Quickbus IOs of extension 1 have no usable IntIsOutput flag" in caplog.text
+    quickbus_lines = [r.getMessage() for r in caplog.records if "Quickbus IOs of extension" in r.getMessage()]
+    assert quickbus_lines == [
+        "1 Quickbus IOs of extension 1 have no usable IntIsOutput flag and are treated as read-only inputs: "
+        f"MT Flur 'G1': {flag!r}"
+    ]
     assert _plain_flag_records(caplog) == []
 
 
