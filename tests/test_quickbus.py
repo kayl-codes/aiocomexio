@@ -1067,11 +1067,12 @@ def test_plain_io_with_a_usable_or_no_int_is_output_is_not_logged(flag: Any, cap
     assert _plain_flag_records(caplog) == []
 
 
+@pytest.mark.parametrize("flag", ["yes", None])
 def test_unusable_int_is_output_of_a_quickbus_io_stays_out_of_the_plain_io_line(
-    caplog: pytest.LogCaptureFixture,
+    flag: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     conf = load_json_fixture("config_quickbus.json")
-    _base_ext(conf)["inoutput"]["201"]["IntIsOutput"] = "yes"
+    _base_ext(conf)["inoutput"]["201"]["IntIsOutput"] = flag
 
     with caplog.at_level(logging.WARNING):
         _parse(conf)
@@ -1304,7 +1305,9 @@ def _with_type_bounds(v_min: Any, v_max: Any) -> dict[str, Any]:
         (0, "0x10"),
         (0, "inf"),
         (0, "+7"),
-        (0, "٣"),
+        (0, "٣"),  # re.ASCII: \d would match it and int() reads it as 3
+        (0, "٣.٥"),
+        (0, "５"),  # fullwidth digit, also accepted by int()
         (0, "9" * 5000),
         (0, "9" * 400 + ".5"),
         ("-5", "abc"),
@@ -1325,6 +1328,8 @@ def _with_type_bounds(v_min: Any, v_max: Any) -> dict[str, Any]:
         "inf-text",
         "plus-text",
         "arabic-digit-text",
+        "arabic-decimal-text",
+        "fullwidth-digit-text",
         "text-beyond-str-limit",
         "text-beyond-float",
         "numeric-text-with-bad-text",
