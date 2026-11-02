@@ -16,6 +16,7 @@ from aiocomexio.config import (
     is_extension_offline,
     iter_group,
     marker_kind,
+    normalize_io_unit,
     parse_config,
 )
 from aiocomexio.const import MarkerKind, WebioClass
@@ -187,6 +188,14 @@ def test_int_is_output_zero_makes_an_io_read_only(identifier: str, type_id: int,
     (io,) = parse_config(conf, io_types=_DIRECTION_IO_TYPES, io_input_types=_DIRECTION_IO_INPUT_TYPES)["io_all"]
 
     assert io["is_input"] is is_input
+
+
+@pytest.mark.parametrize(
+    ("unit", "expected"),
+    [(" ", ""), (" W ", "W"), ("var", "var"), ("0/1", ""), (" ? ", ""), ("\\u00b0C", "°C"), (None, "")],
+)
+def test_normalize_io_unit(unit: Any, expected: str) -> None:
+    assert normalize_io_unit(unit) == expected
 
 
 def test_io_type_missing_from_the_table_falls_back_to_identifier() -> None:

@@ -325,9 +325,13 @@ def marker_kind(title: str, *, is_marker: bool = True) -> MarkerKind:
 
 
 def normalize_io_unit(unit: Any) -> str:
-    """Normalize Comexio IO unit strings ("\\u00b0C", "0/1", "?", ...); a non-string unit becomes ""."""
+    """Normalize Comexio IO unit strings ("\\u00b0C", "0/1", "?", ...); a non-string unit becomes "".
+
+    Surrounding whitespace is dropped: the Smart Meter's power factor has the unit " ".
+    """
     if not isinstance(unit, str):
         return ""
+    unit = unit.strip()
     if unit in ("\\u00b0C", "°C", "°C", "C"):
         return "°C"
     return "" if unit in ("0/1", "1/0", "?") else unit
