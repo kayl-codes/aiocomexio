@@ -110,7 +110,7 @@ _INPUT_IO_RE = re.compile(r"^(?:I|AI|QI)\d+$")
 _ANALOG_OUTPUT_IO_RE = re.compile(r"^QI\d+$")
 _BINARY_IO_RE = re.compile(r"^[QI]\d+$")
 # A min/max of the IO type table written as text, e.g. "-2147483648" (Smart Meter E1-E3, OS 11.0.2).
-_NUMERIC_TEXT_RE = re.compile(r"-?[0-9]+(?:\.[0-9]+)?")
+_NUMERIC_TEXT_RE = re.compile(r"-?\d+(?:\.\d+)?", re.ASCII)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1067,8 +1067,9 @@ class _QuickbusContext:
         """The Quickbus device of an IO and its is_input; (None, None) for a plain IO."""
         dev_id = self.io_map.get(_strict_id(io_item.get("Id")) or "")
         if dev_id is None:
-            # A plain IO without the flag is normal; one with an unreadable flag loses the read-only guard.
-            if io_item.get("IntIsOutput") is not None and _int_is_output_direction(io_item) is None:
+            # A plain IO without the flag is normal; one with an unreadable flag (null included) loses
+            # the read-only guard.
+            if "IntIsOutput" in io_item and _int_is_output_direction(io_item) is None:
                 ident = _short_repr(io_item.get("Identifier"))
                 self.bad_plain_flags.append(f"{ident}: {_short_repr(io_item.get('IntIsOutput'))}")
             return None, None

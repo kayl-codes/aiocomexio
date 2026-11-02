@@ -1021,7 +1021,7 @@ def test_int_is_output_one_does_not_change_plain_ios() -> None:
     assert _io_all(_parse(conf))["11"]["is_input"] is True
 
 
-@pytest.mark.parametrize("flag", ["yes", 2, 0.0, False])
+@pytest.mark.parametrize("flag", ["yes", 2, 0.0, False, None])
 def test_unusable_int_is_output_of_a_plain_io_is_logged(flag: Any, caplog: pytest.LogCaptureFixture) -> None:
     """A plain IO with an unreadable flag loses the read-only guard of IntIsOutput 0, so the log names it."""
     conf = load_json_fixture("config_quickbus.json")
@@ -1394,7 +1394,9 @@ def test_numeric_text_type_bounds_are_read_as_numbers(
     with caplog.at_level(logging.WARNING):
         result = _with_type_bounds(v_min, v_max)
 
-    assert {(io["min"], io["max"]) for io in result["io_all"]} == {expected}
+    extensions = load_json_fixture("config_quickbus.json")["FubModules"]["1"].values()
+    fixture_ids = {str(io_id) for ext in extensions for io_id in ext["inoutput"]}
+    assert {str(io["id"]): (io["min"], io["max"]) for io in result["io_all"]} == dict.fromkeys(fixture_ids, expected)
     assert {type(io["max"]) for io in result["io_all"]} == {kind}
     assert not [r for r in caplog.records if "unusable min/max" in r.getMessage()]
     analog = next(io for io in result["io"] if not io["is_binary"])
