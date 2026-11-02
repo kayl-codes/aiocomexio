@@ -26,6 +26,9 @@ from .const import (
     NO_NAME_TITLE,
     WEBIO_CLASS_LABEL,
     WEBIO_CLASSES,
+    WEBIO_IO_DEFAULT_MAX_ANALOG,
+    WEBIO_IO_DEFAULT_MAX_BINARY,
+    WEBIO_IO_DEFAULT_MIN,
     MarkerKind,
     WebioClass,
     webio_class_name,
@@ -1208,13 +1211,19 @@ def _type_bounds(type_info: Mapping[str, Any], ext_name: str, ident: str) -> tup
     """(min, max) of an IO from its type row; both None (the Web-IO defaults) if one is unusable.
 
     One bound alone does not make a range: a kept min of 200 with a defaulted max of 100 would
-    turn it upside down. A missing or null bound stays as before (min 0, max 1 or None).
+    turn it upside down. So does a range that is inverted once a null bound becomes its Web-IO
+    default (a missing key counts as min 0 / max 1); a null bound that leaves the range ordered
+    stays None.
     """
     raw = (type_info.get("min", 0), type_info.get("max", 1))
     bounds = (_type_bound(raw[0]), _type_bound(raw[1]))
-    if any(bound is None and value is not None for bound, value in zip(bounds, raw, strict=True)):
+    default_max = WEBIO_IO_DEFAULT_MAX_BINARY if type_info.get("binary", False) else WEBIO_IO_DEFAULT_MAX_ANALOG
+    low = WEBIO_IO_DEFAULT_MIN if bounds[0] is None else bounds[0]
+    high = default_max if bounds[1] is None else bounds[1]
+    if low > high or any(bound is None and value is not None for bound, value in zip(bounds, raw, strict=True)):
         _LOGGER.warning(
-            "IO %s %s: the IO type table has an unusable min/max (%s, %s), the Web-IO command gets the default range",
+            "IO %s %s: the IO type table has an unusable or inverted min/max (%s, %s), the Web-IO command gets the "
+            "default range",
             _log_safe(ext_name),
             _short_repr(ident),
             _short_repr(raw[0]),

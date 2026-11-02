@@ -1320,6 +1320,11 @@ def _with_type_bounds(v_min: Any, v_max: Any) -> dict[str, Any]:
         ("-5", "abc"),
         ("5.", 5),
         (".5", 5),
+        (200, None),  # Web-IO would default the max to 100: Min 200, Max 100
+        ("200", None),
+        (None, -5),  # Web-IO would default the min to 0: Min 0, Max -5
+        (10, 5),
+        ("10", "5"),
     ],
     ids=[
         "text",
@@ -1342,6 +1347,11 @@ def _with_type_bounds(v_min: Any, v_max: Any) -> dict[str, Any]:
         "numeric-text-with-bad-text",
         "trailing-dot-text",
         "leading-dot-text",
+        "null-max-under-kept-min",
+        "null-max-under-kept-text-min",
+        "null-min-above-kept-negative-max",
+        "inverted",
+        "inverted-text",
     ],
 )
 def test_unusable_type_bounds_give_the_default_range(v_min: Any, v_max: Any, caplog: pytest.LogCaptureFixture) -> None:
@@ -1363,7 +1373,7 @@ def test_unusable_type_bounds_give_the_default_range(v_min: Any, v_max: Any, cap
     )
     first = result["io_all"][0]
     assert (
-        f"IO {first['ext_name']} {first['identifier']!r}: the IO type table has an unusable min/max "
+        f"IO {first['ext_name']} {first['identifier']!r}: the IO type table has an unusable or inverted min/max "
         f"({config_module._short_repr(v_min)}, {config_module._short_repr(v_max)}), "
         "the Web-IO command gets the default range"
     ) in [r.getMessage() for r in caplog.records]
@@ -1382,6 +1392,53 @@ def test_unusable_type_bounds_warning_keeps_scraped_names_on_one_line(caplog: py
     assert r"EXT\nERROR forged" in message
     assert r"Q1\rERROR forged" in message
     assert "x" * 500 not in message
+
+
+@pytest.mark.parametrize(
+    ("type_info", "expected", "warned"),
+    [
+        ({"min": 200}, (None, None), True),  # a missing max counts as 1
+        ({"max": -5}, (None, None), True),  # a missing min counts as 0
+        ({"max": 10}, (0, 10), False),
+        ({}, (0, 1), False),
+        ({"min": None, "max": None}, (None, None), False),
+        ({"min": 5, "max": 5}, (5, 5), False),
+        ({"min": 2.5, "max": 2.4}, (None, None), True),
+        ({"min": -10, "max": -5}, (-10, -5), False),
+        ({"max": 0}, (0, 0), False),
+        ({"min": 1}, (1, 1), False),
+        ({"min": None, "max": 1000}, (None, 1000), False),  # Web-IO: 0..1000
+        ({"min": 50, "max": None}, (50, None), False),  # analog, Web-IO: 50..100
+        ({"min": 50, "max": None, "binary": True}, (None, None), True),  # binary, Web-IO would be 50..1
+        ({"min": 100, "max": None}, (100, None), False),  # analog, Web-IO: 100..100
+    ],
+    ids=[
+        "missing-max",
+        "missing-min-negative-max",
+        "missing-min",
+        "no-bounds",
+        "two-null-bounds",
+        "one-point-range",
+        "inverted-float",
+        "negative-range",
+        "missing-min-zero-max",
+        "missing-max-min-one",
+        "null-min-with-kept-max",
+        "null-max-above-kept-analog-min",
+        "null-max-under-kept-binary-min",
+        "null-max-at-analog-default",
+    ],
+)
+def test_type_bounds_without_a_complete_ordered_range(
+    type_info: dict[str, Any], expected: tuple[Any, Any], warned: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A missing bound counts as min 0 / max 1, a null one as its Web-IO default; an inverted range drops both."""
+    with caplog.at_level(logging.WARNING):
+        assert config_module._type_bounds(type_info, "SM1", "E1") == expected
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == (1 if warned else 0)
+    assert all("unusable or inverted min/max (" in message for message in messages)
 
 
 @pytest.mark.parametrize(("bound", "kind"), [(5, int), (-40, int), (2.5, float)])
@@ -1410,7 +1467,7 @@ def test_numeric_text_type_bounds_are_read_as_numbers(
     fixture_ids = {str(io_id) for ext in extensions for io_id in ext["inoutput"]}
     assert {str(io["id"]): (io["min"], io["max"]) for io in result["io_all"]} == dict.fromkeys(fixture_ids, expected)
     assert {type(io["max"]) for io in result["io_all"]} == {kind}
-    assert not [r for r in caplog.records if "unusable min/max" in r.getMessage()]
+    assert not [r for r in caplog.records if "unusable or inverted min/max" in r.getMessage()]
     analog = next(io for io in result["io"] if not io["is_binary"])
     command = build_io_webio_command(analog, _HOOK)
     expected_min, expected_max = expected

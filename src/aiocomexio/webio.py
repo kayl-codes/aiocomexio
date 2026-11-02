@@ -15,6 +15,9 @@ from .config import TYPE_ANALOG, log_excerpt
 from .const import (
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_INT16_DANGER_ZONE,
+    WEBIO_IO_DEFAULT_MAX_ANALOG,
+    WEBIO_IO_DEFAULT_MAX_BINARY,
+    WEBIO_IO_DEFAULT_MIN,
     WEBIO_MARKER_ANALOG_MAX,
     WEBIO_MARKER_ANALOG_MIN,
     WebioClass,
@@ -213,8 +216,8 @@ def _io_command_range(io_item: Mapping[str, Any]) -> tuple[bool, float, float]:
     is_ana = not binary
     raw_min = io_item.get("min")
     raw_max = io_item.get("max")
-    v_min = 0 if raw_min is None else raw_min
-    default_max = 100 if is_ana else 1
+    v_min = WEBIO_IO_DEFAULT_MIN if raw_min is None else raw_min
+    default_max = WEBIO_IO_DEFAULT_MAX_ANALOG if is_ana else WEBIO_IO_DEFAULT_MAX_BINARY
     v_max = default_max if raw_max is None else raw_max
     v_min, v_max = safe_webio_range(v_min, v_max)
     return is_ana, v_min, v_max
