@@ -1031,20 +1031,58 @@ def test_unusable_int_is_output_of_a_plain_io_is_logged(flag: Any, caplog: pytes
         ios = _io_all(_parse(conf))
 
     assert ios["11"]["is_input"] is True
-    assert (
+    records = _plain_flag_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert records[0].getMessage() == (
         "1 IOs of extension 1 have no usable IntIsOutput flag, their direction comes from the identifier and the "
         f"IO type table: {ios['11']['identifier']!r}: {flag!r}"
-    ) in caplog.text
+    )
 
 
-def test_plain_io_without_int_is_output_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+def test_unusable_int_is_output_flags_of_one_extension_share_one_line(caplog: pytest.LogCaptureFixture) -> None:
     conf = load_json_fixture("config_quickbus.json")
-    _base_ext(conf)["inoutput"]["11"].pop("IntIsOutput", None)
+    _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = "yes"
+    _base_ext(conf)["inoutput"]["46"]["IntIsOutput"] = "no"
 
     with caplog.at_level(logging.WARNING):
         _parse(conf)
 
-    assert "IOs of extension 1 have no usable IntIsOutput flag, their direction" not in caplog.text
+    records = _plain_flag_records(caplog)
+    assert len(records) == 1
+    assert records[0].getMessage().startswith("2 IOs of extension 1 have no usable IntIsOutput flag")
+
+
+@pytest.mark.parametrize("flag", [None, 0, 1, "0", "1"])
+def test_plain_io_with_a_usable_or_no_int_is_output_is_not_logged(flag: Any, caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    if flag is None:
+        _base_ext(conf)["inoutput"]["11"].pop("IntIsOutput", None)
+    else:
+        _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = flag
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    assert _plain_flag_records(caplog) == []
+
+
+def test_unusable_int_is_output_of_a_quickbus_io_stays_out_of_the_plain_io_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["201"]["IntIsOutput"] = "yes"
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    assert "Quickbus IOs of extension 1 have no usable IntIsOutput flag" in caplog.text
+    assert _plain_flag_records(caplog) == []
+
+
+def _plain_flag_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """The log records about plain (non-Quickbus) IOs with an unusable IntIsOutput flag."""
+    return [r for r in caplog.records if "IOs of extension" in r.getMessage() and "their direction" in r.getMessage()]
 
 
 def test_legacy_hint_does_not_list_the_quickbus_class(caplog: pytest.LogCaptureFixture) -> None:
