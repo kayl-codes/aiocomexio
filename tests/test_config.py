@@ -175,6 +175,9 @@ _DIRECTION_IO_INPUT_TYPES = {
         ("DI1", 87, None, False),  # no flag: $IOInputTypes as before
         ("DI1", 87, "yes", False),
         ("DI1", 87, True, False),
+        ("DI1", 87, False, False),  # bool is no flag, although False == 0
+        ("DI1", 87, 0.0, False),
+        ("DI1", 87, " 0", False),
         ("DI1", 87, 2, False),
     ],
 )

@@ -1013,12 +1013,38 @@ def test_int_is_output_as_digit_string(flag: str, is_input: bool) -> None:
     assert _io_all(_parse(conf))["201"]["is_input"] is is_input
 
 
-def test_int_is_output_does_not_change_plain_ios() -> None:
-    """Outside the Quickbus the identifier prefix keeps deciding, whatever IntIsOutput says."""
+def test_int_is_output_one_does_not_change_plain_ios() -> None:
+    """Outside the Quickbus IntIsOutput 1 makes nothing writable; the identifier prefix keeps deciding."""
     conf = load_json_fixture("config_quickbus.json")
     _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = 1
 
     assert _io_all(_parse(conf))["11"]["is_input"] is True
+
+
+@pytest.mark.parametrize("flag", ["yes", 2, 0.0, False])
+def test_unusable_int_is_output_of_a_plain_io_is_logged(flag: Any, caplog: pytest.LogCaptureFixture) -> None:
+    """A plain IO with an unreadable flag loses the read-only guard of IntIsOutput 0, so the log names it."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = flag
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["11"]["is_input"] is True
+    assert (
+        "1 IOs of extension 1 have no usable IntIsOutput flag, their direction comes from the identifier and the "
+        f"IO type table: {ios['11']['identifier']!r}: {flag!r}"
+    ) in caplog.text
+
+
+def test_plain_io_without_int_is_output_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["11"].pop("IntIsOutput", None)
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    assert "IOs of extension 1 have no usable IntIsOutput flag, their direction" not in caplog.text
 
 
 def test_legacy_hint_does_not_list_the_quickbus_class(caplog: pytest.LogCaptureFixture) -> None:
@@ -1243,6 +1269,9 @@ def _with_type_bounds(v_min: Any, v_max: Any) -> dict[str, Any]:
         (0, "٣"),
         (0, "9" * 5000),
         (0, "9" * 400 + ".5"),
+        ("-5", "abc"),
+        ("5.", 5),
+        (".5", 5),
     ],
     ids=[
         "text",
@@ -1260,6 +1289,9 @@ def _with_type_bounds(v_min: Any, v_max: Any) -> dict[str, Any]:
         "arabic-digit-text",
         "text-beyond-str-limit",
         "text-beyond-float",
+        "numeric-text-with-bad-text",
+        "trailing-dot-text",
+        "leading-dot-text",
     ],
 )
 def test_unusable_type_bounds_give_the_default_range(v_min: Any, v_max: Any, caplog: pytest.LogCaptureFixture) -> None:

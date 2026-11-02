@@ -1061,11 +1061,16 @@ class _QuickbusContext:
     devices: Mapping[str, Any]
     io_map: Mapping[str, str]
     bad_flags: list[str] = field(default_factory=list)
+    bad_plain_flags: list[str] = field(default_factory=list)
 
     def resolve(self, io_item: Mapping[str, Any]) -> tuple[Mapping[str, Any] | None, bool | None]:
         """The Quickbus device of an IO and its is_input; (None, None) for a plain IO."""
         dev_id = self.io_map.get(_strict_id(io_item.get("Id")) or "")
         if dev_id is None:
+            # A plain IO without the flag is normal; one with an unreadable flag loses the read-only guard.
+            if io_item.get("IntIsOutput") is not None and _int_is_output_direction(io_item) is None:
+                ident = _short_repr(io_item.get("Identifier"))
+                self.bad_plain_flags.append(f"{ident}: {_short_repr(io_item.get('IntIsOutput'))}")
             return None, None
         device = self.devices[dev_id]
         is_input = _int_is_output_direction(io_item)
@@ -1084,6 +1089,14 @@ class _QuickbusContext:
                 len(self.bad_flags),
                 self.ext_id,
                 log_excerpt(self.bad_flags),
+            )
+        if self.bad_plain_flags:
+            _LOGGER.warning(
+                "%d IOs of extension %s have no usable IntIsOutput flag, their direction comes from the identifier "
+                "and the IO type table: %s",
+                len(self.bad_plain_flags),
+                self.ext_id,
+                log_excerpt(self.bad_plain_flags),
             )
 
 
