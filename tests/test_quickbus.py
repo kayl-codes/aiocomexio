@@ -1406,7 +1406,9 @@ def test_numeric_text_type_bounds_are_read_as_numbers(
     assert not [r for r in caplog.records if "unusable min/max" in r.getMessage()]
     analog = next(io for io in result["io"] if not io["is_binary"])
     command = build_io_webio_command(analog, _HOOK)
-    assert (command["Min"], command["Max"]) == expected
+    expected_min, expected_max = expected
+    assert command["Min"] == expected_min
+    assert command["Max"] == expected_max
 
 
 @pytest.mark.parametrize("item_id", [7, "7", "007"])
