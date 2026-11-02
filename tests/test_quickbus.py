@@ -1227,8 +1227,40 @@ def _with_type_bounds(v_min: Any, v_max: Any) -> dict[str, Any]:
 
 @pytest.mark.parametrize(
     ("v_min", "v_max"),
-    [("abc", 10), (0, "7"), (True, 10), (0, float("inf")), (float("nan"), 10), (0, 10**400), (200, 10**5000)],
-    ids=["text", "numeric-text", "bool", "inf", "nan", "beyond-float", "beyond-str-limit"],
+    [
+        ("abc", 10),
+        (True, 10),
+        (0, float("inf")),
+        (float("nan"), 10),
+        (0, 10**400),
+        (200, 10**5000),
+        (0, "1_000"),
+        (0, " 7"),
+        (0, "1e3"),
+        (0, "0x10"),
+        (0, "inf"),
+        (0, "+7"),
+        (0, "٣"),
+        (0, "9" * 5000),
+        (0, "9" * 400 + ".5"),
+    ],
+    ids=[
+        "text",
+        "bool",
+        "inf",
+        "nan",
+        "beyond-float",
+        "beyond-str-limit",
+        "underscore-text",
+        "space-text",
+        "exponent-text",
+        "hex-text",
+        "inf-text",
+        "plus-text",
+        "arabic-digit-text",
+        "text-beyond-str-limit",
+        "text-beyond-float",
+    ],
 )
 def test_unusable_type_bounds_give_the_default_range(v_min: Any, v_max: Any, caplog: pytest.LogCaptureFixture) -> None:
     """A malformed min/max must not break a Web-IO upload, an unrelated class included; one bad bound drops both."""
@@ -1276,6 +1308,28 @@ def test_numeric_type_bounds_are_kept(bound: Any, kind: type) -> None:
 
     assert {(io["min"], io["max"]) for io in result["io_all"]} == {(bound, bound)}
     assert {type(io["min"]) for io in result["io_all"]} == {kind}
+
+
+@pytest.mark.parametrize(
+    ("v_min", "v_max", "expected", "kind"),
+    [
+        ("-2147483648", "2147483647", (-2147483648, 2147483647), int),  # Smart Meter E1-E3 on OS 11.0.2 (#249)
+        ("-8388.608", "8388.607", (-8388.608, 8388.607), float),
+        (-429467295, "4294967295", (-429467295, 4294967295), int),
+    ],
+)
+def test_numeric_text_type_bounds_are_read_as_numbers(
+    v_min: Any, v_max: Any, expected: tuple[float, float], kind: type, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        result = _with_type_bounds(v_min, v_max)
+
+    assert {(io["min"], io["max"]) for io in result["io_all"]} == {expected}
+    assert {type(io["max"]) for io in result["io_all"]} == {kind}
+    assert not [r for r in caplog.records if "unusable min/max" in r.getMessage()]
+    analog = next(io for io in result["io"] if not io["is_binary"])
+    command = build_io_webio_command(analog, _HOOK)
+    assert (command["Min"], command["Max"]) == expected
 
 
 @pytest.mark.parametrize("item_id", [7, "7", "007"])

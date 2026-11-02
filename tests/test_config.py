@@ -146,6 +146,49 @@ def test_io_classification_without_type_tables_falls_back_to_identifier() -> Non
     assert (ios["Temp"]["type_id_raw"], ios["Temp"]["is_input"]) == (1, True)
 
 
+_DIRECTION_IO_TYPES = {
+    "1": {"id": 1, "binary": False, "min": 0, "max": 10, "unit": "V"},
+    "2": {"id": 2, "binary": True, "min": 0, "max": 1, "unit": "0/1"},
+    "80": {"id": 80, "binary": False, "min": -2000, "max": 2000, "unit": "var"},
+    "81": {"id": 81, "binary": False, "min": "-2147483648", "max": "2147483647", "unit": "Wh"},
+    "87": {"id": 87, "binary": True, "min": 0, "max": 1, "unit": "0/1"},
+}
+_DIRECTION_IO_INPUT_TYPES = {
+    "1": {"id": 1, "input": True},
+    "2": {"id": 2, "input": False},
+    "80": {"id": 80, "input": False},
+    "81": {"id": 81, "input": False},
+    "87": {"id": 87, "input": False},
+}
+
+
+@pytest.mark.parametrize(
+    ("identifier", "type_id", "flag", "is_input"),
+    [
+        ("Q1", 80, 0, True),  # Smart Meter reactive power: IntIsOutput 0 beats the relay prefix
+        ("E1", 81, 0, True),  # energy counter, $IOInputTypes says output
+        ("DI1", 87, 0, True),
+        ("DI1", 87, "0", True),
+        ("Q1", 2, 1, False),  # a real relay stays writable
+        ("AO1", 1, 1, True),  # IntIsOutput 1 alone does not make an IO writable
+        ("DI1", 87, None, False),  # no flag: $IOInputTypes as before
+        ("DI1", 87, "yes", False),
+        ("DI1", 87, True, False),
+        ("DI1", 87, 2, False),
+    ],
+)
+def test_int_is_output_zero_makes_an_io_read_only(identifier: str, type_id: int, flag: Any, is_input: bool) -> None:
+    """Comexio never writes an IO whose IntIsOutput is 0, so it is read-only whatever else says output (#249)."""
+    row: dict[str, Any] = {"Id": 1, "Identifier": identifier, "InOutputTypeId": type_id, "Active": True}
+    if flag is not None:
+        row["IntIsOutput"] = flag
+    conf = {"FubModules": {"1": {"1": {"extension": {"Name": "SM1", "Identifier": "1-2-3"}, "inoutput": {"1": row}}}}}
+
+    (io,) = parse_config(conf, io_types=_DIRECTION_IO_TYPES, io_input_types=_DIRECTION_IO_INPUT_TYPES)["io_all"]
+
+    assert io["is_input"] is is_input
+
+
 def test_io_type_missing_from_the_table_falls_back_to_identifier() -> None:
     # Regression: with io_types present, an IO whose type row is missing became "analog, max 1"
     # — a QI1 dimmer output then got the range 0..1 instead of the identifier's analog default.
