@@ -26,6 +26,9 @@ from .const import (
     NO_NAME_TITLE,
     WEBIO_CLASS_LABEL,
     WEBIO_CLASSES,
+    WEBIO_IO_DEFAULT_MAX_ANALOG,
+    WEBIO_IO_DEFAULT_MAX_BINARY,
+    WEBIO_IO_DEFAULT_MIN,
     MarkerKind,
     WebioClass,
     webio_class_name,
@@ -76,6 +79,8 @@ _MODULE_KNX = "11"
 # Key of an extension's Quickbus device table in $FubModules["1"], and of its IO-Id -> device-Id
 # map under the extension's "mapping" (Comexio's internal name for the Quickbus is "lowcan").
 _QUICKBUS_KEY = "lowcan"
+# Key of an IO row's direction flag: 0 = Comexio never writes the IO, 1 = it may.
+_INT_IS_OUTPUT_KEY = "IntIsOutput"
 
 # Entries named in one aggregated warning before the rest is only counted.
 _MAX_LOGGED_ENTRIES = 5
@@ -109,6 +114,8 @@ _OUTPUT_IO_RE = re.compile(r"^Q\d+$")
 _INPUT_IO_RE = re.compile(r"^(?:I|AI|QI)\d+$")
 _ANALOG_OUTPUT_IO_RE = re.compile(r"^QI\d+$")
 _BINARY_IO_RE = re.compile(r"^[QI]\d+$")
+# A min/max of the IO type table written as text, e.g. "-2147483648" (Smart Meter E1-E3, OS 11.0.2).
+_NUMERIC_TEXT_RE = re.compile(r"-?\d+(?:\.\d+)?", re.ASCII)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -323,9 +330,13 @@ def marker_kind(title: str, *, is_marker: bool = True) -> MarkerKind:
 
 
 def normalize_io_unit(unit: Any) -> str:
-    """Normalize Comexio IO unit strings ("\\u00b0C", "0/1", "?", ...); a non-string unit becomes ""."""
+    """Normalize Comexio IO unit strings ("\\u00b0C", "0/1", "?", ...); a non-string unit becomes "".
+
+    Surrounding whitespace is dropped: the Smart Meter's power factor has the unit " ".
+    """
     if not isinstance(unit, str):
         return ""
+    unit = unit.strip()
     if unit in ("\\u00b0C", "°C", "°C", "C"):
         return "°C"
     return "" if unit in ("0/1", "1/0", "?") else unit
@@ -1032,13 +1043,14 @@ def _quickbus_io_map(
     return result
 
 
-def _quickbus_io_direction(io_item: Mapping[str, Any]) -> bool | None:
-    """is_input of a Quickbus IO from its own IntIsOutput flag; None if that is malformed.
+def _int_is_output_direction(io_item: Mapping[str, Any]) -> bool | None:
+    """is_input of an IO from its own IntIsOutput flag; None if that is missing or malformed.
 
-    $IOInputTypes cannot be used for these: it marks e.g. the Multitouch gestures (type 134) as
-    not an input, which would make every gesture a writable output.
+    A Quickbus IO takes its direction from this flag alone: $IOInputTypes marks e.g. the
+    Multitouch gestures (type 134) as not an input, which would make every gesture a writable
+    output. A plain IO uses it only to be read-only, see _io_direction.
     """
-    raw = io_item.get("IntIsOutput")
+    raw = io_item.get(_INT_IS_OUTPUT_KEY)
     if isinstance(raw, int) and not isinstance(raw, bool) and raw in (0, 1):
         return raw == 0
     if isinstance(raw, str) and raw in ("0", "1"):
@@ -1054,18 +1066,24 @@ class _QuickbusContext:
     devices: Mapping[str, Any]
     io_map: Mapping[str, str]
     bad_flags: list[str] = field(default_factory=list)
+    bad_plain_flags: list[str] = field(default_factory=list)
 
     def resolve(self, io_item: Mapping[str, Any]) -> tuple[Mapping[str, Any] | None, bool | None]:
         """The Quickbus device of an IO and its is_input; (None, None) for a plain IO."""
         dev_id = self.io_map.get(_strict_id(io_item.get("Id")) or "")
         if dev_id is None:
+            # A plain IO without the flag is normal; one with an unreadable flag (null included) loses
+            # the read-only guard.
+            if _INT_IS_OUTPUT_KEY in io_item and _int_is_output_direction(io_item) is None:
+                ident = _short_repr(io_item.get("Identifier"))
+                self.bad_plain_flags.append(f"{ident}: {_short_repr(io_item.get(_INT_IS_OUTPUT_KEY))}")
             return None, None
         device = self.devices[dev_id]
-        is_input = _quickbus_io_direction(io_item)
+        is_input = _int_is_output_direction(io_item)
         if is_input is None:
             # Read-only is the safe side: a wrong guess must never turn a gesture into an output.
             ident = _short_repr(io_item.get("Identifier"))
-            self.bad_flags.append(f"{device['name']} {ident}: {_short_repr(io_item.get('IntIsOutput'))}")
+            self.bad_flags.append(f"{device['name']} {ident}: {_short_repr(io_item.get(_INT_IS_OUTPUT_KEY))}")
             is_input = True
         return device, is_input
 
@@ -1075,8 +1093,16 @@ class _QuickbusContext:
                 "%d Quickbus IOs of extension %s have no usable IntIsOutput flag and are treated as read-only "
                 "inputs: %s",
                 len(self.bad_flags),
-                self.ext_id,
+                _log_safe(self.ext_id),
                 log_excerpt(self.bad_flags),
+            )
+        if self.bad_plain_flags:
+            _LOGGER.warning(
+                "%d IOs of extension %s have no usable IntIsOutput flag, their direction comes from the identifier "
+                "and the IO type table: %s",
+                len(self.bad_plain_flags),
+                _log_safe(self.ext_id),
+                log_excerpt(self.bad_plain_flags),
             )
 
 
@@ -1165,8 +1191,14 @@ def _type_bound(value: Any) -> float | None:
     """A min/max from the IO type table if it is a finite int or float, else None.
 
     The table is scraped JSON: a text, bool or infinite bound would break the range math of a
-    Web-IO command (abs()) and with it a whole upload, unrelated classes included.
+    Web-IO command (abs()) and with it a whole upload, unrelated classes included. Plain decimal
+    text ("-2147483648", "2.5") is read as its number: some firmware writes bounds that way.
     """
+    if isinstance(value, str) and _NUMERIC_TEXT_RE.fullmatch(value):
+        try:
+            value = float(value) if "." in value else int(value)
+        except (ValueError, OverflowError):  # ValueError: more digits than int() converts
+            return None
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     try:
@@ -1179,13 +1211,19 @@ def _type_bounds(type_info: Mapping[str, Any], ext_name: str, ident: str) -> tup
     """(min, max) of an IO from its type row; both None (the Web-IO defaults) if one is unusable.
 
     One bound alone does not make a range: a kept min of 200 with a defaulted max of 100 would
-    turn it upside down. A missing or null bound stays as before (min 0, max 1 or None).
+    turn it upside down. So does a range that is inverted once a null bound becomes its Web-IO
+    default (a missing key counts as min 0 / max 1); a null bound that leaves the range ordered
+    stays None.
     """
     raw = (type_info.get("min", 0), type_info.get("max", 1))
     bounds = (_type_bound(raw[0]), _type_bound(raw[1]))
-    if any(bound is None and value is not None for bound, value in zip(bounds, raw, strict=True)):
+    default_max = WEBIO_IO_DEFAULT_MAX_BINARY if type_info.get("binary", False) else WEBIO_IO_DEFAULT_MAX_ANALOG
+    low = WEBIO_IO_DEFAULT_MIN if bounds[0] is None else bounds[0]
+    high = default_max if bounds[1] is None else bounds[1]
+    if low > high or any(bound is None and value is not None for bound, value in zip(bounds, raw, strict=True)):
         _LOGGER.warning(
-            "IO %s %s: the IO type table has an unusable min/max (%s, %s), the Web-IO command gets the default range",
+            "IO %s %s: the IO type table has an unusable or inverted min/max (%s, %s), the Web-IO command gets the "
+            "default range",
             _log_safe(ext_name),
             _short_repr(ident),
             _short_repr(raw[0]),
@@ -1302,13 +1340,20 @@ def _process_ios(
         data["io_all"] = [entry for entry in data["io_all"] if entry["id"] not in unlabelled]
 
 
-def _io_direction(ident_upper: str, type_id_raw: int, io_input_types: Mapping[str, Any]) -> bool:
+def _io_direction(
+    io_item: Mapping[str, Any], ident_upper: str, type_id_raw: int, io_input_types: Mapping[str, Any]
+) -> bool:
     """is_input for an IO: True -> read-only, False -> writable.
 
-    The identifier prefix is the reliable source: Q* are relay/dimmer outputs, I*/AI*/QI* are
-    inputs. $IOInputTypes is only a fallback for other identifiers, because the same TypeId
-    (e.g. 2 = binary 0/1) is shared by inputs and outputs.
+    IntIsOutput 0 comes first: Comexio never writes such an IO (the Smart Meter's readings, a PIR,
+    a Panic button), so it is read-only whatever its identifier says — the Smart Meter's Q1-Q3 are
+    reactive power, not relays. IntIsOutput 1 does not make an IO writable on its own.
+    Then the identifier prefix: Q* are relay/dimmer outputs, I*/AI*/QI* are inputs. $IOInputTypes
+    is only a fallback for other identifiers, because the same TypeId (e.g. 2 = binary 0/1) is
+    shared by inputs and outputs.
     """
+    if _int_is_output_direction(io_item):
+        return True
     if _OUTPUT_IO_RE.match(ident_upper):
         return False
     if _INPUT_IO_RE.match(ident_upper):
@@ -1367,8 +1412,8 @@ def _build_io_entry(
 
     An IO of a Quickbus device (qb_device) is labelled with the device name instead of the
     extension name, like Comexio Studio's "MT1 # G20"; the {ExtName} schema placeholder then
-    renders that device name as well. is_input overrides the direction derived from the
-    identifier and $IOInputTypes (a Quickbus IO brings its own, see _quickbus_io_direction).
+    renders that device name as well. is_input overrides the direction _io_direction derives
+    (a Quickbus IO brings its own, see _int_is_output_direction).
     """
     # A numeric identifier is stringified, not replaced — it feeds unique_id/entity_id.
     ident = _label(io_item.get("Identifier")) or io_id
@@ -1406,7 +1451,7 @@ def _build_io_entry(
         SafeDict(ServerAlias=options.server_alias, ExtName=owner, IoId=ident, IoTitle=description or NO_NAME_TITLE)
     )
     if is_input is None:
-        is_input = _io_direction(ident_upper, type_id_raw, io_input_types)
+        is_input = _io_direction(io_item, ident_upper, type_id_raw, io_input_types)
     return {
         "id": io_id,
         "ext_name": ext_name,

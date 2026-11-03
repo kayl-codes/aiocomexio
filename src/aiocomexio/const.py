@@ -90,6 +90,11 @@ WEBIO_MARKER_ANALOG_MAX = 500_000
 # WEBIO_MARKER_ANALOG_MIN/MAX (see bug (2) above).
 WEBIO_INT16_DANGER_ZONE = (30_000, 40_000)
 
+# Web-IO range bound of an IO whose type row gives none (min/max None): 0..100 analog, 0..1 binary.
+WEBIO_IO_DEFAULT_MIN = 0
+WEBIO_IO_DEFAULT_MAX_ANALOG = 100
+WEBIO_IO_DEFAULT_MAX_BINARY = 1
+
 # KNX "API loopback": a second Web-IO command per K-element whose Lua script GETs the Comexio
 # server's own /api/?action=set endpoint to write the K-element's bridge marker directly,
 # closing the loop entirely inside Comexio. One class + one device per server; every

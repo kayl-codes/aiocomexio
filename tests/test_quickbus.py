@@ -999,10 +999,10 @@ def test_unusable_int_is_output_makes_a_read_only_input(flag: Any, caplog: pytes
 
     assert ios["201"]["is_input"] is True
     assert ios["204"]["is_input"] is True
-    assert (
+    assert [r.getMessage() for r in caplog.records if "Quickbus IOs of extension" in r.getMessage()] == [
         "2 Quickbus IOs of extension 1 have no usable IntIsOutput flag and are treated as read-only inputs: "
         f"MT Flur 'G1': {flag!r}, MT Flur 'R': {flag!r}"
-    ) in caplog.text
+    ]
 
 
 @pytest.mark.parametrize(("flag", "is_input"), [("0", True), ("1", False)])
@@ -1013,12 +1013,84 @@ def test_int_is_output_as_digit_string(flag: str, is_input: bool) -> None:
     assert _io_all(_parse(conf))["201"]["is_input"] is is_input
 
 
-def test_int_is_output_does_not_change_plain_ios() -> None:
-    """Outside the Quickbus the identifier prefix keeps deciding, whatever IntIsOutput says."""
+def test_int_is_output_one_does_not_change_plain_ios() -> None:
+    """Outside the Quickbus IntIsOutput 1 makes nothing writable; the identifier prefix keeps deciding."""
     conf = load_json_fixture("config_quickbus.json")
     _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = 1
 
     assert _io_all(_parse(conf))["11"]["is_input"] is True
+
+
+@pytest.mark.parametrize("flag", ["yes", 2, 0.0, False, None])
+def test_unusable_int_is_output_of_a_plain_io_is_logged(flag: Any, caplog: pytest.LogCaptureFixture) -> None:
+    """A plain IO with an unreadable flag loses the read-only guard of IntIsOutput 0, so the log names it."""
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = flag
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["11"]["is_input"] is True
+    records = _plain_flag_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert records[0].getMessage() == (
+        "1 IOs of extension 1 have no usable IntIsOutput flag, their direction comes from the identifier and the "
+        f"IO type table: 'I1': {flag!r}"
+    )
+
+
+def test_unusable_int_is_output_flags_of_one_extension_share_one_line(caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = "yes"
+    _base_ext(conf)["inoutput"]["46"]["IntIsOutput"] = "no"
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    records = _plain_flag_records(caplog)
+    assert len(records) == 1
+    assert records[0].getMessage() == (
+        "2 IOs of extension 1 have no usable IntIsOutput flag, their direction comes from the identifier and the "
+        "IO type table: 'I1': 'yes', 'TL1': 'no'"
+    )
+
+
+@pytest.mark.parametrize("flag", [None, 0, 1, "0", "1"])
+def test_plain_io_with_a_usable_or_no_int_is_output_is_not_logged(flag: Any, caplog: pytest.LogCaptureFixture) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    if flag is None:
+        _base_ext(conf)["inoutput"]["11"].pop("IntIsOutput", None)
+    else:
+        _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = flag
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    assert _plain_flag_records(caplog) == []
+
+
+@pytest.mark.parametrize("flag", ["yes", None])
+def test_unusable_int_is_output_of_a_quickbus_io_stays_out_of_the_plain_io_line(
+    flag: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    _base_ext(conf)["inoutput"]["201"]["IntIsOutput"] = flag
+
+    with caplog.at_level(logging.WARNING):
+        _parse(conf)
+
+    quickbus_lines = [r.getMessage() for r in caplog.records if "Quickbus IOs of extension" in r.getMessage()]
+    assert quickbus_lines == [
+        "1 Quickbus IOs of extension 1 have no usable IntIsOutput flag and are treated as read-only inputs: "
+        f"MT Flur 'G1': {flag!r}"
+    ]
+    assert _plain_flag_records(caplog) == []
+
+
+def _plain_flag_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """The log records about plain (non-Quickbus) IOs with an unusable IntIsOutput flag."""
+    return [r for r in caplog.records if "IOs of extension" in r.getMessage() and "their direction" in r.getMessage()]
 
 
 def test_legacy_hint_does_not_list_the_quickbus_class(caplog: pytest.LogCaptureFixture) -> None:
@@ -1227,8 +1299,60 @@ def _with_type_bounds(v_min: Any, v_max: Any) -> dict[str, Any]:
 
 @pytest.mark.parametrize(
     ("v_min", "v_max"),
-    [("abc", 10), (0, "7"), (True, 10), (0, float("inf")), (float("nan"), 10), (0, 10**400), (200, 10**5000)],
-    ids=["text", "numeric-text", "bool", "inf", "nan", "beyond-float", "beyond-str-limit"],
+    [
+        ("abc", 10),
+        (True, 10),
+        (0, float("inf")),
+        (float("nan"), 10),
+        (0, 10**400),
+        (200, 10**5000),
+        (0, "1_000"),
+        (0, " 7"),
+        (0, "1e3"),
+        (0, "0x10"),
+        (0, "inf"),
+        (0, "+7"),
+        (0, "٣"),  # re.ASCII: \d would match it and int() reads it as 3
+        (0, "٣.٥"),
+        (0, "５"),  # fullwidth digit, also accepted by int()
+        (0, "9" * 5000),
+        (0, "9" * 400 + ".5"),
+        ("-5", "abc"),
+        ("5.", 5),
+        (".5", 5),
+        (200, None),  # Web-IO would default the max to 100: Min 200, Max 100
+        ("200", None),
+        (None, -5),  # Web-IO would default the min to 0: Min 0, Max -5
+        (10, 5),
+        ("10", "5"),
+    ],
+    ids=[
+        "text",
+        "bool",
+        "inf",
+        "nan",
+        "beyond-float",
+        "beyond-str-limit",
+        "underscore-text",
+        "space-text",
+        "exponent-text",
+        "hex-text",
+        "inf-text",
+        "plus-text",
+        "arabic-digit-text",
+        "arabic-decimal-text",
+        "fullwidth-digit-text",
+        "text-beyond-str-limit",
+        "text-beyond-float",
+        "numeric-text-with-bad-text",
+        "trailing-dot-text",
+        "leading-dot-text",
+        "null-max-under-kept-min",
+        "null-max-under-kept-text-min",
+        "null-min-above-kept-negative-max",
+        "inverted",
+        "inverted-text",
+    ],
 )
 def test_unusable_type_bounds_give_the_default_range(v_min: Any, v_max: Any, caplog: pytest.LogCaptureFixture) -> None:
     """A malformed min/max must not break a Web-IO upload, an unrelated class included; one bad bound drops both."""
@@ -1249,7 +1373,7 @@ def test_unusable_type_bounds_give_the_default_range(v_min: Any, v_max: Any, cap
     )
     first = result["io_all"][0]
     assert (
-        f"IO {first['ext_name']} {first['identifier']!r}: the IO type table has an unusable min/max "
+        f"IO {first['ext_name']} {first['identifier']!r}: the IO type table has an unusable or inverted min/max "
         f"({config_module._short_repr(v_min)}, {config_module._short_repr(v_max)}), "
         "the Web-IO command gets the default range"
     ) in [r.getMessage() for r in caplog.records]
@@ -1270,12 +1394,85 @@ def test_unusable_type_bounds_warning_keeps_scraped_names_on_one_line(caplog: py
     assert "x" * 500 not in message
 
 
+@pytest.mark.parametrize(
+    ("type_info", "expected", "warned"),
+    [
+        ({"min": 200}, (None, None), True),  # a missing max counts as 1
+        ({"max": -5}, (None, None), True),  # a missing min counts as 0
+        ({"max": 10}, (0, 10), False),
+        ({}, (0, 1), False),
+        ({"min": None, "max": None}, (None, None), False),
+        ({"min": 5, "max": 5}, (5, 5), False),
+        ({"min": 2.5, "max": 2.4}, (None, None), True),
+        ({"min": -10, "max": -5}, (-10, -5), False),
+        ({"max": 0}, (0, 0), False),
+        ({"min": 1}, (1, 1), False),
+        ({"min": None, "max": 1000}, (None, 1000), False),  # Web-IO: 0..1000
+        ({"min": 50, "max": None}, (50, None), False),  # analog, Web-IO: 50..100
+        ({"min": 50, "max": None, "binary": True}, (None, None), True),  # binary, Web-IO would be 50..1
+        ({"min": 100, "max": None}, (100, None), False),  # analog, Web-IO: 100..100
+    ],
+    ids=[
+        "missing-max",
+        "missing-min-negative-max",
+        "missing-min",
+        "no-bounds",
+        "two-null-bounds",
+        "one-point-range",
+        "inverted-float",
+        "negative-range",
+        "missing-min-zero-max",
+        "missing-max-min-one",
+        "null-min-with-kept-max",
+        "null-max-above-kept-analog-min",
+        "null-max-under-kept-binary-min",
+        "null-max-at-analog-default",
+    ],
+)
+def test_type_bounds_without_a_complete_ordered_range(
+    type_info: dict[str, Any], expected: tuple[Any, Any], warned: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A missing bound counts as min 0 / max 1, a null one as its Web-IO default; an inverted range drops both."""
+    with caplog.at_level(logging.WARNING):
+        assert config_module._type_bounds(type_info, "SM1", "E1") == expected
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == (1 if warned else 0)
+    assert all("unusable or inverted min/max (" in message for message in messages)
+
+
 @pytest.mark.parametrize(("bound", "kind"), [(5, int), (-40, int), (2.5, float)])
 def test_numeric_type_bounds_are_kept(bound: Any, kind: type) -> None:
     result = _with_type_bounds(bound, bound)
 
     assert {(io["min"], io["max"]) for io in result["io_all"]} == {(bound, bound)}
     assert {type(io["min"]) for io in result["io_all"]} == {kind}
+
+
+@pytest.mark.parametrize(
+    ("v_min", "v_max", "expected", "kind"),
+    [
+        ("-2147483648", "2147483647", (-2147483648, 2147483647), int),  # Smart Meter E1-E3 on OS 11.0.2 (#249)
+        ("-8388.608", "8388.607", (-8388.608, 8388.607), float),
+        (-429467295, "4294967295", (-429467295, 4294967295), int),
+    ],
+)
+def test_numeric_text_type_bounds_are_read_as_numbers(
+    v_min: Any, v_max: Any, expected: tuple[float, float], kind: type, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        result = _with_type_bounds(v_min, v_max)
+
+    extensions = load_json_fixture("config_quickbus.json")["FubModules"]["1"].values()
+    fixture_ids = {str(io_id) for ext in extensions for io_id in ext["inoutput"]}
+    assert {str(io["id"]): (io["min"], io["max"]) for io in result["io_all"]} == dict.fromkeys(fixture_ids, expected)
+    assert {type(io["max"]) for io in result["io_all"]} == {kind}
+    assert not [r for r in caplog.records if "unusable or inverted min/max" in r.getMessage()]
+    analog = next(io for io in result["io"] if not io["is_binary"])
+    command = build_io_webio_command(analog, _HOOK)
+    expected_min, expected_max = expected
+    assert command["Min"] == expected_min
+    assert command["Max"] == expected_max
 
 
 @pytest.mark.parametrize("item_id", [7, "7", "007"])
