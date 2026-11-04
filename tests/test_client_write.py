@@ -29,7 +29,16 @@ from aiocomexio import (
 )
 from aiocomexio import client as client_module
 from aiocomexio.webio import CONTENT_TYPE_JSON, WEBIO_PROTOCOL_HTTPS
-from tests.fake_comexio import DASHBOARD_REFRESH_PATH, LOGIN_PAGE, PASSWORD, USERNAME, FakeComexio
+from tests.fake_comexio import (
+    DASHBOARD_REFRESH_PATH,
+    LOGIN_PAGE,
+    PASSWORD,
+    SESSION_COOKIE,
+    SESSION_VALUE,
+    USERNAME,
+    FakeComexio,
+    json_response,
+)
 
 API_PATH = "/api/"
 WEBIO_HOME_PATH = "/admin/web_io/home"
@@ -188,12 +197,13 @@ async def test_set_value_forbidden_answer_raises_naming_the_target(
     [
         ("AO1", True),
         ("ao12", True),
-        (" AO3 ", True),
+        (" AO3 ", False),  # padded: written as sent, so routed like any other unknown name
         ("Q1", False),
         ("QI1", False),
         ("AI1", False),
         ("AO", False),
         ("AOX1", False),
+        ("AO1\n", False),
         ("AO1a", False),
         ("AO١", False),  # Arabic-Indic digit
     ],
@@ -206,8 +216,15 @@ def test_io_written_over_admin_session(identifier: str, admin: bool) -> None:
 async def test_set_io_value_writes_an_analog_output_over_the_admin_session(
     api_client: ComexioClient, comexio: FakeComexio, value: float, sent: float
 ) -> None:
-    # /api/ answers "Forbidden" for AO*, Comexio's own IO page sets them over dashboard/refresh (#259).
-    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"1": "1"}})
+    # /api/ answers "Forbidden" for AO*, Comexio's own IO page sets them over dashboard/refresh (#259),
+    # which only a logged-in admin session may do.
+    async def dashboard(request: web.Request) -> web.Response:
+        if request.cookies.get(SESSION_COOKIE) != SESSION_VALUE:
+            return web.Response(text=LOGIN_PAGE, content_type="text/html")
+        return json_response({"result": {"1": "1"}})
+
+    comexio.serve("POST", DASHBOARD_REFRESH_PATH, dashboard)
+    await api_client.login()
 
     await api_client.set_io_value("IO-Extension A2", "AO4", value)
 
@@ -249,6 +266,9 @@ async def test_set_io_value_analog_output_without_admin_session_raises_authentic
 
     with pytest.raises(ComexioAuthenticationError):
         await api_client.set_io_value("UD1", "AO1", 30)
+
+    # Comexio's login page answered the write, the client did not refuse it beforehand.
+    assert len(comexio.received_at("POST", DASHBOARD_REFRESH_PATH)) == 1
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])

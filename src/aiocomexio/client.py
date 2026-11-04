@@ -466,7 +466,7 @@ def io_written_over_admin_session(identifier: str) -> bool:
     True for the 0-10 V analog outputs (AO1, AO2, ...), which /api/ refuses. Such a write needs a
     logged-in admin session; a caller that keeps one can log in again on ComexioAuthenticationError.
     """
-    return bool(_ADMIN_WRITTEN_IO_RE.fullmatch(identifier.strip()))
+    return bool(_ADMIN_WRITTEN_IO_RE.fullmatch(identifier))
 
 
 class ComexioClient:

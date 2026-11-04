@@ -177,6 +177,7 @@ _DIRECTION_IO_INPUT_TYPES = {
         ("AO1", 1, 1, False),  # 0-10 V analog output, although $IOInputTypes says input
         ("AO4", 120, 1, False),  # "Digital 10V": a binary analog output
         ("AO1", 1, 0, True),  # IntIsOutput 0 beats the analog output prefix as well
+        ("AO1\n", 1, 1, True),  # matched exactly, as set_io_value routes it
         ("AO١", 1, 1, True),  # non-ASCII digit: no AO, as set_io_value would not route it over the admin session
         ("DI1", 87, None, False),  # no flag: $IOInputTypes as before
         ("DI1", 87, "yes", False),
