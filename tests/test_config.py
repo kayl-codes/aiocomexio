@@ -177,6 +177,7 @@ _DIRECTION_IO_INPUT_TYPES = {
         ("AO1", 1, 1, False),  # 0-10 V analog output, although $IOInputTypes says input
         ("AO4", 120, 1, False),  # "Digital 10V": a binary analog output
         ("AO1", 1, 0, True),  # IntIsOutput 0 beats the analog output prefix as well
+        ("AO١", 1, 1, True),  # non-ASCII digit: no AO, as set_io_value would not route it over the admin session
         ("DI1", 87, None, False),  # no flag: $IOInputTypes as before
         ("DI1", 87, "yes", False),
         ("DI1", 87, True, False),
@@ -218,6 +219,7 @@ def test_io_type_missing_from_the_table_falls_back_to_identifier() -> None:
                         "1": {"Id": 1, "Identifier": "Q1", "InOutputTypeId": 99, "Active": True},
                         "2": {"Id": 2, "Identifier": "QI1", "InOutputTypeId": 98, "Active": True},
                         "3": {"Id": 3, "Identifier": "AI1", "InOutputTypeId": 3, "Active": True},
+                        "4": {"Id": 4, "Identifier": "AO1", "InOutputTypeId": 97, "Active": True, "IntIsOutput": 1},
                     },
                 }
             }
@@ -230,6 +232,13 @@ def test_io_type_missing_from_the_table_falls_back_to_identifier() -> None:
     assert (ios["Q1"]["is_binary"], ios["Q1"]["max"]) == (True, 1)
     assert (ios["QI1"]["is_binary"], ios["QI1"]["max"]) == (False, 0)
     assert (ios["AI1"]["is_binary"], ios["AI1"]["max"]) == (False, 100)
+    # A writable analog output keeps the Web-IO default range instead of "analog, max 1" (#259).
+    assert (ios["AO1"]["is_binary"], ios["AO1"]["min"], ios["AO1"]["max"], ios["AO1"]["is_input"]) == (
+        False,
+        None,
+        None,
+        False,
+    )
 
 
 @pytest.mark.parametrize("description", ["ai1", " AI1 ", "AI1", "", None])

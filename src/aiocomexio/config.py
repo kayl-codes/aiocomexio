@@ -111,8 +111,10 @@ _LOG_REPR = reprlib.Repr(
 _LOG_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 # AO*: the 0-10 V analog outputs; $IOInputTypes marks their types (0-10V, 0-10V Prozent, Digital 10V)
-# as inputs, so only the identifier makes them writable (#259 of homeassistant-comexio).
-_OUTPUT_IO_RE = re.compile(r"^(?:Q|AO)\d+$")
+# as inputs, so only the identifier makes them writable (#259 of homeassistant-comexio). ASCII digits
+# like client.io_written_over_admin_session: an AO classified writable here is written over that route.
+_OUTPUT_IO_RE = re.compile(r"^(?:Q|AO)\d+$", re.ASCII)
+_ANALOG_0_10V_OUTPUT_IO_RE = re.compile(r"^AO\d+$", re.ASCII)
 _INPUT_IO_RE = re.compile(r"^(?:I|AI|QI)\d+$")
 _ANALOG_OUTPUT_IO_RE = re.compile(r"^QI\d+$")
 _BINARY_IO_RE = re.compile(r"^[QI]\d+$")
@@ -1443,6 +1445,10 @@ def _build_io_entry(
             )
         if _ANALOG_OUTPUT_IO_RE.match(ident_upper):
             is_binary, v_max = False, 0
+        elif _ANALOG_0_10V_OUTPUT_IO_RE.match(ident_upper):
+            # Writable: a bound of 1 would cap it. The identifier does not tell "Digital 10V" from an
+            # analog type, analog with the Web-IO default range takes either value.
+            is_binary, v_min, v_max = False, None, None
         elif _BINARY_IO_RE.match(ident_upper):
             is_binary, v_max = True, 1
 
