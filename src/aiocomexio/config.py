@@ -1398,6 +1398,21 @@ class _IoEntryBuilder:
         )
 
 
+def _classify_io_by_identifier(
+    ident_upper: str, v_min: float | None, v_max: float | None
+) -> tuple[bool, float | None, float | None]:
+    """Return (is_binary, min, max) of an IO the type table has no usable row for."""
+    if _ANALOG_OUTPUT_IO_RE.match(ident_upper):
+        return False, v_min, 0
+    if _ANALOG_0_10V_OUTPUT_IO_RE.match(ident_upper):
+        # Writable: a bound of 1 would cap it. The identifier does not tell "Digital 10V" from an
+        # analog type, analog with the Web-IO default range takes either value.
+        return False, None, None
+    if _BINARY_IO_RE.match(ident_upper):
+        return True, v_min, 1
+    return False, v_min, v_max
+
+
 def _build_io_entry(
     io_item: Mapping[str, Any],
     io_id: str,
@@ -1444,14 +1459,7 @@ def _build_io_entry(
                 _log_safe(ident),
                 _short_repr(io_item.get("InOutputTypeId")),
             )
-        if _ANALOG_OUTPUT_IO_RE.match(ident_upper):
-            is_binary, v_max = False, 0
-        elif _ANALOG_0_10V_OUTPUT_IO_RE.match(ident_upper):
-            # Writable: a bound of 1 would cap it. The identifier does not tell "Digital 10V" from an
-            # analog type, analog with the Web-IO default range takes either value.
-            is_binary, v_min, v_max = False, None, None
-        elif _BINARY_IO_RE.match(ident_upper):
-            is_binary, v_max = True, 1
+        is_binary, v_min, v_max = _classify_io_by_identifier(ident_upper, v_min, v_max)
 
     owner = qb_device["name"] if qb_device else ext_name
     io_name = f"{owner} {ident} {description}" if description else f"{owner} {ident}"
