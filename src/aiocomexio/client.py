@@ -69,6 +69,7 @@ __all__ = [
     "SystemInfo",
     "WebioBaseInfo",
     "WebioCommandForm",
+    "io_written_over_admin_session",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -316,6 +317,16 @@ _PLAIN_DECIMAL_RE = re.compile(r"[+-]?\d+(?:[.,]\d+)?", re.ASCII)
 # live earlier, firmware 11.1.5 answers "0" to every write it stores (verified by reading the
 # marker back, 2026-10-27). An unknown target answers "<n>:not_found" instead.
 _API_SET_OK_ANSWERS = ("0", "1")
+# What /api/?action=set answers (HTTP 200) for a target it does not let the API write: the 0-10 V
+# analog outputs and the Quickbus IOs (verified live, firmware 11.1.5, 2026-11-04).
+_API_SET_FORBIDDEN_ANSWER = "forbidden"  # compared case-insensitively
+# 0-10 V analog outputs: /api/ refuses them, so they are written over the admin session's
+# dashboard/refresh "set", as Comexio's own IO page does (verified live, firmware 11.1.5, 2026-11-04).
+_ADMIN_WRITTEN_IO_RE = re.compile(r"AO\d+", re.ASCII | re.IGNORECASE)
+# The key of the one entry of a dashboard/refresh "set" request, and its answer for a stored value;
+# an unknown extension or IO answers "0:io_not_found". A value beyond the IO's range is clamped.
+_DASHBOARD_SET_KEY = "1"
+_DASHBOARD_SET_OK_ANSWER = "1"
 
 # save_fub form values: paper format ids and orientation ids as Comexio's plan dialog sends them.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
@@ -447,6 +458,15 @@ class LiveStates:
 
     markers: dict[str, Any]
     knx: dict[str, Any]
+
+
+def io_written_over_admin_session(identifier: str) -> bool:
+    """Whether ComexioClient.set_io_value writes this IO over the admin session instead of /api/.
+
+    True for the 0-10 V analog outputs (AO1, AO2, ...), which /api/ refuses. Such a write needs a
+    logged-in admin session; a caller that keeps one can log in again on ComexioAuthenticationError.
+    """
+    return bool(_ADMIN_WRITTEN_IO_RE.fullmatch(identifier.strip()))
 
 
 class ComexioClient:
@@ -908,14 +928,32 @@ class ComexioClient:
         await self._api_set({"knx": f"K{knx_id}"}, value, what=f"Writing KNX object K{knx_id}")
 
     async def set_io_value(self, ext: str, io: str, value: float) -> None:
-        """Write an IO's value through the /api/ interface; ext is the extension name, io its identifier.
+        """Write an IO's value; ext is the extension name, io its identifier.
 
-        Success is only confirmed by the answer "0" or "1". A "<n>:not_found" answer raises
-        ComexioRequestRejectedError without a warning; any other unexpected answer is logged at WARNING.
+        Most IOs go through the /api/ interface: success is only confirmed by the answer "0" or "1",
+        a "<n>:not_found" or "Forbidden" answer raises ComexioRequestRejectedError, any other unexpected
+        answer is logged at WARNING. A 0-10 V analog output (io_written_over_admin_session) goes through
+        the admin session instead, as /api/ refuses it: needs a logged-in session (else
+        ComexioAuthenticationError), and any answer but "1" raises ComexioRequestRejectedError.
         A non-finite float (nan, inf) raises ValueError.
         """
+        what = f"Writing IO {io!r} of {ext!r}"
+        if io_written_over_admin_session(io):
+            await self._dashboard_set_io(ext, io, value, what=what)
+            return
+        await self._api_set({"ext": ext, "io": io}, value, what=what)
 
-        await self._api_set({"ext": ext, "io": io}, value, what=f"Writing IO {io!r} of {ext!r}")
+    async def _dashboard_set_io(self, ext: str, io: str, value: float, *, what: str) -> None:
+        """One dashboard/refresh "set" of an IO over the admin session, as Comexio's IO page sends it."""
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{what}: {value!r} is not a finite number")
+        payload = {_DASHBOARD_SET_KEY: {_ACTION_KEY: "set", "EName": ext, "IOIdentifier": io, "Value": value}}
+        data = await self._dashboard_refresh(payload, what=what)
+        result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
+        answer = result.get(_DASHBOARD_SET_KEY) if isinstance(result, dict) else None
+        if answer != _DASHBOARD_SET_OK_ANSWER:
+            raise ComexioRequestRejectedError(f"{what} was not accepted: Comexio answered {_excerpt(data)}")
+        _LOGGER.debug("%s: %s", what, answer)
 
     # --- Web-IO lifecycle (admin session) ---
 
@@ -1744,8 +1782,9 @@ class ComexioClient:
                     f"Comexio at {self._host} requires API credentials, none are configured (api_username)"
                 ) from err
             raise ComexioAuthenticationError(f"Comexio at {self._host} rejected the API credentials") from err
-        # A target Comexio does not know answers "0:not_found" with HTTP 200 — not a stored value.
-        if _NOT_RUNNING_SENTINEL_RE.fullmatch(body.strip()):
+        # A target Comexio does not know answers "0:not_found" with HTTP 200, one the API may not write
+        # "Forbidden" — neither stored the value.
+        if _NOT_RUNNING_SENTINEL_RE.fullmatch(body.strip()) or body.strip().casefold() == _API_SET_FORBIDDEN_ANSWER:
             raise ComexioRequestRejectedError(f"{what} was not accepted: Comexio answered {_excerpt(body)}")
         # The success answers are observations, not a documented contract, so any other answer is
         # only logged (an empty one included), never raised.

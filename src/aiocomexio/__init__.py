@@ -12,6 +12,7 @@ from .client import (
     SystemInfo,
     WebioBaseInfo,
     WebioCommandForm,
+    io_written_over_admin_session,
 )
 from .exceptions import (
     ComexioAuthenticationError,
@@ -51,6 +52,7 @@ __all__ = [
     "__version__",
     "fetch_certificate_fingerprint",
     "format_fingerprint",
+    "io_written_over_admin_session",
     "is_local_address",
     "normalize_fingerprint",
     "progress_trace_config",

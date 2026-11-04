@@ -35,7 +35,9 @@ login for an IP-address host, a request timeout; `progress_log_interval=10` adds
 waiting" log line for slow requests). Give every client its own session: `login()` clears the
 session's cookie jar. Value writes (`set_marker_value`, `set_io_value`, `set_knx_value`) go
 through Comexio's `/api/` with a separate API user: pass `api_username` / `api_password` to the
-client. Every call either returns data or raises a `ComexioError` subclass
+client. The exception are the 0-10 V analog outputs (`AO1`, `AO2`, …), which `/api/` refuses:
+`set_io_value` writes them over the admin session like Comexio's own IO page, so they need a
+`login()` first (`io_written_over_admin_session(identifier)` tells which IOs). Every call either returns data or raises a `ComexioError` subclass
 (`ComexioAuthenticationError`, `ComexioConnectionError`, `ComexioResponseError`,
 `ComexioDataError`, `ComexioRequestRejectedError` for a write the server refused,
 `ComexioCreatedWithoutIdError` for a create the server confirmed but whose id could not be read

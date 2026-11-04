@@ -153,6 +153,7 @@ _DIRECTION_IO_TYPES = {
     "80": {"id": 80, "binary": False, "min": -2000, "max": 2000, "unit": "var"},
     "81": {"id": 81, "binary": False, "min": "-2147483648", "max": "2147483647", "unit": "Wh"},
     "87": {"id": 87, "binary": True, "min": 0, "max": 1, "unit": "0/1"},
+    "120": {"id": 120, "binary": True, "min": 0, "max": 1, "unit": "0/1"},
 }
 _DIRECTION_IO_INPUT_TYPES = {
     "1": {"id": 1, "input": True},
@@ -160,6 +161,7 @@ _DIRECTION_IO_INPUT_TYPES = {
     "80": {"id": 80, "input": False},
     "81": {"id": 81, "input": False},
     "87": {"id": 87, "input": False},
+    "120": {"id": 120, "input": True},
 }
 
 
@@ -171,7 +173,10 @@ _DIRECTION_IO_INPUT_TYPES = {
         ("DI1", 87, 0, True),
         ("DI1", 87, "0", True),
         ("Q1", 2, 1, False),  # a real relay stays writable
-        ("AO1", 1, 1, True),  # IntIsOutput 1 alone does not make an IO writable
+        ("X1", 1, 1, True),  # IntIsOutput 1 alone does not make an IO writable
+        ("AO1", 1, 1, False),  # 0-10 V analog output, although $IOInputTypes says input
+        ("AO4", 120, 1, False),  # "Digital 10V": a binary analog output
+        ("AO1", 1, 0, True),  # IntIsOutput 0 beats the analog output prefix as well
         ("DI1", 87, None, False),  # no flag: $IOInputTypes as before
         ("DI1", 87, "yes", False),
         ("DI1", 87, True, False),

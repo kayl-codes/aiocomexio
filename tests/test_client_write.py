@@ -25,10 +25,11 @@ from aiocomexio import (
     ComexioResponseError,
     WebioBaseInfo,
     WebioCommandForm,
+    io_written_over_admin_session,
 )
 from aiocomexio import client as client_module
 from aiocomexio.webio import CONTENT_TYPE_JSON, WEBIO_PROTOCOL_HTTPS
-from tests.fake_comexio import LOGIN_PAGE, PASSWORD, USERNAME, FakeComexio
+from tests.fake_comexio import DASHBOARD_REFRESH_PATH, LOGIN_PAGE, PASSWORD, USERNAME, FakeComexio
 
 API_PATH = "/api/"
 WEBIO_HOME_PATH = "/admin/web_io/home"
@@ -160,6 +161,104 @@ async def test_set_value_not_found_answer_raises_naming_the_target(
     # The rejection must come from the server's answer, not from a check before the request went out.
     (request,) = comexio.received_at("GET", API_PATH)
     assert request.query == query
+
+
+@pytest.mark.parametrize(("call", "target", "query"), _SET_VALUE_CALLS)
+@pytest.mark.parametrize("answer", ["Forbidden", " Forbidden\n", "FORBIDDEN"])
+async def test_set_value_forbidden_answer_raises_naming_the_target(
+    api_client: ComexioClient,
+    comexio: FakeComexio,
+    call: Callable[[ComexioClient], Awaitable[None]],
+    target: str,
+    query: dict[str, str],
+    answer: str,
+) -> None:
+    # /api/ answers "Forbidden" (HTTP 200) for a target it may not write — the value is not stored (#259).
+    comexio.serve_text("GET", API_PATH, answer)
+
+    with pytest.raises(ComexioRequestRejectedError, match=re.escape(target)):
+        await call(api_client)
+
+    (request,) = comexio.received_at("GET", API_PATH)
+    assert request.query == query
+
+
+@pytest.mark.parametrize(
+    ("identifier", "admin"),
+    [
+        ("AO1", True),
+        ("ao12", True),
+        (" AO3 ", True),
+        ("Q1", False),
+        ("QI1", False),
+        ("AI1", False),
+        ("AO", False),
+        ("AOX1", False),
+        ("AO1a", False),
+        ("AO١", False),  # Arabic-Indic digit
+    ],
+)
+def test_io_written_over_admin_session(identifier: str, admin: bool) -> None:
+    assert io_written_over_admin_session(identifier) is admin
+
+
+@pytest.mark.parametrize(("value", "sent"), [(50, 50), (5.5, 5.5), (0, 0)])
+async def test_set_io_value_writes_an_analog_output_over_the_admin_session(
+    api_client: ComexioClient, comexio: FakeComexio, value: float, sent: float
+) -> None:
+    # /api/ answers "Forbidden" for AO*, Comexio's own IO page sets them over dashboard/refresh (#259).
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"1": "1"}})
+
+    await api_client.set_io_value("IO-Extension A2", "AO4", value)
+
+    (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
+    assert json.loads(request.form["json"]) == {
+        "1": {"action": "set", "EName": "IO-Extension A2", "IOIdentifier": "AO4", "Value": sent}
+    }
+    assert comexio.received_at("GET", API_PATH) == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"result": {"1": "0:io_not_found"}},
+        {"result": {"1": "0"}},
+        {"result": {"1": 1}},
+        {"result": {"1": None}},
+        {"result": {}},
+        {"result": "1"},
+        {},
+        ["1"],
+    ],
+)
+async def test_set_io_value_analog_output_raises_unless_comexio_answers_1(
+    api_client: ComexioClient, comexio: FakeComexio, answer: Any
+) -> None:
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, answer)
+
+    with pytest.raises(ComexioRequestRejectedError, match=re.escape("IO 'AO1' of 'UD1'")):
+        await api_client.set_io_value("UD1", "AO1", 30)
+
+    assert len(comexio.received_at("POST", DASHBOARD_REFRESH_PATH)) == 1
+
+
+async def test_set_io_value_analog_output_without_admin_session_raises_authentication_error(
+    api_client: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("POST", DASHBOARD_REFRESH_PATH, LOGIN_PAGE)
+
+    with pytest.raises(ComexioAuthenticationError):
+        await api_client.set_io_value("UD1", "AO1", 30)
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+async def test_set_io_value_analog_output_rejects_a_non_finite_value_before_sending(
+    api_client: ComexioClient, comexio: FakeComexio, value: float
+) -> None:
+    with pytest.raises(ValueError, match="not a finite number"):
+        await api_client.set_io_value("UD1", "AO1", value)
+
+    assert comexio.received_at("POST", DASHBOARD_REFRESH_PATH) == []
 
 
 _AWKWARD_EXT_NAMES = ["A&B", "A#B", "A+B", "A%B", "A%41", "A/B", "A=B", "A?B", "Küche ä", "100% & #1 + a=b/c?d"]

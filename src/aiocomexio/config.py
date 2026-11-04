@@ -110,7 +110,9 @@ _LOG_REPR = reprlib.Repr(
 # Line breaks and other control characters of a scraped name would forge log lines.
 _LOG_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
-_OUTPUT_IO_RE = re.compile(r"^Q\d+$")
+# AO*: the 0-10 V analog outputs; $IOInputTypes marks their types (0-10V, 0-10V Prozent, Digital 10V)
+# as inputs, so only the identifier makes them writable (#259 of homeassistant-comexio).
+_OUTPUT_IO_RE = re.compile(r"^(?:Q|AO)\d+$")
 _INPUT_IO_RE = re.compile(r"^(?:I|AI|QI)\d+$")
 _ANALOG_OUTPUT_IO_RE = re.compile(r"^QI\d+$")
 _BINARY_IO_RE = re.compile(r"^[QI]\d+$")
@@ -1348,7 +1350,7 @@ def _io_direction(
     IntIsOutput 0 comes first: Comexio never writes such an IO (the Smart Meter's readings, a PIR,
     a Panic button), so it is read-only whatever its identifier says — the Smart Meter's Q1-Q3 are
     reactive power, not relays. IntIsOutput 1 does not make an IO writable on its own.
-    Then the identifier prefix: Q* are relay/dimmer outputs, I*/AI*/QI* are inputs. $IOInputTypes
+    Then the identifier prefix: Q* are relay/dimmer outputs and AO* analog outputs, I*/AI*/QI* are inputs. $IOInputTypes
     is only a fallback for other identifiers, because the same TypeId (e.g. 2 = binary 0/1) is
     shared by inputs and outputs.
     """
