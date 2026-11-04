@@ -20,6 +20,7 @@ from aiohttp import web
 from aiocomexio import (
     ComexioAuthenticationError,
     ComexioClient,
+    ComexioConnectionError,
     ComexioDataError,
     ComexioRequestRejectedError,
     ComexioResponseError,
@@ -269,6 +270,61 @@ async def test_set_io_value_analog_output_without_admin_session_raises_authentic
 
     # Comexio's login page answered the write, the client did not refuse it beforehand.
     assert len(comexio.received_at("POST", DASHBOARD_REFRESH_PATH)) == 1
+
+
+async def test_set_io_value_analog_output_writes_once_more_after_a_dropped_connection(
+    api_client: ComexioClient, comexio: FakeComexio
+) -> None:
+    # Seen live (#259): Comexio closes an idle connection, and the write after a pause failed on it.
+    bodies: list[Any] = []
+
+    async def drop_first(request: web.Request) -> web.StreamResponse:
+        bodies.append(json.loads(str((await request.post())["json"])))
+        if len(bodies) == 1:
+            assert request.transport is not None
+            request.transport.close()
+        return web.json_response({"result": {"1": "1"}})
+
+    comexio.serve("POST", DASHBOARD_REFRESH_PATH, drop_first)
+
+    await api_client.set_io_value("UD1", "AO1", 30)
+
+    written = {"1": {"action": "set", "EName": "UD1", "IOIdentifier": "AO1", "Value": 30}}
+    assert bodies == [written, written]
+
+
+async def test_set_io_value_analog_output_raises_when_the_connection_drops_twice(
+    api_client: ComexioClient, comexio: FakeComexio
+) -> None:
+    async def drop(request: web.Request) -> web.StreamResponse:
+        assert request.transport is not None
+        request.transport.close()
+        return web.Response()
+
+    comexio.serve("POST", DASHBOARD_REFRESH_PATH, drop)
+
+    with pytest.raises(ComexioConnectionError, match=re.escape("IO 'AO1' of 'UD1'")):
+        await api_client.set_io_value("UD1", "AO1", 30)
+
+    assert len(comexio.received_at("POST", DASHBOARD_REFRESH_PATH)) == 2
+
+
+async def test_set_io_value_analog_output_does_not_repeat_on_other_connection_errors(
+    api_client: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    async def refused(*_: Any, **__: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        raise ComexioConnectionError("refused") from aiohttp.ClientConnectionError("refused")
+
+    monkeypatch.setattr(api_client, "_dashboard_refresh", refused)
+
+    with pytest.raises(ComexioConnectionError):
+        await api_client.set_io_value("UD1", "AO1", 30)
+
+    assert calls == 1
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])

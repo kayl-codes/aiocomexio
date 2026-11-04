@@ -16,7 +16,7 @@ import math
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -825,19 +825,13 @@ class ComexioClient:
 
     async def _session_check_body(self) -> str:
         """Body of the session check request, asked once more after a dropped connection."""
-        for attempt in range(2):
-            try:
-                return await self._request_text(
-                    "POST",
-                    _BUS_WORKLOAD_PATH,
-                    what="Session check",
-                    headers=self._xhr_headers(_BUS_WORKLOAD_REFERER_PATH),
-                )
-            except ComexioConnectionError as err:
-                if attempt or not isinstance(err.__cause__, aiohttp.ServerDisconnectedError):
-                    raise
-                _LOGGER.debug("Session check: %s — asking once more", err)
-        raise AssertionError("unreachable")  # pragma: no cover
+        what = "Session check"
+        return await _once_more_if_dropped(
+            what,
+            lambda: self._request_text(
+                "POST", _BUS_WORKLOAD_PATH, what=what, headers=self._xhr_headers(_BUS_WORKLOAD_REFERER_PATH)
+            ),
+        )
 
     async def get_bus_workload(self) -> dict[str, Any]:
         """Internal bus workload and SD card presence (the admin in/output info)."""
@@ -948,7 +942,8 @@ class ComexioClient:
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"{what}: {value!r} is not a finite number")
         payload = {_DASHBOARD_SET_KEY: {_ACTION_KEY: "set", "EName": ext, "IOIdentifier": io, "Value": value}}
-        data = await self._dashboard_refresh(payload, what=what)
+        # Comexio closes an idle connection: the next request fails on it. Setting a value twice is harmless.
+        data = await _once_more_if_dropped(what, lambda: self._dashboard_refresh(payload, what=what))
         result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
         answer = result.get(_DASHBOARD_SET_KEY) if isinstance(result, dict) else None
         if answer != _DASHBOARD_SET_OK_ANSWER:
@@ -2086,6 +2081,17 @@ def _require_plan_collections(data: dict[str, Any], fub_id: int) -> None:
     missing = plan_payload_missing_collections(data)
     if missing:
         raise ComexioDataError(f"Function plan {fub_id} payload has no {' / '.join(missing)} collection")
+
+
+async def _once_more_if_dropped[T](what: str, request: Callable[[], Awaitable[T]]) -> T:
+    """Await a request, and once more if the server dropped the connection under it."""
+    try:
+        return await request()
+    except ComexioConnectionError as err:
+        if not isinstance(err.__cause__, aiohttp.ServerDisconnectedError):
+            raise
+        _LOGGER.debug("%s: %s — asking once more", what, err)
+    return await request()
 
 
 def _require(kind: str, accept: Callable[[Any], bool], values: dict[str, Any]) -> None:
