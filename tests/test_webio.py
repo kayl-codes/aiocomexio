@@ -287,3 +287,44 @@ def test_knx_loopback_class_json() -> None:
     assert payload["base"] == {"Identifier": WEBIO_CLASS_NAME_KNX_LOOPBACK, "UseCookies": 0, "Login": 3, "BaseId": 0}
     assert payload["commands"] == [command]
     assert json.loads(knx_loopback_class_json())["commands"] == []
+
+
+def test_build_webio_commands_default_payload_has_no_server(parsed: dict[str, Any]) -> None:
+    assert all("server=" not in cmd["Data"] for cmd in build_webio_commands(_HOOK, parsed))
+
+
+@pytest.mark.parametrize("webio_class", list(WebioClass))
+def test_build_webio_commands_writes_the_server_into_every_payload(
+    parsed: dict[str, Any], webio_class: WebioClass
+) -> None:
+    source = parse_config(load_json_fixture("config_quickbus.json")) if webio_class is WebioClass.QUICKBUS else parsed
+    commands = build_webio_commands(_HOOK, source, webio_class, server='io"srv1')
+
+    assert commands
+    assert all(', server="io\\"srv1" }' in cmd["Data"] for cmd in commands)
+
+
+@pytest.mark.parametrize("webio_class", list(WebioClass))
+def test_build_webio_commands_gives_every_command_the_path_of_its_own_item(
+    parsed: dict[str, Any], webio_class: WebioClass
+) -> None:
+    """A callable path gets the class and the parsed item of each command, so no two share a path."""
+    source = parse_config(load_json_fixture("config_quickbus.json")) if webio_class is WebioClass.QUICKBUS else parsed
+
+    def path_for(cls: WebioClass, item: Any) -> str:
+        return f"/h/{cls}/{item['id']}/{item.get('ext_name', '')}"
+
+    commands = build_webio_commands(path_for, source, webio_class)
+
+    assert commands
+    assert all(cmd["Parameter"].startswith(f"/h/{webio_class}/") for cmd in commands)
+    assert len({cmd["Parameter"] for cmd in commands}) == len(commands)
+
+
+def test_generate_webio_json_forwards_path_callable_and_server(parsed: dict[str, Any]) -> None:
+    template = json.loads(
+        generate_webio_json(lambda cls, item: f"/h/{cls}/{item['id']}", "n [M]", parsed, WebioClass.MARKER, server="s")
+    )
+
+    assert template["commands"]
+    assert all(c["Parameter"].startswith("/h/marker/") and 'server="s"' in c["Data"] for c in template["commands"])
