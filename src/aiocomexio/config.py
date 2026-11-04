@@ -110,7 +110,12 @@ _LOG_REPR = reprlib.Repr(
 # Line breaks and other control characters of a scraped name would forge log lines.
 _LOG_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
-_OUTPUT_IO_RE = re.compile(r"^Q\d+$")
+# AO*: the 0-10 V analog outputs; $IOInputTypes marks their types (0-10V, 0-10V Prozent, Digital 10V)
+# as inputs, so only the identifier makes them writable (#259 of homeassistant-comexio). Matched exactly
+# (ASCII digits, \Z: no trailing newline) like client.io_written_over_admin_session, so an AO classified
+# writable here is written over that route.
+_OUTPUT_IO_RE = re.compile(r"^(?:Q|AO)\d+\Z", re.ASCII)
+_ANALOG_0_10V_OUTPUT_IO_RE = re.compile(r"^AO\d+\Z", re.ASCII)
 _INPUT_IO_RE = re.compile(r"^(?:I|AI|QI)\d+$")
 _ANALOG_OUTPUT_IO_RE = re.compile(r"^QI\d+$")
 _BINARY_IO_RE = re.compile(r"^[QI]\d+$")
@@ -1348,7 +1353,7 @@ def _io_direction(
     IntIsOutput 0 comes first: Comexio never writes such an IO (the Smart Meter's readings, a PIR,
     a Panic button), so it is read-only whatever its identifier says — the Smart Meter's Q1-Q3 are
     reactive power, not relays. IntIsOutput 1 does not make an IO writable on its own.
-    Then the identifier prefix: Q* are relay/dimmer outputs, I*/AI*/QI* are inputs. $IOInputTypes
+    Then the identifier prefix: Q* are relay/dimmer outputs and AO* analog outputs, I*/AI*/QI* are inputs. $IOInputTypes
     is only a fallback for other identifiers, because the same TypeId (e.g. 2 = binary 0/1) is
     shared by inputs and outputs.
     """
@@ -1391,6 +1396,21 @@ class _IoEntryBuilder:
             qb_device=qb_device,
             is_input=is_input,
         )
+
+
+def _classify_io_by_identifier(
+    ident_upper: str, v_min: float | None, v_max: float | None
+) -> tuple[bool, float | None, float | None]:
+    """Return (is_binary, min, max) of an IO the type table has no usable row for."""
+    if _ANALOG_OUTPUT_IO_RE.match(ident_upper):
+        return False, v_min, 0
+    if _ANALOG_0_10V_OUTPUT_IO_RE.match(ident_upper):
+        # Writable: a bound of 1 would cap it. The identifier does not tell "Digital 10V" from an
+        # analog type, analog with the Web-IO default range takes either value.
+        return False, None, None
+    if _BINARY_IO_RE.match(ident_upper):
+        return True, v_min, 1
+    return False, v_min, v_max
 
 
 def _build_io_entry(
@@ -1439,10 +1459,7 @@ def _build_io_entry(
                 _log_safe(ident),
                 _short_repr(io_item.get("InOutputTypeId")),
             )
-        if _ANALOG_OUTPUT_IO_RE.match(ident_upper):
-            is_binary, v_max = False, 0
-        elif _BINARY_IO_RE.match(ident_upper):
-            is_binary, v_max = True, 1
+        is_binary, v_min, v_max = _classify_io_by_identifier(ident_upper, v_min, v_max)
 
     owner = qb_device["name"] if qb_device else ext_name
     io_name = f"{owner} {ident} {description}" if description else f"{owner} {ident}"
