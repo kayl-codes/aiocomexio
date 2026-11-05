@@ -64,7 +64,10 @@ pre-commit run --all-files
 - ruff-clean, mypy-strict-clean, all tests green before a change counts as done (pre-commit hooks
   `mypy` and `pytest` enforce the same locally).
 - Cognitive complexity ≤ 15 (SonarQube S3776); no duplicated string literals (S1192) — extract
-  constants.
+  constants. `tests/test_cognitive_complexity.py` measures it with complexipy before the push.
+  complexipy scores close to but not exactly like SonarCloud, so the one permitted exception is its
+  `BASELINE`: functions SonarCloud accepts but complexipy already rated above 15, pinned at that
+  score — lower or drop an entry once the function is simpler, never add one for new code.
 - A red test is a finding, not an obstacle — never delete or loosen an assertion to make it pass.
   Snapshots: regenerate with `pytest --snapshot-update` only for intended output changes and state the
   reviewed diff in the PR.

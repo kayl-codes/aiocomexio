@@ -58,8 +58,9 @@ published on PyPI and consumed by the Home Assistant integration
   above, a Quickbus IO with a malformed direction flag kept read-only, and the identifier classification when the
   whole IO type table is missing (`parse_config` warns; leaving out every IO for one poll would drop entities).
 - **Public API:** fully typed; flag breaking changes to public names or signatures that are not called out in the PR.
-- **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776); no duplicated string literals — extract
-  constants (S1192).
+- **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776). `test_cognitive_complexity.py` checks it
+  locally with complexipy; its `BASELINE` is the only permitted exception (functions SonarCloud accepts but complexipy
+  rates above 15) — flag a new entry there. No duplicated string literals — extract constants (S1192).
 - **Dependencies:** a dependency change must come with an updated `uv.lock` (OSV-Scanner scans the lock file).
 
 ## Parsing Comexio answers, logging and error messages
