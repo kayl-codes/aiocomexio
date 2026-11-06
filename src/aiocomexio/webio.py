@@ -55,8 +55,8 @@ WEBIO_PROTOCOL_HTTPS = 1
 
 
 def lua_escape(value: Any) -> str:
-    """Escape a value for embedding in a double-quoted Lua string literal (which cannot hold a raw line break)."""
-    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+    """Escape a value for embedding in a double-quoted Lua string literal."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _check_server(server: str | None) -> None:
@@ -68,7 +68,11 @@ def _check_server(server: str | None) -> None:
 def _server_field(server: str | None) -> str:
     """The ``, server="..."`` tail of a webhook Lua payload, empty without a server name (None or empty)."""
     _check_server(server)
-    return f', server="{lua_escape(server)}"' if server else ""
+    if not server:
+        return ""
+    # A Lua string literal cannot hold a raw line break, and a server name is free text.
+    escaped = lua_escape(server).replace("\n", "\\n").replace("\r", "\\r")
+    return f', server="{escaped}"'
 
 
 def _webio_data_lua(payload: str) -> str:

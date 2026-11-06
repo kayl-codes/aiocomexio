@@ -369,6 +369,10 @@ def test_path_callable_returning_a_non_string_is_rejected(parsed: dict[str, Any]
         build_webio_commands(lambda cls, item: 7, parsed, WebioClass.MARKER)  # type: ignore[arg-type,return-value]
 
 
+def test_lua_escape_leaves_line_breaks_of_existing_fields_alone() -> None:
+    assert lua_escape("a\r\nb") == "a\r\nb"
+
+
 def test_server_name_with_line_break_stays_a_valid_lua_string(parsed: dict[str, Any]) -> None:
     commands = build_webio_commands(_HOOK, parsed, WebioClass.MARKER, server="a\r\nb")
 
