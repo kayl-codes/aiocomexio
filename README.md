@@ -35,8 +35,8 @@ login for an IP-address host, a request timeout; `progress_log_interval=10` adds
 waiting" log line for slow requests). Give every client its own session: `login()` clears the
 session's cookie jar. Value writes (`set_marker_value`, `set_io_value`, `set_knx_value`) go
 through Comexio's `/api/` with a separate API user: pass `api_username` / `api_password` to the
-client. `set_io_value` sends only the relay and dimmer outputs (`Q1`, `Q2`, …) to `/api/`, which
-refuses nearly every other IO. It writes the others (the 0-10 V analog outputs `AO1`, …, and the IOs
+client. `set_io_value` sends only the relay and dimmer outputs (`Q1`, `Q2`, …) and the Dali groups
+(`DG1`, …) to `/api/`, which refuses nearly every other IO. It writes the others (the 0-10 V analog outputs `AO1`, …, and the IOs
 Comexio writes itself, such as a Multiroom-Server's `Alarm1` or a Touchpanel's `Bright1`) over the
 admin session like Comexio's own IO page, so they need a `login()` first
 (`io_written_over_admin_session(identifier)` tells which IOs). Do not pass Quickbus IOs to

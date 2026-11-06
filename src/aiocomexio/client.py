@@ -320,13 +320,13 @@ _API_SET_OK_ANSWERS = ("0", "1")
 # What /api/?action=set answers (HTTP 200) for a target it does not let the API write: the 0-10 V
 # analog outputs and the Quickbus IOs (verified live, firmware 11.1.5, 2026-11-04).
 _API_SET_FORBIDDEN_ANSWER = "forbidden"  # compared case-insensitively
-# The IOs sent to /api/: relay and dimmer outputs Q*. It answers "Forbidden" for nearly every other
-# output, so those go over the admin session's dashboard/refresh "set", as Comexio's own IO page
-# does: the 0-10 V analog outputs AO* (2026-11-04) and the IOs Comexio writes itself, e.g. the
+# The IOs sent to /api/: relay and dimmer outputs Q* and the Dali groups DG* (/api/ accepts DG1, so
+# an API-only caller can still write them). It answers "Forbidden" for nearly every other output,
+# so those go over the admin session's dashboard/refresh "set", as Comexio's own IO page does: the
+# 0-10 V analog outputs AO* (2026-11-04) and the IOs Comexio writes itself, e.g. the
 # Multiroom-Server's Next1, Alarm1, CurVol1 and the Touchpanel's Bright1, DisplayOn1, R (2026-11-06;
-# verified live, firmware 11.1.5). The admin session writes every one of them, also a Dali group DG1,
-# which /api/ happens to accept as well.
-_API_WRITTEN_IO_RE = re.compile(r"Q\d+", re.ASCII | re.IGNORECASE)
+# verified live, firmware 11.1.5).
+_API_WRITTEN_IO_RE = re.compile(r"(?:Q|DG)\d+", re.ASCII | re.IGNORECASE)
 # The key of the one entry of a dashboard/refresh "set" request, and its answer for a stored value;
 # an unknown extension or IO answers "0:io_not_found". A value beyond the IO's range is clamped.
 _DASHBOARD_SET_KEY = "1"
@@ -467,9 +467,9 @@ class LiveStates:
 def io_written_over_admin_session(identifier: str) -> bool:
     """Whether ComexioClient.set_io_value writes this IO over the admin session instead of /api/.
 
-    True for every IO but the relay and dimmer outputs Q1, Q2, ..., which go to /api/: the 0-10 V
-    analog outputs (AO1, ...) and the other IOs Comexio writes itself (Bright1, Alarm1, CurVol1, ...),
-    which /api/ refuses.
+    True for every IO but the relay and dimmer outputs Q1, Q2, ... and the Dali groups DG1, DG2, ...,
+    which go to /api/: the 0-10 V analog outputs (AO1, ...) and the other IOs Comexio writes itself
+    (Bright1, Alarm1, CurVol1, ...), which /api/ refuses.
     Such a write needs a logged-in admin session; a caller that keeps one can log in again on
     ComexioAuthenticationError.
     """

@@ -150,6 +150,12 @@ _SET_VALUE_CALLS = [
         "IO 'Q1' of 'LED-Dimmer A3'",
         {"action": "set", "value": "50", "ext": "LED-Dimmer A3", "io": "Q1"},
     ),
+    # A Dali group needs no admin login: /api/ writes it (verified live 2026-11-06).
+    (
+        lambda c: c.set_io_value("Dali 1", "DG1", 80),
+        "IO 'DG1' of 'Dali 1'",
+        {"action": "set", "value": "80", "ext": "Dali 1", "io": "DG1"},
+    ),
     (lambda c: c.set_marker_value(5, 1), "marker M5", {"action": "set", "value": "1", "marker": "M5"}),
     (lambda c: c.set_knx_value(3, 1), "KNX object K3", {"action": "set", "value": "1", "knx": "K3"}),
 ]
@@ -196,27 +202,30 @@ async def test_set_value_forbidden_answer_raises_naming_the_target(
 @pytest.mark.parametrize(
     ("identifier", "admin"),
     [
-        # /api/ writes the relay and dimmer outputs only.
+        # /api/ writes the relay and dimmer outputs and the Dali groups (DG1 verified live 2026-11-06).
         ("Q1", False),
         ("q16", False),
-        # It answers "Forbidden" for every other output (#259, verified live 2026-11-04 and 2026-11-06).
+        ("DG1", False),
+        ("dg16", False),
+        # It answers "Forbidden" for nearly every other output (#259, verified live 2026-11-04 and 2026-11-06).
         ("AO1", True),
         ("ao12", True),
         ("Next1", True),
         ("Alarm1", True),
         ("CurVol1", True),
         ("Bright1", True),
-        ("DG1", True),
         ("R", True),
         # Inputs are never written; would they be, /api/ would not take them either.
         ("QI1", True),
         ("AI1", True),
-        # Matched exactly: anything but Q and ASCII digits is no relay output.
+        # Matched exactly: anything but Q or DG and ASCII digits goes over the admin session.
         (" Q3 ", True),
         ("Q1\n", True),
         ("Q1a", True),
         ("QD2", True),
         ("Q", True),
+        ("DG", True),
+        ("DG1a", True),
         ("Q١", True),  # Arabic-Indic digit
     ],
 )

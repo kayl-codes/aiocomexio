@@ -344,6 +344,28 @@ def test_plain_io_sharing_an_identifier_with_a_quickbus_io_is_no_conflict(caplog
 
     assert {"19", "201", "211"} <= {io["id"] for io in result["io"]}
     assert "repeat within their device" not in caplog.text
+    # Already read-only (IntIsOutput 0), so no write by name can hit the Quickbus G1.
+    assert _io_all(result)["19"]["is_input"] is True
+    assert "share their identifier with a Quickbus IO" not in caplog.text
+
+
+def test_a_writable_io_sharing_a_quickbus_ios_identifier_becomes_read_only(caplog: pytest.LogCaptureFixture) -> None:
+    """A write by extension and identifier could hit the Quickbus IO, e.g. for an IO missing from a stale map."""
+    conf = load_json_fixture("config_quickbus.json")
+    inoutput = _base_ext(conf)["inoutput"]
+    # R with IntIsOutput 1, but not in the Quickbus map; matched case-insensitively.
+    inoutput["19"] = {**inoutput["204"], "Id": 19, "Identifier": "r"}
+    inoutput["20"] = {**inoutput["204"], "Id": 20, "Identifier": "Q1"}  # no Quickbus IO is named Q1
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["19"]["quickbus"] is None
+    assert ios["19"]["is_input"] is True
+    assert ios["20"]["is_input"] is False
+    assert ios["204"]["is_input"] is False  # the Quickbus IO itself keeps its direction
+    assert "1 IOs of extension 1 share their identifier with a Quickbus IO" in caplog.text
+    assert "'r'" in caplog.text
 
 
 @pytest.mark.parametrize("mapping", [{}, {"lowcan": []}])

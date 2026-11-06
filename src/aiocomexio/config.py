@@ -1145,6 +1145,33 @@ class _QuickbusContext:
             )
 
 
+def _guard_quickbus_name_clashes(ext_id: str, entries: list[dict[str, Any]]) -> None:
+    """Make an IO read-only whose identifier one of the extension's Quickbus IOs repeats.
+
+    A write addresses an IO by extension and identifier, so it could hit the Quickbus IO of that name
+    instead — e.g. an IO missing from a stale Quickbus IO map, which reads as a plain IO with its
+    IntIsOutput 1. Inactive IOs count too: they keep their name, so a write by name could still meet
+    one. On a live firmware 11.1.5 config only read-only inputs (I1, ...) share such a name.
+    """
+    quickbus_idents = {str(entry["identifier"]).upper() for entry in entries if entry["quickbus"]}
+    clashes = [
+        entry
+        for entry in entries
+        if not entry["quickbus"] and not entry["is_input"] and str(entry["identifier"]).upper() in quickbus_idents
+    ]
+    for entry in clashes:
+        entry["is_input"] = True
+        entry["momentary"] = False
+    if clashes:
+        _LOGGER.warning(
+            "%d IOs of extension %s share their identifier with a Quickbus IO, so a write by name could hit the "
+            "Quickbus IO; they are treated as read-only: %s",
+            len(clashes),
+            _log_safe(ext_id),
+            log_excerpt([_short_repr(entry["identifier"]) for entry in clashes]),
+        )
+
+
 def _ambiguous_ios(ext_id: str, entries: list[dict[str, Any]]) -> set[int]:
     """Positions of the active IOs whose device lists their identifier more than once.
 
@@ -1346,6 +1373,7 @@ def _process_extension_ios(
             "Skipping %d IO entries of extension %s without a valid Id: %s", len(bad_ids), ext_id, log_excerpt(bad_ids)
         )
     qb.report()
+    _guard_quickbus_name_clashes(ext_id, entries)
     untyped = _untyped_quickbus_ios(ext_id, entries, type_ids, builder.io_types)
     for pos in untyped:
         entries[pos]["is_binary"] = None  # unknown kind: a plan renders its pins as unknown, not analog
