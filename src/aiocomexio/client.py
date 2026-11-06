@@ -535,6 +535,9 @@ class ComexioClient:
         cannot be encoded for the login form), ComexioCertificateMismatchError if a pinned client
         meets a foreign certificate, ComexioConnectionError / ComexioResponseError /
         ComexioDataError if the login could not be carried out at all.
+        It starts a new session: an admin-session request running alongside it (get_live_states, an
+        admin-session set_io_value, ...) can fail with ComexioAuthenticationError, so a caller that logs
+        in again while it keeps working serializes the two.
         """
         self._warn_plain_http()
         _LOGGER.debug("Starting RSA login for %s", self._host)
@@ -931,14 +934,15 @@ class ComexioClient:
     async def set_io_value(self, ext: str, io: str, value: float) -> None:
         """Write an IO's value; ext is the extension name, io its identifier.
 
-        A relay or dimmer output Q* goes through the /api/ interface: success is only confirmed by the
-        answer "0" or "1", a "<n>:not_found" or "Forbidden" answer raises ComexioRequestRejectedError, any
-        other unexpected answer is logged at WARNING. Every other IO (io_written_over_admin_session) goes
-        through the admin session instead, as /api/ refuses it: needs a logged-in session (else
-        ComexioAuthenticationError), and any answer but "1" raises ComexioRequestRejectedError. "1" only
-        says Comexio stored the value: one beyond the IO's range is clamped, and a momentary IO (parse_config)
-        falls back to 0 right after. A Quickbus IO cannot be addressed by ext and identifier (they repeat
-        across its devices) and must not be passed: the admin session could write another device's IO of that name.
+        A relay or dimmer output Q* and a Dali group DG* go through the /api/ interface, without an admin
+        login: success is only confirmed by the answer "0" or "1", a "<n>:not_found" or "Forbidden" answer
+        raises ComexioRequestRejectedError, any other unexpected answer is logged at WARNING. Every other IO
+        (io_written_over_admin_session) goes through the admin session instead, as /api/ refuses it: needs a
+        logged-in session (else ComexioAuthenticationError), and any answer but "1" raises
+        ComexioRequestRejectedError. "1" only says Comexio stored the value: one beyond the IO's range is
+        clamped, and a momentary IO (parse_config) falls back to 0 right after. A Quickbus IO cannot be
+        addressed by ext and identifier (they repeat across its devices) and must not be passed: the admin
+        session could write another device's IO of that name.
         A non-finite float (nan, inf) raises ValueError.
         """
         what = f"Writing IO {io!r} of {ext!r}"
