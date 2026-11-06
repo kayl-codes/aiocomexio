@@ -287,3 +287,93 @@ def test_knx_loopback_class_json() -> None:
     assert payload["base"] == {"Identifier": WEBIO_CLASS_NAME_KNX_LOOPBACK, "UseCookies": 0, "Login": 3, "BaseId": 0}
     assert payload["commands"] == [command]
     assert json.loads(knx_loopback_class_json())["commands"] == []
+
+
+def test_build_webio_commands_default_payload_has_no_server(parsed: dict[str, Any]) -> None:
+    assert all("server=" not in cmd["Data"] for cmd in build_webio_commands(_HOOK, parsed))
+
+
+@pytest.mark.parametrize("webio_class", list(WebioClass))
+def test_build_webio_commands_writes_the_server_into_every_payload(
+    parsed: dict[str, Any], webio_class: WebioClass
+) -> None:
+    source = parse_config(load_json_fixture("config_quickbus.json")) if webio_class is WebioClass.QUICKBUS else parsed
+    commands = build_webio_commands(_HOOK, source, webio_class, server='io"srv1')
+
+    assert commands
+    assert all(', server="io\\"srv1" }' in cmd["Data"] for cmd in commands)
+
+
+@pytest.mark.parametrize("webio_class", list(WebioClass))
+def test_build_webio_commands_gives_every_command_the_path_of_its_own_item(
+    parsed: dict[str, Any], webio_class: WebioClass
+) -> None:
+    """A callable path gets the class and the parsed item of each command, so no two share a path."""
+    source = parse_config(load_json_fixture("config_quickbus.json")) if webio_class is WebioClass.QUICKBUS else parsed
+
+    asked: list[tuple[WebioClass, str]] = []
+    items: list[Any] = []
+
+    def path_for(cls: WebioClass, item: Any) -> str:
+        path = f"/h/{cls}/{item['id']}/{item.get('ext_name', '')}"
+        asked.append((cls, path))
+        items.append(item)
+        return path
+
+    commands = build_webio_commands(path_for, source, webio_class)
+
+    assert commands
+    # Exactly the paths the callback returned, one per command, and only for the wanted class.
+    assert sorted(cmd["Parameter"] for cmd in commands) == sorted(path for _, path in asked)
+    assert {cls for cls, _ in asked} == {webio_class}
+    assert len({cmd["Parameter"] for cmd in commands}) == len(commands)
+    # The path of a command was asked for with the very item that command is built from: its payload names it.
+    by_path = {cmd["Parameter"]: cmd for cmd in commands}
+    for (_, path), item in zip(asked, items, strict=True):
+        token = f'io="{item["identifier"]}"' if webio_class is WebioClass.IO else f'id="{item["id"]}"'
+        assert token in by_path[path]["Data"]
+
+
+def test_generate_webio_json_forwards_path_callable_and_server(parsed: dict[str, Any]) -> None:
+    template = json.loads(
+        generate_webio_json(lambda cls, item: f"/h/{cls}/{item['id']}", "n [M]", parsed, WebioClass.MARKER, server="s")
+    )
+
+    expected = [f"/h/marker/{m['id']}" for m in parsed["markers"]]
+    assert sorted(c["Parameter"] for c in template["commands"]) == sorted(expected)
+    assert all('server="s"' in c["Data"] for c in template["commands"])
+
+
+def test_path_callable_that_handles_one_class_only_serves_that_class_upload(parsed: dict[str, Any]) -> None:
+    def markers_only(cls: WebioClass, item: Any) -> str:
+        assert cls is WebioClass.MARKER
+        return f"/h/{item['id']}"
+
+    commands = build_webio_commands(markers_only, parsed, WebioClass.MARKER)
+
+    assert commands
+
+
+def test_non_string_server_is_rejected(parsed: dict[str, Any]) -> None:
+    with pytest.raises(TypeError, match="server must be a str"):
+        build_webio_commands(_HOOK, parsed, WebioClass.MARKER, server=5)  # type: ignore[arg-type]
+
+
+def test_non_string_server_is_rejected_without_any_command() -> None:
+    with pytest.raises(TypeError, match="server must be a str"):
+        build_webio_commands(_HOOK, {}, server=5)  # type: ignore[arg-type]
+
+
+def test_path_callable_returning_a_non_string_is_rejected(parsed: dict[str, Any]) -> None:
+    with pytest.raises(TypeError, match="must return a str"):
+        build_webio_commands(lambda cls, item: 7, parsed, WebioClass.MARKER)  # type: ignore[arg-type,return-value]
+
+
+def test_lua_escape_leaves_line_breaks_of_existing_fields_alone() -> None:
+    assert lua_escape("a\r\nb") == "a\r\nb"
+
+
+def test_server_name_with_line_break_stays_a_valid_lua_string(parsed: dict[str, Any]) -> None:
+    commands = build_webio_commands(_HOOK, parsed, WebioClass.MARKER, server="a\r\nb\0c")
+
+    assert all(', server="a\\r\\nb\\0c" }' in cmd["Data"] for cmd in commands)
