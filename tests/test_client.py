@@ -431,6 +431,7 @@ async def test_a_login_that_stalls_gives_up_and_lets_requests_through(
     async with asyncio.timeout(5):
         with pytest.raises(ComexioConnectionError, match="took longer than 0.5 s"):
             await login
+        assert not queued.done()  # it waited behind the login, so it cannot have its answer yet
         assert await queued is True  # released by the give-up, the held login still has not answered
 
     held_login.release.set()
