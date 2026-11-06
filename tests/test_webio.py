@@ -374,6 +374,6 @@ def test_lua_escape_leaves_line_breaks_of_existing_fields_alone() -> None:
 
 
 def test_server_name_with_line_break_stays_a_valid_lua_string(parsed: dict[str, Any]) -> None:
-    commands = build_webio_commands(_HOOK, parsed, WebioClass.MARKER, server="a\r\nb")
+    commands = build_webio_commands(_HOOK, parsed, WebioClass.MARKER, server="a\r\nb\0c")
 
-    assert all(', server="a\\r\\nb" }' in cmd["Data"] for cmd in commands)
+    assert all(', server="a\\r\\nb\\0c" }' in cmd["Data"] for cmd in commands)

@@ -70,8 +70,8 @@ def _server_field(server: str | None) -> str:
     _check_server(server)
     if not server:
         return ""
-    # A Lua string literal cannot hold a raw line break, and a server name is free text.
-    escaped = lua_escape(server).replace("\n", "\\n").replace("\r", "\\r")
+    # A Lua string literal cannot hold a raw line break or NUL, and a server name is free text.
+    escaped = lua_escape(server).replace("\n", "\\n").replace("\r", "\\r").replace("\0", "\\0")
     return f', server="{escaped}"'
 
 
