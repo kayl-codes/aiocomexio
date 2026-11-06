@@ -127,6 +127,19 @@ async def test_login_with_unusable_key_response_raises_data_error(
 
     with pytest.raises(ComexioDataError):
         await client.login()
+    assert comexio.logins == []
+
+
+async def test_login_with_a_key_openssl_refuses_raises_data_error(client: ComexioClient, comexio: FakeComexio) -> None:
+    # Loads as a key, but OpenSSL refuses to encrypt with a modulus beyond 16384 bits. The limit is
+    # OpenSSL's: should a later cryptography accept this size, raise the bit count.
+    comexio.serve_json(
+        "POST", LOGIN_PATH, {"salt": "U2Fseg==", "modulus": f"{(1 << 16400) + 1:x}", "exponent": "10001"}
+    )
+
+    with pytest.raises(ComexioDataError, match="crypto library refuses"):
+        await client.login()
+    assert comexio.logins == []
 
 
 async def test_login_key_request_answered_with_login_form_is_a_data_error(
