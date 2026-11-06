@@ -138,11 +138,12 @@ def _modulus_openssl_refuses() -> int:
     """
     for bits in (16400, 32800, 65600):
         modulus = (1 << bits) + 1
+        key = rsa.RSAPublicNumbers(0x10001, modulus).public_key()  # must load: a load error is another path
         try:
-            rsa.RSAPublicNumbers(0x10001, modulus).public_key().encrypt(b"probe", padding.PKCS1v15())
+            key.encrypt(b"probe", padding.PKCS1v15())
         except ValueError:
             return modulus
-    pytest.skip("this cryptography/OpenSSL encrypts with RSA moduli up to 65600 bits")
+    pytest.fail("this cryptography/OpenSSL encrypts with RSA moduli up to 65600 bits: raise the bit counts")
 
 
 async def test_login_with_a_key_openssl_refuses_raises_data_error(client: ComexioClient, comexio: FakeComexio) -> None:
