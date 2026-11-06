@@ -344,6 +344,96 @@ def test_plain_io_sharing_an_identifier_with_a_quickbus_io_is_no_conflict(caplog
 
     assert {"19", "201", "211"} <= {io["id"] for io in result["io"]}
     assert "repeat within their device" not in caplog.text
+    # Already read-only (IntIsOutput 0), so no write by name can hit the Quickbus G1.
+    assert _io_all(result)["19"]["is_input"] is True
+    assert "share their extension name and identifier with another IO" not in caplog.text
+
+
+def test_a_writable_io_sharing_a_quickbus_ios_identifier_becomes_read_only(caplog: pytest.LogCaptureFixture) -> None:
+    """A write by extension and identifier could hit the Quickbus IO, e.g. for an IO missing from a stale map."""
+    conf = load_json_fixture("config_quickbus.json")
+    inoutput = _base_ext(conf)["inoutput"]
+    # R with IntIsOutput 1, but not in the Quickbus map; matched case-insensitively.
+    inoutput["19"] = {**inoutput["204"], "Id": 19, "Identifier": "r"}
+    inoutput["20"] = {**inoutput["204"], "Id": 20, "Identifier": "Q1"}  # no Quickbus IO is named Q1
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["19"]["quickbus"] is None
+    assert ios["19"]["is_input"] is True
+    assert ios["20"]["is_input"] is False
+    assert ios["204"]["is_input"] is False  # the Quickbus IO itself keeps its direction
+    assert "1 IOs share their extension name and identifier with another IO" in caplog.text
+    assert "'r'" in caplog.text
+
+
+def test_a_writable_io_sharing_an_inactive_plain_ios_identifier_becomes_read_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An inactive IO keeps its name, so a write by extension and identifier could hit it instead."""
+    conf = load_json_fixture("config_quickbus.json")
+    inoutput = _base_ext(conf)["inoutput"]
+    inoutput["20"] = {**inoutput["204"], "Id": 20, "Identifier": "Q1"}
+    inoutput["21"] = {**inoutput["204"], "Id": 21, "Identifier": "q1", "Active": False}
+    inoutput["22"] = {**inoutput["204"], "Id": 22, "Identifier": "Q2"}  # unique name: stays writable
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    ios = _io_all(result)
+    assert "20" in {io["id"] for io in result["io"]}  # still active, only no longer writable
+    assert ios["20"]["is_input"] is True
+    assert ios["21"]["is_input"] is True
+    assert ios["22"]["is_input"] is False
+    assert "2 IOs share their extension name and identifier with another IO" in caplog.text
+    assert "'Q1'" in caplog.text
+    assert "'q1'" in caplog.text
+    assert "'Q2'" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("second_ext_name", "writable"),
+    [
+        ("base", False),  # the same name, in another case: a write by name could hit either extension
+        ("Multibridge A6", True),  # the same identifier on another extension is the normal case
+    ],
+)
+def test_a_writable_io_is_read_only_only_when_a_second_extension_repeats_its_name(
+    second_ext_name: str, writable: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    conf = load_json_fixture("config_quickbus.json")
+    base = _base_ext(conf)
+    base["inoutput"]["20"] = {**base["inoutput"]["204"], "Id": 20, "Identifier": "Q1"}
+    second = conf["FubModules"]["1"]["2"]
+    second["extension"]["Name"] = second_ext_name
+    second["inoutput"]["30"] = {**base["inoutput"]["204"], "Id": 30, "Identifier": "Q1"}
+
+    with caplog.at_level(logging.WARNING):
+        result = _parse(conf)
+
+    active = {io["id"]: io for io in result["io"]}  # what a consumer wires, not only the plan labels
+    for ios in (_io_all(result), active):
+        assert ios["20"]["is_input"] is not writable
+        assert ios["30"]["is_input"] is not writable
+    assert ("share their extension name and identifier with another IO" in caplog.text) is not writable
+
+
+def test_an_unmapped_quickbus_io_whose_name_an_inactive_io_repeats_becomes_read_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Without the map a device IO reads as a plain IO; an inactive IO of the same name keeps it ambiguous."""
+    conf = load_json_fixture("config_quickbus.json")
+    ext = _base_ext(conf)
+    ext["mapping"] = {}
+    ext["inoutput"]["205"] = {**ext["inoutput"]["204"], "Id": 205, "Active": False}
+
+    with caplog.at_level(logging.WARNING):
+        ios = _io_all(_parse(conf))
+
+    assert ios["204"]["quickbus"] is None
+    assert ios["204"]["is_input"] is True
+    assert "2 IOs share their extension name and identifier with another IO" in caplog.text
 
 
 @pytest.mark.parametrize("mapping", [{}, {"lowcan": []}])
@@ -1013,12 +1103,12 @@ def test_int_is_output_as_digit_string(flag: str, is_input: bool) -> None:
     assert _io_all(_parse(conf))["201"]["is_input"] is is_input
 
 
-def test_int_is_output_one_does_not_change_plain_ios() -> None:
-    """Outside the Quickbus IntIsOutput 1 makes nothing writable; the identifier prefix keeps deciding."""
+def test_int_is_output_one_makes_a_plain_io_writable_whatever_its_prefix() -> None:
+    """IntIsOutput decides before the identifier prefix: an I1 Comexio writes is writable."""
     conf = load_json_fixture("config_quickbus.json")
     _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = 1
 
-    assert _io_all(_parse(conf))["11"]["is_input"] is True
+    assert _io_all(_parse(conf))["11"]["is_input"] is False
 
 
 @pytest.mark.parametrize("flag", ["yes", 2, 0.0, False, None])

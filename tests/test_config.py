@@ -173,12 +173,24 @@ _DIRECTION_IO_INPUT_TYPES = {
         ("DI1", 87, 0, True),
         ("DI1", 87, "0", True),
         ("Q1", 2, 1, False),  # a real relay stays writable
-        ("X1", 1, 1, True),  # IntIsOutput 1 alone does not make an IO writable
+        ("X1", 1, 1, False),  # IntIsOutput 1: Comexio writes it, so does HA (Alarm1, Bright1, CurVol1)
+        ("Alarm1", 120, 1, False),  # IntIsOutput 1 beats $IOInputTypes saying input
+        ("Alarm1", 120, "1", False),
+        ("Alarm1", 120, None, True),  # no flag: $IOInputTypes as before
+        ("I1", 2, 1, False),  # IntIsOutput 1 beats the input prefix: Comexio writes it
+        ("QI1", 2, 1, False),
+        ("I1", 2, 0, True),
+        ("I1", 2, None, True),  # no flag: the input prefix beats $IOInputTypes saying output
+        ("I1", 2, "yes", True),  # an unusable flag is no flag
+        ("I1", 2, True, True),
+        ("Q1", 1, 2, False),
+        ("AO1", 1, None, False),  # no flag: the analog output prefix beats $IOInputTypes saying input
         ("AO1", 1, 1, False),  # 0-10 V analog output, although $IOInputTypes says input
         ("AO4", 120, 1, False),  # "Digital 10V": a binary analog output
         ("AO1", 1, 0, True),  # IntIsOutput 0 beats the analog output prefix as well
-        ("AO1\n", 1, 1, True),  # matched exactly, as set_io_value routes it
-        ("AO١", 1, 1, True),  # non-ASCII digit: no AO, as set_io_value would not route it over the admin session
+        ("AO1\n", 1, None, True),  # matched exactly: no AO, so $IOInputTypes decides
+        ("AO١", 1, None, True),  # non-ASCII digit: no AO either
+        ("Q1\n", 2, None, False),  # no relay output either, $IOInputTypes says output
         ("DI1", 87, None, False),  # no flag: $IOInputTypes as before
         ("DI1", 87, "yes", False),
         ("DI1", 87, True, False),
@@ -188,8 +200,8 @@ _DIRECTION_IO_INPUT_TYPES = {
         ("DI1", 87, 2, False),
     ],
 )
-def test_int_is_output_zero_makes_an_io_read_only(identifier: str, type_id: int, flag: Any, is_input: bool) -> None:
-    """Comexio never writes an IO whose IntIsOutput is 0, so it is read-only whatever else says output (#249)."""
+def test_int_is_output_flag_sets_the_direction(identifier: str, type_id: int, flag: Any, is_input: bool) -> None:
+    """IntIsOutput 0 makes an IO read-only (#249), 1 writable, whatever else says; without it the prefix decides."""
     row: dict[str, Any] = {"Id": 1, "Identifier": identifier, "InOutputTypeId": type_id, "Active": True}
     if flag is not None:
         row["IntIsOutput"] = flag
@@ -584,3 +596,180 @@ async def test_io_ext_ids_from_parse_config_feed_get_io_live_states(
     # The answer's keys are what parse_config's io_live_states expects.
     reparsed = _parse(load_json_fixture("config_basic.json"), io_live_states=states)
     assert {io["identifier"]: io["value"] for io in reparsed["io_all"]}["QI1"] == 2.5
+
+
+def _multiroom_conf(ext_type: Any, rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    ext = {"Name": "Ext 1", "Identifier": "", "TypeId": ext_type}
+    return {"FubModules": {"1": {"18": {"extension": ext, "inoutput": rows}}}}
+
+
+# The Multiroom-Server's IOs as firmware 11.1.5 lists them: type 151 is an output in $IOInputTypes, type 3 an input.
+_MULTIROOM_IO_TYPES = {
+    "3": {"id": 3, "binary": True, "min": 0, "max": 1, "unit": "0/1"},
+    "56": {"id": 56, "binary": False, "min": 0, "max": 100, "unit": "%"},
+    "151": {"id": 151, "binary": True, "min": 0, "max": 1, "unit": "0/1"},
+}
+_MULTIROOM_IO_INPUT_TYPES = {
+    "3": {"id": 3, "input": True},
+    "56": {"id": 56, "input": True},
+    "151": {"id": 151, "input": False},
+}
+_MULTIROOM_ROWS = {
+    str(io_id): {
+        "Id": io_id,
+        "Identifier": ident,
+        "InOutputTypeId": type_id,
+        "Active": 1,
+        "IntIsOutput": 1,
+        "Timeout": 1,
+    }
+    for io_id, ident, type_id in [
+        (101, "Next1", 151),
+        (102, "Prev1", 151),
+        (103, "Play1", 151),
+        (104, "Pause1", 151),
+        (105, "Toggle1", 3),
+        (106, "Alarm1", 3),
+        (107, "Bell1", 3),
+        (108, "Custom1", 3),
+        (109, "CurVol1", 56),
+    ]
+}
+
+
+def _multiroom_ios(ext_type: Any = 32, rows: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
+    conf = _multiroom_conf(ext_type, rows if rows is not None else _MULTIROOM_ROWS)
+    parsed = parse_config(conf, io_types=_MULTIROOM_IO_TYPES, io_input_types=_MULTIROOM_IO_INPUT_TYPES)
+    ios = {io["identifier"]: io for io in parsed["io_all"]}
+    assert len(ios) == len(parsed["io_all"]), "an identifier repeats: the dict would hide an IO"
+    return ios
+
+
+def test_multiroom_server_ios_comexio_writes_are_writable_and_its_key_presses_momentary() -> None:
+    # Measured live 2026-11-06: Next1-Pause1 and Toggle1 fall back to 0 by themselves, Alarm1/Bell1/Custom1 latch.
+    ios = _multiroom_ios()
+
+    assert {ident: io["is_input"] for ident, io in ios.items()} == dict.fromkeys(ios, False)
+    assert {ident for ident, io in ios.items() if io["momentary"]} == {"Next1", "Prev1", "Play1", "Pause1", "Toggle1"}
+
+
+@pytest.mark.parametrize("ext_type", ["32", 32, "032"])
+def test_multiroom_server_type_id_is_read_as_a_canonical_id(ext_type: Any) -> None:
+    assert _multiroom_ios(ext_type)["Next1"]["momentary"] is True
+
+
+def test_a_key_press_whose_name_another_io_repeats_is_neither_writable_nor_momentary() -> None:
+    next_row = next(row for row in _MULTIROOM_ROWS.values() if row["Identifier"] == "Next1")
+    inactive_twin = {**next_row, "Id": 900, "Identifier": "next1", "Active": 0}
+
+    ios = _multiroom_ios(rows={**_MULTIROOM_ROWS, "900": inactive_twin})
+
+    assert ios["Next1"]["is_input"] is True
+    assert ios["Next1"]["momentary"] is False
+    assert ios["Prev1"]["momentary"] is True  # no other IO repeats its name
+
+
+@pytest.mark.parametrize("ext_type", [27, "27", 37, None, "32 ", True, 32.0])
+def test_key_press_names_on_another_extension_are_no_momentary_ios(ext_type: Any) -> None:
+    # A Touchpanel's (27, 2G: 37) Toggle1 is not known to reset itself; an unusable TypeId is no Multiroom-Server.
+    assert not any(io["momentary"] for io in _multiroom_ios(ext_type).values())
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"IntIsOutput": 0}, "read-only"),
+        ({"Identifier": "Next1a"}, "matched exactly"),
+        ({"Identifier": "Next"}, "needs the number"),
+    ],
+)
+def test_momentary_needs_a_writable_key_press_io(change: dict[str, Any], reason: str) -> None:
+    rows = {"101": {**_MULTIROOM_ROWS["101"], **change}}
+
+    (io,) = _multiroom_ios(rows=rows).values()
+
+    assert io["momentary"] is False, reason
+
+
+@pytest.mark.parametrize("type_id", [999, None])
+def test_a_key_press_without_a_usable_type_row_stays_momentary(type_id: Any) -> None:
+    # Device type and identifier make it a key press; the IO type table only says binary or analog.
+    rows = {"101": {**_MULTIROOM_ROWS["101"], "InOutputTypeId": type_id}}
+
+    (io,) = _multiroom_ios(rows=rows).values()
+
+    assert io["is_input"] is False
+    assert io["momentary"] is True
+
+
+# A Touchpanel's IOs Comexio writes, as firmware 11.1.5 lists them (Bright1 is type 28 there, analog like 56).
+_TOUCHPANEL_ROWS = {
+    str(io_id): {**_MULTIROOM_ROWS["101"], "Id": io_id, "Identifier": ident, "InOutputTypeId": type_id}
+    for io_id, ident, type_id in [(201, "DisplayOn1", 151), (202, "Bright1", 56), (203, "Mute1", 3)]
+}
+
+
+@pytest.mark.parametrize("ext_type", [27, "37"])
+def test_a_touchpanels_display_on_is_momentary(ext_type: Any) -> None:
+    # Measured live 2026-11-06 on a Touchpanel (27) and a Touchpanel-2G (37): DisplayOn1 falls back to 0,
+    # Bright1 and Mute1 keep their value.
+    ios = _multiroom_ios(ext_type, _TOUCHPANEL_ROWS)
+
+    assert {ident for ident, io in ios.items() if io["momentary"]} == {"DisplayOn1"}
+    assert not any(io["is_input"] for io in ios.values())
+
+
+@pytest.mark.parametrize(
+    ("identifier", "flag", "momentary"),
+    [
+        ("displayon1", 1, True),
+        ("DISPLAYON2", 1, True),
+        ("DisplayOn1", 0, False),  # read-only
+        ("DisplayOn", 1, False),  # needs the number
+        ("DisplayOn1a", 1, False),  # matched exactly
+        ("XDisplayOn1", 1, False),
+    ],
+)
+def test_a_touchpanel_key_press_is_matched_exactly(identifier: str, flag: int, momentary: bool) -> None:
+    rows = {"201": {**_TOUCHPANEL_ROWS["201"], "Identifier": identifier, "IntIsOutput": flag}}
+
+    (io,) = _multiroom_ios(37, rows).values()
+
+    assert io["momentary"] is momentary
+
+
+def test_display_on_of_a_multiroom_server_is_no_momentary_io() -> None:
+    assert not any(io["momentary"] for io in _multiroom_ios(32, _TOUCHPANEL_ROWS).values())
+
+
+@pytest.mark.parametrize("identifier", ["next1", "TOGGLE2", "pAuSe1"])
+def test_momentary_ignores_the_case_of_the_identifier(identifier: str) -> None:
+    rows = {"101": {**_MULTIROOM_ROWS["101"], "Identifier": identifier}}
+
+    (io,) = _multiroom_ios(rows=rows).values()
+
+    assert io["momentary"] is True
+
+
+def test_a_quickbus_io_on_a_multiroom_server_is_no_momentary_io() -> None:
+    # A Quickbus IO cannot be written by name (its identifier repeats across devices), so it is no key press.
+    conf = load_json_fixture("config_quickbus.json")
+    base = conf["FubModules"]["1"]["1"]
+    base["extension"]["TypeId"] = 32
+    base["inoutput"]["204"].update({"Identifier": "Next1", "InOutputTypeId": 151})
+
+    parsed = parse_config(conf, io_types=_MULTIROOM_IO_TYPES, io_input_types=_MULTIROOM_IO_INPUT_TYPES)
+    (io,) = [io for io in parsed["io_all"] if io["id"] == "204"]
+
+    assert io["quickbus"] is not None
+    assert io["is_input"] is False
+    assert io["momentary"] is False
+
+
+def test_no_io_of_the_quickbus_fixture_is_momentary() -> None:
+    conf = load_json_fixture("config_quickbus.json")
+
+    ios = parse_config(conf)["io_all"]
+
+    assert ios
+    assert all(io["momentary"] is False for io in ios)
