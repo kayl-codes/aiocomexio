@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -143,10 +144,33 @@ def _modulus_openssl_refuses() -> int:
             key.encrypt(b"probe", padding.PKCS1v15())
         except ValueError:
             return modulus
-    pytest.fail("this cryptography/OpenSSL encrypts with RSA moduli up to 65600 bits: raise the bit counts")
+    # test_login_with_a_key_the_crypto_library_refuses_raises_data_error still pins the branch then.
+    pytest.skip("this cryptography/OpenSSL encrypts with RSA moduli up to 65600 bits")
+
+
+class _KeyTheCryptoLibraryRefuses:
+    """Stands in for a public key that loads but that the crypto library refuses to encrypt with."""
+
+    key_size = 2048
+
+    def encrypt(self, message: bytes, padding: Any) -> bytes:
+        raise ValueError("Encryption failed")
+
+
+async def test_login_with_a_key_the_crypto_library_refuses_raises_data_error(
+    client: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Independent of OpenSSL's size limit: the served key loads, encrypt() refuses it.
+    numbers = SimpleNamespace(RSAPublicNumbers=lambda e, n: SimpleNamespace(public_key=_KeyTheCryptoLibraryRefuses))
+    monkeypatch.setattr(client_module, "rsa", numbers)
+
+    with pytest.raises(ComexioDataError, match="crypto library refuses: Encryption failed"):
+        await client.login()
+    assert comexio.logins == []
 
 
 async def test_login_with_a_key_openssl_refuses_raises_data_error(client: ComexioClient, comexio: FakeComexio) -> None:
+    # The same with the real OpenSSL, as long as it refuses one of the probed sizes.
     modulus = _modulus_openssl_refuses()
     comexio.serve_json("POST", LOGIN_PATH, {"salt": "U2Fseg==", "modulus": f"{modulus:x}", "exponent": "10001"})
 
