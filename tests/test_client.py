@@ -172,6 +172,14 @@ _SETTLE_SEC = 0.1
 _LOGIN_GOES_AHEAD = "Login goes ahead"
 
 
+def _left_behind_warning(waited: float, in_flight: int) -> str:
+    """The full warning a login logs when it stops waiting for the requests in flight."""
+    return (
+        f"{_LOGIN_GOES_AHEAD} after waiting {waited} s; requests still in flight: {in_flight}, "
+        "they may fail as not logged in"
+    )
+
+
 async def _session_check(request: web.Request) -> web.Response:
     """The session check as Comexio answers it: JSON for a logged-in session, else the login form."""
     if request.cookies.get(SESSION_COOKIE) != SESSION_VALUE:
@@ -379,7 +387,7 @@ async def test_a_login_waits_for_a_stalled_request_only_so_long(
     caplog.set_level(logging.WARNING)
     async with asyncio.timeout(5):
         await logged_in.login()
-    assert f"{_LOGIN_GOES_AHEAD} after waiting 0.1 s; requests still in flight: 1" in caplog.text
+    assert caplog.messages == [_left_behind_warning(0.1, 1)]
 
     # The next login does not wait for the request left behind again, with whatever bound.
     monkeypatch.setattr(client_module, "_LOGIN_WAIT_FOR_REQUESTS_SEC", 10.0)
@@ -397,7 +405,7 @@ async def test_a_login_waits_for_a_stalled_request_only_so_long(
     caplog.clear()
     async with asyncio.timeout(5):
         await logged_in.login()
-    assert "requests still in flight: 1" in caplog.text
+    assert caplog.messages == [_left_behind_warning(0.1, 1)]
 
     held_later.release.set()
     assert await later is True
@@ -467,6 +475,9 @@ async def test_an_api_write_made_during_a_login_waits_for_it(
     held_login.release.set()
     await login
     await write
+    sent = comexio.requests
+    assert sent.count(("GET", _API_PATH)) == 1
+    assert sent.index(("GET", _API_PATH)) > max(i for i, req in enumerate(sent) if req == ("POST", LOGIN_PATH))
 
 
 async def test_request_timeout_raises_connection_error(comexio: FakeComexio) -> None:
