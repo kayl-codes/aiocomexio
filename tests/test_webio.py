@@ -326,11 +326,12 @@ def test_build_webio_commands_gives_every_command_the_path_of_its_own_item(
     # Exactly the paths the callback returned, one per command, and only for the wanted class.
     assert sorted(cmd["Parameter"] for cmd in commands) == sorted(path for _, path in asked)
     assert {cls for cls, _ in asked} == {webio_class}
-    # Every command asked with an item of its own, and the item is one of the source's.
-    assert len({id(item) for item in items}) == len(items)
     assert len({cmd["Parameter"] for cmd in commands}) == len(commands)
-    source_items = [*source.get("markers", []), *source.get("io", []), *source.get("knx", [])]
-    assert all(any(item is candidate for candidate in source_items) for item in items)
+    # The path of a command was asked for with the very item that command is built from: its payload names it.
+    by_path = {cmd["Parameter"]: cmd for cmd in commands}
+    for (_, path), item in zip(asked, items, strict=True):
+        token = f'io="{item["identifier"]}"' if webio_class is WebioClass.IO else f'id="{item["id"]}"'
+        assert token in by_path[path]["Data"]
 
 
 def test_generate_webio_json_forwards_path_callable_and_server(parsed: dict[str, Any]) -> None:
@@ -356,6 +357,11 @@ def test_path_callable_that_handles_one_class_only_serves_that_class_upload(pars
 def test_non_string_server_is_rejected(parsed: dict[str, Any]) -> None:
     with pytest.raises(TypeError, match="server must be a str"):
         build_webio_commands(_HOOK, parsed, WebioClass.MARKER, server=5)  # type: ignore[arg-type]
+
+
+def test_non_string_server_is_rejected_without_any_command() -> None:
+    with pytest.raises(TypeError, match="server must be a str"):
+        build_webio_commands(_HOOK, {}, server=5)  # type: ignore[arg-type]
 
 
 def test_path_callable_returning_a_non_string_is_rejected(parsed: dict[str, Any]) -> None:

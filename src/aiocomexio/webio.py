@@ -59,10 +59,15 @@ def lua_escape(value: Any) -> str:
     return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
 
 
-def _server_field(server: str | None) -> str:
-    """The ``, server="..."`` tail of a webhook Lua payload, empty without a server name."""
+def _check_server(server: str | None) -> None:
+    """Raise TypeError unless server is a str or None."""
     if server is not None and not isinstance(server, str):
         raise TypeError(f"server must be a str or None, not {type(server).__name__}")
+
+
+def _server_field(server: str | None) -> str:
+    """The ``, server="..."`` tail of a webhook Lua payload, empty without a server name (None or empty)."""
+    _check_server(server)
     return f', server="{lua_escape(server)}"' if server else ""
 
 
@@ -389,6 +394,7 @@ def build_webio_commands(
     ignored_marker_ids / ignored_knx_ids exclude items the consumer does not expose — they
     need no command pushing their values.
     """
+    _check_server(server)  # also when there is no command to build, so a bad value never goes unnoticed
     commands: list[tuple[WebioClass, dict[str, Any]]] = [
         (
             WebioClass.MARKER,
