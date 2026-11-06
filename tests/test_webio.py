@@ -327,7 +327,8 @@ def test_build_webio_commands_gives_every_command_the_path_of_its_own_item(
     assert sorted(cmd["Parameter"] for cmd in commands) == sorted(path for _, path in asked)
     assert {cls for cls, _ in asked} == {webio_class}
     # Every command asked with an item of its own, and the item is one of the source's.
-    assert len({id(item) for item in items}) == len(commands)
+    assert len({id(item) for item in items}) == len(items)
+    assert len({cmd["Parameter"] for cmd in commands}) == len(commands)
     source_items = [*source.get("markers", []), *source.get("io", []), *source.get("knx", [])]
     assert all(any(item is candidate for candidate in source_items) for item in items)
 
