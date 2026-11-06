@@ -123,11 +123,11 @@ async def test_set_knx_and_io_values_address_their_target(api_client: ComexioCli
     comexio.serve_text("GET", API_PATH, "1")
 
     await api_client.set_knx_value(3, 1)
-    await api_client.set_io_value("UD 1", "QD2", 0)
+    await api_client.set_io_value("UD 1", "Q2", 0)
 
     knx, io = comexio.received_at("GET", API_PATH)
     assert knx.query == {"action": "set", "value": "1", "knx": "K3"}
-    assert io.query == {"action": "set", "value": "0", "ext": "UD 1", "io": "QD2"}
+    assert io.query == {"action": "set", "value": "0", "ext": "UD 1", "io": "Q2"}
 
 
 async def test_set_io_value_percent_encodes_spaces_in_the_extension_name(
@@ -149,6 +149,12 @@ _SET_VALUE_CALLS = [
         lambda c: c.set_io_value("LED-Dimmer A3", "Q1", 50),
         "IO 'Q1' of 'LED-Dimmer A3'",
         {"action": "set", "value": "50", "ext": "LED-Dimmer A3", "io": "Q1"},
+    ),
+    # A Dali group needs no admin login: /api/ writes it (verified live 2026-11-06).
+    (
+        lambda c: c.set_io_value("Dali 1", "DG1", 80),
+        "IO 'DG1' of 'Dali 1'",
+        {"action": "set", "value": "80", "ext": "Dali 1", "io": "DG1"},
     ),
     (lambda c: c.set_marker_value(5, 1), "marker M5", {"action": "set", "value": "1", "marker": "M5"}),
     (lambda c: c.set_knx_value(3, 1), "KNX object K3", {"action": "set", "value": "1", "knx": "K3"}),
@@ -196,21 +202,42 @@ async def test_set_value_forbidden_answer_raises_naming_the_target(
 @pytest.mark.parametrize(
     ("identifier", "admin"),
     [
+        # /api/ writes the relay and dimmer outputs and the Dali groups (DG1 verified live 2026-11-06).
+        ("Q1", False),
+        ("q16", False),
+        ("DG1", False),
+        ("dg16", False),
+        # It answers "Forbidden" for nearly every other output (#259, verified live 2026-11-04 and 2026-11-06).
         ("AO1", True),
         ("ao12", True),
-        (" AO3 ", False),  # padded: written as sent, so routed like any other unknown name
-        ("Q1", False),
-        ("QI1", False),
-        ("AI1", False),
-        ("AO", False),
-        ("AOX1", False),
-        ("AO1\n", False),
-        ("AO1a", False),
-        ("AO١", False),  # Arabic-Indic digit
+        ("Next1", True),
+        ("Alarm1", True),
+        ("CurVol1", True),
+        ("Bright1", True),
+        ("R", True),
+        # Inputs are never written; would they be, /api/ would not take them either.
+        ("QI1", True),
+        ("AI1", True),
+        # Matched exactly: anything but Q or DG and ASCII digits goes over the admin session.
+        (" Q3 ", True),
+        ("Q1\n", True),
+        ("Q1a", True),
+        ("QD2", True),
+        ("Q", True),
+        ("DG", True),
+        ("DG1a", True),
+        ("Q١", True),  # Arabic-Indic digit
     ],
 )
 def test_io_written_over_admin_session(identifier: str, admin: bool) -> None:
     assert io_written_over_admin_session(identifier) is admin
+
+
+async def _admin_only_dashboard_set(request: web.Request) -> web.Response:
+    """dashboard/refresh as Comexio answers it: a stored "set" for a logged-in admin session only."""
+    if request.cookies.get(SESSION_COOKIE) != SESSION_VALUE:
+        return web.Response(text=LOGIN_PAGE, content_type="text/html")
+    return json_response({"result": {"1": "1"}})
 
 
 @pytest.mark.parametrize(("value", "sent"), [(50, 50), (5.5, 5.5), (0, 0)])
@@ -219,12 +246,7 @@ async def test_set_io_value_writes_an_analog_output_over_the_admin_session(
 ) -> None:
     # /api/ answers "Forbidden" for AO*, Comexio's own IO page sets them over dashboard/refresh (#259),
     # which only a logged-in admin session may do.
-    async def dashboard(request: web.Request) -> web.Response:
-        if request.cookies.get(SESSION_COOKIE) != SESSION_VALUE:
-            return web.Response(text=LOGIN_PAGE, content_type="text/html")
-        return json_response({"result": {"1": "1"}})
-
-    comexio.serve("POST", DASHBOARD_REFRESH_PATH, dashboard)
+    comexio.serve("POST", DASHBOARD_REFRESH_PATH, _admin_only_dashboard_set)
     await api_client.login()
 
     await api_client.set_io_value("IO-Extension A2", "AO4", value)
@@ -402,13 +424,13 @@ async def test_set_io_value_warning_quotes_names_so_a_newline_cannot_forge_a_log
     comexio.serve_text("GET", API_PATH, "ok")
 
     with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
-        await api_client.set_io_value("UD 1\nWARNING forged", "Q1\r", 1)
+        await api_client.set_io_value("UD 1\nWARNING forged", "Q1", 1)
 
     (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     message = record.getMessage()
     assert "\n" not in message
     assert "\r" not in message
-    assert "Writing IO 'Q1\\r' of 'UD 1\\nWARNING forged'" in message
+    assert "Writing IO 'Q1' of 'UD 1\\nWARNING forged'" in message
 
 
 # "1" as observed earlier; "0" is what firmware 11.1.5 answers to every stored marker write.
@@ -2545,3 +2567,21 @@ async def test_admin_actions_send_the_xhr_headers_comexio_expects(
         ("POST", UNIQUE_CHECK_PATH): (False, None),
         ("POST", MARKER_SAVE_PATH): (True, f"{base}/admin/flag/home"),
     }
+
+
+@pytest.mark.parametrize("identifier", ["Next1", "Alarm1", "CurVol1", "Bright1", "DisplayOn1"])
+async def test_set_io_value_writes_an_output_comexio_writes_itself_over_the_admin_session(
+    api_client: ComexioClient, comexio: FakeComexio, identifier: str
+) -> None:
+    # /api/ answers "Forbidden" for these as for AO* (verified live on a Multiroom-Server and Touchpanels,
+    # 2026-11-06), so they go over the admin session, which needs the login.
+    comexio.serve("POST", DASHBOARD_REFRESH_PATH, _admin_only_dashboard_set)
+    await api_client.login()
+
+    await api_client.set_io_value("Ext 1", identifier, 1)
+
+    (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
+    assert json.loads(request.form["json"]) == {
+        "1": {"action": "set", "EName": "Ext 1", "IOIdentifier": identifier, "Value": 1}
+    }
+    assert comexio.received_at("GET", API_PATH) == []

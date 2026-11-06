@@ -9,7 +9,7 @@ import logging
 import math
 import re
 import reprlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any
@@ -110,15 +110,25 @@ _LOG_REPR = reprlib.Repr(
 # Line breaks and other control characters of a scraped name would forge log lines.
 _LOG_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
-# AO*: the 0-10 V analog outputs; $IOInputTypes marks their types (0-10V, 0-10V Prozent, Digital 10V)
-# as inputs, so only the identifier makes them writable (#259 of homeassistant-comexio). Matched exactly
-# (ASCII digits, \Z: no trailing newline) like client.io_written_over_admin_session, so an AO classified
-# writable here is written over that route.
+# Q*: relay/dimmer outputs. AO*: the 0-10 V analog outputs; $IOInputTypes marks their types (0-10V,
+# 0-10V Prozent, Digital 10V) as inputs, so without IntIsOutput the identifier makes them writable
+# (#259 of homeassistant-comexio). Matched exactly (ASCII digits, \Z: no trailing newline), as
+# client.io_written_over_admin_session matches the Q* it sends to /api/.
 _OUTPUT_IO_RE = re.compile(r"^(?:Q|AO)\d+\Z", re.ASCII)
 _ANALOG_0_10V_OUTPUT_IO_RE = re.compile(r"^AO\d+\Z", re.ASCII)
 _INPUT_IO_RE = re.compile(r"^(?:I|AI|QI)\d+$")
 _ANALOG_OUTPUT_IO_RE = re.compile(r"^QI\d+$")
 _BINARY_IO_RE = re.compile(r"^[QI]\d+$")
+# Per extension TypeId, the IOs Comexio resets to 0 by itself right after a 1 (a key press, not a switch),
+# measured live on firmware 11.1.5, 2026-11-06: the Multiroom-Server (32) and the Touchpanel (27, 2G: 37).
+# The IO data cannot tell them apart — Toggle1 shares type and timeout with the latching Alarm1, Bell1 and
+# Custom1, DisplayOn1 its type with the Multiroom-Server's Next1.
+_TOUCHPANEL_MOMENTARY_IO_RE = re.compile(r"DISPLAYON\d+\Z", re.ASCII)
+_MOMENTARY_IO_RES: dict[str, re.Pattern[str]] = {
+    "32": re.compile(r"(?:NEXT|PREV|PLAY|PAUSE|TOGGLE)\d+\Z", re.ASCII),
+    "27": _TOUCHPANEL_MOMENTARY_IO_RE,
+    "37": _TOUCHPANEL_MOMENTARY_IO_RE,
+}
 # A min/max of the IO type table written as text, e.g. "-2147483648" (Smart Meter E1-E3, OS 11.0.2).
 _NUMERIC_TEXT_RE = re.compile(r"-?\d+(?:\.\d+)?", re.ASCII)
 
@@ -387,6 +397,12 @@ def parse_config(
     "quickbus": {"device_id", "name"}, every other IO "quickbus": None). A Quickbus IO is
     addressed by its unique "id" only — its ext_name/identifier pair repeats across devices, so
     ComexioClient.set_io_value cannot reach it: treat it as read-only even when is_input is False.
+    A plain IO whose extension name and identifier another IO repeats (compared case-insensitively,
+    inactive IOs included) comes with is_input True and momentary False, as a write by name could hit
+    the other IO; a WARNING names it.
+    "momentary" is True for a writable IO that Comexio resets to 0 by itself right after a 1 (the
+    Multiroom-Server's Next1, Prev1, Play1, Pause1, Toggle1, a Touchpanel's DisplayOn1): a key press, not a
+    switch.
     Active IOs that repeat an identifier of their own device (Quickbus device or extension), and
     active Quickbus IOs whose type has no usable row in an io_types with usable rows, land only in "io_all" —
     the latter with "is_binary" None (kind unknown), as do inactive Quickbus IOs of such a type.
@@ -794,6 +810,27 @@ def _extension_meta(ext_id: str, ext_content: Mapping[str, Any]) -> tuple[str, s
     )
 
 
+def _momentary_io_re(ext_content: Mapping[str, Any]) -> re.Pattern[str] | None:
+    """The key-press identifiers of the extension's type (its TypeId, read canonically), None if it has none."""
+    ext_meta = ext_content.get("extension")
+    type_id = _strict_id(ext_meta.get("TypeId")) if isinstance(ext_meta, Mapping) else None
+    return _MOMENTARY_IO_RES.get(type_id) if type_id is not None else None
+
+
+def _is_momentary_io(entry: Mapping[str, Any], momentary_re: re.Pattern[str] | None) -> bool:
+    """A writable IO that Comexio resets to 0 by itself: a key press, not a switch.
+
+    Known by device type and identifier alone: a key press stays one when the IO type table has no
+    usable row for it.
+    """
+    return (
+        momentary_re is not None
+        and entry["quickbus"] is None
+        and not entry["is_input"]
+        and momentary_re.match(entry["identifier"].upper()) is not None
+    )
+
+
 def _strict_id(value: Any) -> str | None:
     """A Comexio id as a canonical str: a non-negative int (not bool) or an ASCII digit string; else None."""
     if isinstance(value, bool):
@@ -1053,7 +1090,7 @@ def _int_is_output_direction(io_item: Mapping[str, Any]) -> bool | None:
 
     A Quickbus IO takes its direction from this flag alone: $IOInputTypes marks e.g. the
     Multitouch gestures (type 134) as not an input, which would make every gesture a writable
-    output. A plain IO uses it only to be read-only, see _io_direction.
+    output. A plain IO uses it first as well, see _io_direction.
     """
     raw = io_item.get(_INT_IS_OUTPUT_KEY)
     if isinstance(raw, int) and not isinstance(raw, bool) and raw in (0, 1):
@@ -1109,6 +1146,39 @@ class _QuickbusContext:
                 _log_safe(self.ext_id),
                 log_excerpt(self.bad_plain_flags),
             )
+
+
+def _write_address(entry: Mapping[str, Any]) -> tuple[str, str]:
+    """What ComexioClient.set_io_value addresses an IO by, in one case."""
+    return str(entry["ext_name"]).upper(), str(entry["identifier"]).upper()
+
+
+def _guard_name_clashes(entries: list[dict[str, Any]]) -> None:
+    """Make a plain IO read-only whose extension name and identifier another IO repeats.
+
+    A write addresses an IO by nothing but that pair, so it could hit the other IO of that name
+    instead: a Quickbus IO (e.g. one missing from a stale or unusable Quickbus IO map, which reads as a
+    plain IO with its IntIsOutput 1), another plain IO, or an IO of a second extension of the same name.
+    Inactive IOs count too: they keep their name, so a write by name could still meet one. Both names
+    are compared case-insensitively. On a live firmware 11.1.5 config only read-only inputs (I1, ...)
+    share such a pair.
+    """
+    counts = Counter(_write_address(entry) for entry in entries)
+    clashes = [
+        entry
+        for entry in entries
+        if not entry["quickbus"] and not entry["is_input"] and counts[_write_address(entry)] > 1
+    ]
+    for entry in clashes:
+        entry["is_input"] = True
+        entry["momentary"] = False
+    if clashes:
+        _LOGGER.warning(
+            "%d IOs share their extension name and identifier with another IO, so a write by name could hit that "
+            "IO; they are treated as read-only: %s",
+            len(clashes),
+            log_excerpt([f"{_short_repr(entry['ext_name'])} {_short_repr(entry['identifier'])}" for entry in clashes]),
+        )
 
 
 def _ambiguous_ios(ext_id: str, entries: list[dict[str, Any]]) -> set[int]:
@@ -1284,6 +1354,7 @@ def _process_extension_ios(
     ext_name, ext_serial = _extension_meta(ext_id, ext_content)
     data["extensions"][ext_id] = {"name": ext_name, "serial": ext_serial}
     ext_offline = is_extension_offline(ext_serial)
+    momentary_re = _momentary_io_re(ext_content)
 
     entries: list[dict[str, Any]] = []
     type_ids: list[Any] = []
@@ -1301,6 +1372,7 @@ def _process_extension_ios(
         qb_device, is_input = qb.resolve(io_item)
         entry = builder.build(io_item, strict_id, ext_name, qb_device, is_input)
         entry["offline"] = ext_offline
+        entry["momentary"] = _is_momentary_io(entry, momentary_re)
         # The extension group key; ComexioClient.get_io_live_states needs it as "ExtId".
         entry["ext_id"] = ext_id
         entries.append(entry)
@@ -1339,6 +1411,7 @@ def _process_ios(
         data[_KEY_QUICKBUS_DEVICES].update(qb_devices)
         qb_map = _quickbus_io_map(ext_id, ext_content, qb_devices, qb_dropped)
         _process_extension_ios(data, ext_id, ext_content, builder, _QuickbusContext(ext_id, qb_devices, qb_map))
+    _guard_name_clashes(data["io_all"])
     if repeated := _repeated_io_ids(data["io"]):
         data["io"] = [entry for entry in data["io"] if entry["id"] not in repeated]
     if unlabelled := _unlabelled_io_ids(data["io_all"], repeated):
@@ -1350,15 +1423,18 @@ def _io_direction(
 ) -> bool:
     """is_input for an IO: True -> read-only, False -> writable.
 
-    IntIsOutput 0 comes first: Comexio never writes such an IO (the Smart Meter's readings, a PIR,
-    a Panic button), so it is read-only whatever its identifier says — the Smart Meter's Q1-Q3 are
-    reactive power, not relays. IntIsOutput 1 does not make an IO writable on its own.
-    Then the identifier prefix: Q* are relay/dimmer outputs and AO* analog outputs, I*/AI*/QI* are inputs. $IOInputTypes
-    is only a fallback for other identifiers, because the same TypeId (e.g. 2 = binary 0/1) is
-    shared by inputs and outputs.
+    IntIsOutput decides whenever the IO carries it. 0: Comexio never writes the IO (the Smart Meter's
+    readings, a PIR, a Panic button), so it is read-only whatever its identifier says — the Smart Meter's
+    Q1-Q3 are reactive power, not relays. 1: Comexio writes it (a relay Q1, a Touchpanel's Bright1, a
+    Multiroom-Server's Alarm1), so it is writable, although $IOInputTypes marks many of these types as
+    inputs. On a live firmware 11.1.5 config the flag agreed with every identifier prefix below.
+    Without the flag, the identifier prefix: Q* are relay/dimmer outputs and AO* analog outputs,
+    I*/AI*/QI* are inputs. $IOInputTypes is only the last fallback, because the same TypeId
+    (e.g. 2 = binary 0/1) is shared by inputs and outputs.
     """
-    if _int_is_output_direction(io_item):
-        return True
+    is_input = _int_is_output_direction(io_item)
+    if is_input is not None:
+        return is_input
     if _OUTPUT_IO_RE.match(ident_upper):
         return False
     if _INPUT_IO_RE.match(ident_upper):
