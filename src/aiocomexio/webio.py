@@ -55,8 +55,8 @@ WEBIO_PROTOCOL_HTTPS = 1
 
 
 def lua_escape(value: Any) -> str:
-    """Escape a value for embedding in a double-quoted Lua string literal."""
-    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+    """Escape a value for embedding in a double-quoted Lua string literal (which cannot hold a raw line break)."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
 
 
 def _server_field(server: str | None) -> str:
@@ -349,9 +349,17 @@ WebhookPath = str | Callable[[WebioClass, Mapping[str, Any]], str]
 """A Web-IO webhook path: one for every command, or computed per command from its class and its item."""
 
 
-def _command_path(webhook_path: WebhookPath, webio_class: WebioClass, item: Mapping[str, Any]) -> str:
-    """The webhook path of one command: webhook_path itself, or what it returns for the class and item."""
-    return webhook_path if isinstance(webhook_path, str) else webhook_path(webio_class, item)
+def _command_path(
+    webhook_path: WebhookPath, webio_class: WebioClass, item: Mapping[str, Any], wanted: WebioClass | None
+) -> str:
+    """The webhook path of one command: webhook_path itself, or what it returns for the class and item.
+
+    A command of a class other than ``wanted`` is only built to find name collisions and dropped
+    afterwards, so the callable is not asked for its path (it may handle the wanted class only).
+    """
+    if isinstance(webhook_path, str):
+        return webhook_path
+    return webhook_path(webio_class, item) if wanted in (None, webio_class) else ""
 
 
 def build_webio_commands(
@@ -378,7 +386,7 @@ def build_webio_commands(
         (
             WebioClass.MARKER,
             build_marker_webio_command(
-                m, _command_path(webhook_path, WebioClass.MARKER, m), protocol=protocol, server=server
+                m, _command_path(webhook_path, WebioClass.MARKER, m, webio_class), protocol=protocol, server=server
             ),
         )
         for m in parsed_data.get("markers", [])
@@ -386,19 +394,19 @@ def build_webio_commands(
     ]
     for io in parsed_data.get("io", []):
         if io.get("quickbus"):
-            path = _command_path(webhook_path, WebioClass.QUICKBUS, io)
+            path = _command_path(webhook_path, WebioClass.QUICKBUS, io, webio_class)
             commands.append(
                 (WebioClass.QUICKBUS, build_quickbus_webio_command(io, path, protocol=protocol, server=server))
             )
         else:
-            path = _command_path(webhook_path, WebioClass.IO, io)
+            path = _command_path(webhook_path, WebioClass.IO, io, webio_class)
             commands.append((WebioClass.IO, build_io_webio_command(io, path, protocol=protocol, server=server)))
     commands.extend(
         (
             WebioClass.KNX,
             build_marker_webio_command(
                 knx_item,
-                _command_path(webhook_path, WebioClass.KNX, knx_item),
+                _command_path(webhook_path, WebioClass.KNX, knx_item, webio_class),
                 WebioClass.KNX,
                 protocol=protocol,
                 server=server,

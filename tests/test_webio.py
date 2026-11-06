@@ -311,14 +311,19 @@ def test_build_webio_commands_gives_every_command_the_path_of_its_own_item(
     """A callable path gets the class and the parsed item of each command, so no two share a path."""
     source = parse_config(load_json_fixture("config_quickbus.json")) if webio_class is WebioClass.QUICKBUS else parsed
 
+    asked: list[tuple[WebioClass, str]] = []
+
     def path_for(cls: WebioClass, item: Any) -> str:
-        return f"/h/{cls}/{item['id']}/{item.get('ext_name', '')}"
+        path = f"/h/{cls}/{item['id']}/{item.get('ext_name', '')}"
+        asked.append((cls, path))
+        return path
 
     commands = build_webio_commands(path_for, source, webio_class)
 
     assert commands
-    assert all(cmd["Parameter"].startswith(f"/h/{webio_class}/") for cmd in commands)
-    assert len({cmd["Parameter"] for cmd in commands}) == len(commands)
+    # Exactly the paths the callback returned, one per command, and only for the wanted class.
+    assert sorted(cmd["Parameter"] for cmd in commands) == sorted(path for _, path in asked)
+    assert {cls for cls, _ in asked} == {webio_class}
 
 
 def test_generate_webio_json_forwards_path_callable_and_server(parsed: dict[str, Any]) -> None:
@@ -326,5 +331,22 @@ def test_generate_webio_json_forwards_path_callable_and_server(parsed: dict[str,
         generate_webio_json(lambda cls, item: f"/h/{cls}/{item['id']}", "n [M]", parsed, WebioClass.MARKER, server="s")
     )
 
-    assert template["commands"]
-    assert all(c["Parameter"].startswith("/h/marker/") and 'server="s"' in c["Data"] for c in template["commands"])
+    expected = {f"/h/marker/{m['id']}" for m in parsed["markers"]}
+    assert {c["Parameter"] for c in template["commands"]} == expected
+    assert all('server="s"' in c["Data"] for c in template["commands"])
+
+
+def test_path_callable_that_handles_one_class_only_serves_that_class_upload(parsed: dict[str, Any]) -> None:
+    def markers_only(cls: WebioClass, item: Any) -> str:
+        assert cls is WebioClass.MARKER
+        return f"/h/{item['id']}"
+
+    commands = build_webio_commands(markers_only, parsed, WebioClass.MARKER)
+
+    assert commands
+
+
+def test_server_name_with_line_break_stays_a_valid_lua_string(parsed: dict[str, Any]) -> None:
+    commands = build_webio_commands(_HOOK, parsed, WebioClass.MARKER, server="a\r\nb")
+
+    assert all(', server="a\\r\\nb" }' in cmd["Data"] for cmd in commands)
