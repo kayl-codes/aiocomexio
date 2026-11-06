@@ -1013,12 +1013,12 @@ def test_int_is_output_as_digit_string(flag: str, is_input: bool) -> None:
     assert _io_all(_parse(conf))["201"]["is_input"] is is_input
 
 
-def test_int_is_output_one_does_not_make_a_plain_input_writable() -> None:
-    """An I1 stays an input although its IntIsOutput says 1: the input prefix decides before the flag."""
+def test_int_is_output_one_makes_a_plain_io_writable_whatever_its_prefix() -> None:
+    """IntIsOutput decides before the identifier prefix: an I1 Comexio writes is writable."""
     conf = load_json_fixture("config_quickbus.json")
     _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = 1
 
-    assert _io_all(_parse(conf))["11"]["is_input"] is True
+    assert _io_all(_parse(conf))["11"]["is_input"] is False
 
 
 @pytest.mark.parametrize("flag", ["yes", 2, 0.0, False, None])

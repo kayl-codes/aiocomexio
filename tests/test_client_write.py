@@ -224,18 +224,20 @@ def test_io_written_over_admin_session(identifier: str, admin: bool) -> None:
     assert io_written_over_admin_session(identifier) is admin
 
 
+async def _admin_only_dashboard_set(request: web.Request) -> web.Response:
+    """dashboard/refresh as Comexio answers it: a stored "set" for a logged-in admin session only."""
+    if request.cookies.get(SESSION_COOKIE) != SESSION_VALUE:
+        return web.Response(text=LOGIN_PAGE, content_type="text/html")
+    return json_response({"result": {"1": "1"}})
+
+
 @pytest.mark.parametrize(("value", "sent"), [(50, 50), (5.5, 5.5), (0, 0)])
 async def test_set_io_value_writes_an_analog_output_over_the_admin_session(
     api_client: ComexioClient, comexio: FakeComexio, value: float, sent: float
 ) -> None:
     # /api/ answers "Forbidden" for AO*, Comexio's own IO page sets them over dashboard/refresh (#259),
     # which only a logged-in admin session may do.
-    async def dashboard(request: web.Request) -> web.Response:
-        if request.cookies.get(SESSION_COOKIE) != SESSION_VALUE:
-            return web.Response(text=LOGIN_PAGE, content_type="text/html")
-        return json_response({"result": {"1": "1"}})
-
-    comexio.serve("POST", DASHBOARD_REFRESH_PATH, dashboard)
+    comexio.serve("POST", DASHBOARD_REFRESH_PATH, _admin_only_dashboard_set)
     await api_client.login()
 
     await api_client.set_io_value("IO-Extension A2", "AO4", value)
@@ -2558,12 +2560,14 @@ async def test_admin_actions_send_the_xhr_headers_comexio_expects(
     }
 
 
-@pytest.mark.parametrize("identifier", ["Next1", "Alarm1", "CurVol1", "Bright1"])
+@pytest.mark.parametrize("identifier", ["Next1", "Alarm1", "CurVol1", "Bright1", "DisplayOn1"])
 async def test_set_io_value_writes_an_output_comexio_writes_itself_over_the_admin_session(
     api_client: ComexioClient, comexio: FakeComexio, identifier: str
 ) -> None:
-    # /api/ answers "Forbidden" for these as for AO* (verified live on a Multiroom-Server, 2026-11-06).
-    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"1": "1"}})
+    # /api/ answers "Forbidden" for these as for AO* (verified live on a Multiroom-Server and Touchpanels,
+    # 2026-11-06), so they go over the admin session, which needs the login.
+    comexio.serve("POST", DASHBOARD_REFRESH_PATH, _admin_only_dashboard_set)
+    await api_client.login()
 
     await api_client.set_io_value("vMRSRV1", identifier, 1)
 

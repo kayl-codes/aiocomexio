@@ -320,10 +320,12 @@ _API_SET_OK_ANSWERS = ("0", "1")
 # What /api/?action=set answers (HTTP 200) for a target it does not let the API write: the 0-10 V
 # analog outputs and the Quickbus IOs (verified live, firmware 11.1.5, 2026-11-04).
 _API_SET_FORBIDDEN_ANSWER = "forbidden"  # compared case-insensitively
-# The only IOs /api/ writes: relay and dimmer outputs Q*. It answers "Forbidden" for every other
+# The IOs sent to /api/: relay and dimmer outputs Q*. It answers "Forbidden" for nearly every other
 # output, so those go over the admin session's dashboard/refresh "set", as Comexio's own IO page
 # does: the 0-10 V analog outputs AO* (2026-11-04) and the IOs Comexio writes itself, e.g. the
-# Multiroom-Server's Next1, Alarm1, CurVol1 (2026-11-06; both verified live, firmware 11.1.5).
+# Multiroom-Server's Next1, Alarm1, CurVol1 and the Touchpanel's Bright1, DisplayOn1, R (2026-11-06;
+# verified live, firmware 11.1.5). The admin session writes every one of them, also a Dali group DG1,
+# which /api/ happens to accept as well.
 _API_WRITTEN_IO_RE = re.compile(r"Q\d+", re.ASCII | re.IGNORECASE)
 # The key of the one entry of a dashboard/refresh "set" request, and its answer for a stored value;
 # an unknown extension or IO answers "0:io_not_found". A value beyond the IO's range is clamped.
@@ -465,8 +467,9 @@ class LiveStates:
 def io_written_over_admin_session(identifier: str) -> bool:
     """Whether ComexioClient.set_io_value writes this IO over the admin session instead of /api/.
 
-    True for every IO but the relay and dimmer outputs Q1, Q2, ..., which alone /api/ writes: the 0-10 V
-    analog outputs (AO1, ...) and the other IOs Comexio writes itself (Bright1, Alarm1, CurVol1, ...).
+    True for every IO but the relay and dimmer outputs Q1, Q2, ..., which go to /api/: the 0-10 V
+    analog outputs (AO1, ...) and the other IOs Comexio writes itself (Bright1, Alarm1, CurVol1, ...),
+    which /api/ refuses.
     Such a write needs a logged-in admin session; a caller that keeps one can log in again on
     ComexioAuthenticationError.
     """
@@ -949,7 +952,9 @@ class ComexioClient:
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"{what}: {value!r} is not a finite number")
         payload = {_DASHBOARD_SET_KEY: {_ACTION_KEY: "set", "EName": ext, "IOIdentifier": io, "Value": value}}
-        # Comexio closes an idle connection: the next request fails on it. Setting a value twice is harmless.
+        # Comexio closes an idle connection: the next request fails on it before Comexio handles it, so
+        # asking once more sets the value once — also for a momentary IO, where a second set would be a
+        # second key press. Without the retry, the first write after a quiet spell would fail.
         data = await _once_more_if_dropped(what, lambda: self._dashboard_refresh(payload, what=what))
         result = data.get(_RESULT_KEY) if isinstance(data, dict) else None
         answer = result.get(_DASHBOARD_SET_KEY) if isinstance(result, dict) else None
