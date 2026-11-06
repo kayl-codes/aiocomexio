@@ -537,7 +537,7 @@ class ComexioClient:
         ComexioDataError if the login could not be carried out at all.
         It starts a new session: an admin-session request running alongside it (get_live_states, an
         admin-session set_io_value, ...) can fail with ComexioAuthenticationError, so a caller that logs
-        in again while it keeps working serializes the two.
+        in again while it keeps working serializes the two or repeats such a request once after the login.
         """
         self._warn_plain_http()
         _LOGGER.debug("Starting RSA login for %s", self._host)
