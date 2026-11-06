@@ -484,13 +484,14 @@ class _LoginGate:
     carry no session cookie and get the login form. A login therefore waits for the requests in
     flight (at most _LOGIN_WAIT_FOR_REQUESTS_SEC), and a request that comes up meanwhile waits until
     the login is done. A waiting login lets no new request start, so a steady stream of requests
-    cannot starve it; the requests the login sends itself pass. A login that gave up waiting leaves
-    the requests it waited for behind, so a later login does not wait for them again. A request must
-    not start another one while it holds its slot: behind a waiting login, the inner one would wait
-    for the outer one until the login gives up waiting. Likewise the login sends its requests from
-    its own task: one sent from a task it starts would wait for the login to end. Cancellation never
-    leaves the gate locked: a login or a request releases its hold in a finally, and a waiter has
-    changed nothing yet.
+    cannot starve it; the requests the login sends itself pass. A login queued behind another one
+    holds nothing yet: a request can start before it, and it then waits for that request as well.
+    A login that gave up waiting leaves the requests it waited for behind, so a later login does not
+    wait for them again. A request must not start another one while it holds its slot: behind a
+    waiting login, the inner one would wait for the outer one until the login gives up waiting.
+    Likewise the login sends its requests from its own task: one sent from a task it starts would
+    wait for the login to end. Cancellation never leaves the gate locked: a login or a request
+    releases its hold in a finally, and a waiter has changed nothing yet.
     """
 
     def __init__(self) -> None:
@@ -625,9 +626,11 @@ class ComexioClient:
         cannot be encoded for the login form), ComexioCertificateMismatchError if a pinned client
         meets a foreign certificate, ComexioConnectionError / ComexioResponseError /
         ComexioDataError if the login could not be carried out at all, ComexioConnectionError also
-        if it takes longer than _LOGIN_TIMEOUT_SEC. It starts a new session, so it waits for the
-        requests in flight and a request made meanwhile waits until the login is done (/api/ writes
-        included: their answer may set a cookie in the jar the login renews);
+        if the login itself takes longer than _LOGIN_TIMEOUT_SEC; the time it waits for a running
+        login or for the requests in flight does not count, a caller that needs a bound on the whole
+        call sets its own. It starts a new session, so it waits for the requests in flight and a
+        request made meanwhile waits until the login is done (/api/ writes included: their answer
+        may set a cookie in the jar the login renews);
         neither fails because the cookie jar is renewed under it. The wait for the requests in flight
         ends after _LOGIN_WAIT_FOR_REQUESTS_SEC: one still running then may fail as not logged in.
         """
