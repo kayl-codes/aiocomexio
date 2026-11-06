@@ -658,6 +658,17 @@ def test_multiroom_server_type_id_is_read_as_a_canonical_id(ext_type: Any) -> No
     assert _multiroom_ios(ext_type)["Next1"]["momentary"] is True
 
 
+def test_a_key_press_whose_name_another_io_repeats_is_neither_writable_nor_momentary() -> None:
+    next_row = next(row for row in _MULTIROOM_ROWS.values() if row["Identifier"] == "Next1")
+    inactive_twin = {**next_row, "Id": 900, "Identifier": "next1", "Active": 0}
+
+    ios = _multiroom_ios(rows={**_MULTIROOM_ROWS, "900": inactive_twin})
+
+    assert ios["Next1"]["is_input"] is True
+    assert ios["Next1"]["momentary"] is False
+    assert ios["Prev1"]["momentary"] is True  # no other IO repeats its name
+
+
 @pytest.mark.parametrize("ext_type", [27, "27", 37, None, "32 ", True, 32.0])
 def test_key_press_names_on_another_extension_are_no_momentary_ios(ext_type: Any) -> None:
     # A Touchpanel's (27, 2G: 37) Toggle1 is not known to reset itself; an unusable TypeId is no Multiroom-Server.
