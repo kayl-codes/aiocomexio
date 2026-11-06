@@ -8,6 +8,7 @@ argument (a non-finite value for a set_*_value call, a non-numeric command_id, .
 raises ValueError or TypeError before anything is sent, as the method's docstring states.
 """
 
+import asyncio
 import base64
 import inspect
 import json
@@ -128,6 +129,10 @@ _LOGIN_FORM_SUBMIT_MARKER = 'id="loginsubmit"'
 # The login form is ISO-8859-1; RSA blocks are encrypted over its byte encoding.
 _LOGIN_ENCODING = "iso-8859-1"
 _LOGIN_NONCE_LENGTH = 20
+# How long login() waits for the requests in flight before it renews the session anyway. A request
+# that stalls longer (a session without a total timeout) must not hold up the login, and with it every
+# request queued behind the login; such a request may then fail with ComexioAuthenticationError.
+_LOGIN_WAIT_FOR_REQUESTS_SEC = 60.0
 # PKCS#1 v1.5 padding takes 11 bytes of every RSA block.
 _PKCS1_PADDING_BYTES = 11
 
@@ -469,6 +474,89 @@ def io_written_over_admin_session(identifier: str) -> bool:
     return bool(_ADMIN_WRITTEN_IO_RE.fullmatch(identifier))
 
 
+class _LoginGate:
+    """Gives login() the session to itself, while every other request shares it.
+
+    login() clears the cookie jar and starts a new session, so a request sent during a login would
+    carry no session cookie and get the login form. A login therefore waits for the requests in
+    flight (at most _LOGIN_WAIT_FOR_REQUESTS_SEC), and a request that comes up meanwhile waits until
+    the login is done. A waiting login lets no new request start, so a steady stream of requests
+    cannot starve it; the requests the login sends itself pass. A login that gave up waiting leaves
+    the requests it waited for behind, so a later login does not wait for them again. A request must
+    not start another one while it holds its slot: behind a waiting login, the inner one would wait
+    for the outer one until the login gives up waiting. Likewise the login sends its requests from
+    its own task: one sent from a task it starts would wait for the login to end. Cancellation never
+    leaves the gate locked: a login or a request releases its hold in a finally, and a waiter has
+    changed nothing yet.
+    """
+
+    def __init__(self) -> None:
+        self._in_flight = _InFlight()
+        self._login_task: asyncio.Task[Any] | None = None
+        self._no_login = asyncio.Event()
+        self._no_login.set()
+
+    @asynccontextmanager
+    async def request(self) -> AsyncIterator[None]:
+        """Hold one request slot; waits while a login runs or waits."""
+        if self._login_task is not None and self._login_task is asyncio.current_task():
+            yield  # one of the login's own requests
+            return
+        while self._login_task is not None:
+            await self._no_login.wait()
+        in_flight = self._in_flight  # a request counts against the batch it started in
+        in_flight.add()
+        try:
+            yield
+        finally:
+            in_flight.remove()
+
+    @asynccontextmanager
+    async def login(self) -> AsyncIterator[None]:
+        """Hold the session alone: waits for a running login, then for the requests in flight."""
+        while self._login_task is not None:
+            await self._no_login.wait()
+        self._login_task = asyncio.current_task()
+        self._no_login.clear()
+        try:
+            await self._wait_for_requests()
+            yield
+        finally:
+            self._login_task = None
+            self._no_login.set()
+
+    async def _wait_for_requests(self) -> None:
+        """Wait until no request is in flight, or _LOGIN_WAIT_FOR_REQUESTS_SEC has passed."""
+        try:
+            async with asyncio.timeout(_LOGIN_WAIT_FOR_REQUESTS_SEC):
+                await self._in_flight.idle.wait()
+        except TimeoutError:
+            _LOGGER.warning(
+                "Login goes ahead after waiting %s s; requests still in flight: %d, they may fail as not logged in",
+                _LOGIN_WAIT_FOR_REQUESTS_SEC,
+                self._in_flight.count,
+            )
+            self._in_flight = _InFlight()  # left behind: no later login waits for them again
+
+
+class _InFlight:
+    """The requests started in one batch: how many are still running, and an event set while none is."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.idle = asyncio.Event()
+        self.idle.set()
+
+    def add(self) -> None:
+        self.count += 1
+        self.idle.clear()
+
+    def remove(self) -> None:
+        self.count -= 1
+        if not self.count:
+            self.idle.set()
+
+
 class ComexioClient:
     """Admin-session client for one Comexio IO-Server.
 
@@ -477,10 +565,12 @@ class ComexioClient:
     HTTPS and is refused with ComexioCertificateMismatchError unless the server presents exactly
     that certificate; without it the client uses plain HTTP. A pinned client follows a redirect only
     within its HTTPS origin. An invalid fingerprint string raises ValueError, a non-str TypeError.
-    The port in host applies to whichever scheme is used. session must have its own cookie jar
-    (session.session_kwargs), since the admin login lives in it. Call login() before any other
-    admin method. api_username / api_password are the separate Comexio API user the set_*_value
-    methods send as Basic Auth; without api_username they send no credentials at all.
+    The port in host applies to whichever scheme is used. session must have its own cookie jar,
+    since the admin login lives in it, and a total timeout, since a login holds every other request
+    back while it runs and a login request that never returns would stall the client;
+    session.session_kwargs gives it both. Call login() before any other admin method.
+    api_username / api_password are the separate Comexio API user the set_*_value methods send as
+    Basic Auth; without api_username they send no credentials at all.
     """
 
     def __init__(
@@ -510,6 +600,7 @@ class ComexioClient:
             self._base_url = f"https://{host}"
             self._ssl = aiohttp.Fingerprint(bytes.fromhex(self._fingerprint))
         self._plain_http_warned = False
+        self._gate = _LoginGate()
 
     @property
     def host(self) -> str:
@@ -528,8 +619,15 @@ class ComexioClient:
         cannot be encoded for the login form), ComexioCertificateMismatchError if a pinned client
         meets a foreign certificate, ComexioConnectionError / ComexioResponseError /
         ComexioDataError if the login could not be carried out at all.
+        It starts a new session, so it waits for the requests in flight, and a request made meanwhile
+        waits until the login is done; neither fails because the cookie jar is renewed under it.
         """
         self._warn_plain_http()
+        async with self._gate.login():
+            await self._rsa_login()
+
+    async def _rsa_login(self) -> None:
+        """The login itself; login() holds the session alone around it."""
         _LOGGER.debug("Starting RSA login for %s", self._host)
         login_url = f"{self._base_url}{_LOGIN_PATH}"
         # A still valid session cookie from an earlier login would make the admin page below look
@@ -1920,25 +2018,26 @@ class ComexioClient:
         ComexioResponseError before it is followed, so neither the session cookie nor credentials
         go anywhere the pin does not cover.
         """
-        url = f"{self._base_url}{path}"
-        if self._fingerprint is None:
-            async with self._session.request(method, url, ssl=self._ssl, **kwargs) as resp:
-                yield resp
-            return
-        for _ in range(_MAX_REDIRECTS + 1):
-            async with self._session.request(method, url, ssl=self._ssl, allow_redirects=False, **kwargs) as resp:
-                if resp.status not in _FOLLOWED_REDIRECT_STATUSES:
+        async with self._gate.request():
+            url = f"{self._base_url}{path}"
+            if self._fingerprint is None:
+                async with self._session.request(method, url, ssl=self._ssl, **kwargs) as resp:
                     yield resp
-                    return
-                url = _pinned_redirect_target(resp, what)
-                # The Location carries its own query; like aiohttp, a 303 (except on a HEAD) and a POST on
-                # 301/302 continue as a body-less GET.
-                kwargs.pop("params", None)
-                see_other = resp.status == HTTPStatus.SEE_OTHER and method != "HEAD"
-                if see_other or (resp.status in _REDIRECT_STATUSES and method == "POST"):
-                    method = "GET"
-                    kwargs.pop("data", None)
-        raise ComexioResponseError(f"{what} failed: more than {_MAX_REDIRECTS} redirects", status=resp.status)
+                return
+            for _ in range(_MAX_REDIRECTS + 1):
+                async with self._session.request(method, url, ssl=self._ssl, allow_redirects=False, **kwargs) as resp:
+                    if resp.status not in _FOLLOWED_REDIRECT_STATUSES:
+                        yield resp
+                        return
+                    url = _pinned_redirect_target(resp, what)
+                    # The Location carries its own query; like aiohttp, a 303 (except on a HEAD) and a POST on
+                    # 301/302 continue as a body-less GET.
+                    kwargs.pop("params", None)
+                    see_other = resp.status == HTTPStatus.SEE_OTHER and method != "HEAD"
+                    if see_other or (resp.status in _REDIRECT_STATUSES and method == "POST"):
+                        method = "GET"
+                        kwargs.pop("data", None)
+            raise ComexioResponseError(f"{what} failed: more than {_MAX_REDIRECTS} redirects", status=resp.status)
 
     def _transport_error(self, what: str, err: aiohttp.ClientError | TimeoutError) -> ComexioError:
         """The ComexioError for a request that failed below HTTP: a foreign certificate or a connection problem."""
@@ -1970,9 +2069,12 @@ class ComexioClient:
         ComexioRequestRejectedError.
         """
         try:
-            async with self._session.request(
-                method, f"{self._base_url}{path}", allow_redirects=False, ssl=self._ssl, **kwargs
-            ) as resp:
+            async with (
+                self._gate.request(),
+                self._session.request(
+                    method, f"{self._base_url}{path}", allow_redirects=False, ssl=self._ssl, **kwargs
+                ) as resp,
+            ):
                 if resp.status in _REDIRECT_STATUSES:
                     location = resp.headers.get("Location", "")
                     try:
