@@ -23,6 +23,7 @@ from aiocomexio import (
     TimeServerSettings,
     session_kwargs,
 )
+from aiocomexio import client as client_module
 from tests.common import load_fixture
 from tests.fake_comexio import (
     ADMIN_PATH,
@@ -37,13 +38,18 @@ from tests.fake_comexio import (
     LOGIN_PATH,
     PASSWORD,
     SALT,
+    SESSION_COOKIE,
+    SESSION_VALUE,
     USERNAME,
     FakeComexio,
+    Handler,
     json_response,
 )
 
 _ELEMENT = {"id": 7, "name": "", "position_x": 0, "position_y": 0}
 _CONNECTION = {"input": {"FubElementId": 7, "IOPos": 0}, "output": []}
+_PLAN_DELETE_PATH = "/admin/function_function_module/delete/"
+_API_PATH = "/api/"
 
 
 # --- login ---------------------------------------------------------------------------------
@@ -155,6 +161,326 @@ async def test_login_on_unreachable_server_raises_connection_error(comexio: Fake
         client = ComexioClient(host, USERNAME, PASSWORD, session=session)
         with pytest.raises(ComexioConnectionError):
             await client.login()
+
+
+# --- login alongside other requests ---------------------------------------------------------
+
+
+# Long enough for a request the gate failed to hold back to reach the fake server.
+_SETTLE_SEC = 0.1
+# The start of the warning a login logs when it stops waiting for the requests in flight.
+_LOGIN_GOES_AHEAD = "Login goes ahead"
+
+
+def _left_behind_warning(waited: float, in_flight: int) -> str:
+    """The full warning a login logs when it stops waiting for the requests in flight."""
+    return (
+        f"{_LOGIN_GOES_AHEAD} after waiting {waited} s; requests still in flight: {in_flight}, "
+        "they may fail as not logged in"
+    )
+
+
+async def _session_check(request: web.Request) -> web.Response:
+    """The session check as Comexio answers it: JSON for a logged-in session, else the login form."""
+    if request.cookies.get(SESSION_COOKIE) != SESSION_VALUE:
+        return web.Response(text=LOGIN_PAGE, content_type="text/html")
+    return json_response({"workload": 12})
+
+
+class _Held:
+    """A route that answers through handler only once released, and tells when a request arrived."""
+
+    def __init__(self, handler: Handler) -> None:
+        self.arrived = asyncio.Event()
+        self.release = asyncio.Event()
+        self._handler = handler
+
+    async def __call__(self, request: web.Request) -> web.StreamResponse:
+        self.arrived.set()
+        await self.release.wait()
+        return await self._handler(request)
+
+
+async def test_a_request_made_during_a_login_waits_for_the_new_session(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # login() clears the cookie jar first; sent meanwhile, the request would carry no session cookie.
+    held_login = _Held(comexio.routes[("POST", LOGIN_PATH)])
+    comexio.serve("POST", LOGIN_PATH, held_login)
+    comexio.serve("POST", BUS_WORKLOAD_PATH, _session_check)
+
+    login = asyncio.create_task(logged_in.login())
+    await asyncio.wait_for(held_login.arrived.wait(), 5)
+    check = asyncio.create_task(logged_in.is_logged_in())
+    await asyncio.sleep(_SETTLE_SEC)
+    assert comexio.received_at("POST", BUS_WORKLOAD_PATH) == []  # not sent while the login runs
+    held_login.release.set()
+    await login
+
+    assert await check is True
+
+
+async def test_a_login_waits_for_the_requests_in_flight(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    held_check = _Held(_session_check)
+    comexio.serve("POST", BUS_WORKLOAD_PATH, held_check)
+    login_posts = len(comexio.received_at("POST", LOGIN_PATH))
+
+    with caplog.at_level(logging.WARNING):
+        check = asyncio.create_task(logged_in.is_logged_in())
+        await asyncio.wait_for(held_check.arrived.wait(), 5)
+        login = asyncio.create_task(logged_in.login())
+        await asyncio.sleep(_SETTLE_SEC)
+        assert len(comexio.received_at("POST", LOGIN_PATH)) == login_posts  # the jar stays as it is meanwhile
+        held_check.release.set()
+
+        assert await check is True
+        await login
+
+    assert len(comexio.received_at("POST", LOGIN_PATH)) == login_posts + 2
+    assert _LOGIN_GOES_AHEAD not in caplog.text
+
+
+async def test_a_cancelled_waiting_login_lets_requests_through(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    held_check = _Held(_session_check)
+    comexio.serve("POST", BUS_WORKLOAD_PATH, held_check)
+    check = asyncio.create_task(logged_in.is_logged_in())
+    await asyncio.wait_for(held_check.arrived.wait(), 5)
+    login = asyncio.create_task(logged_in.login())
+    await asyncio.sleep(_SETTLE_SEC)
+
+    login.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await login
+    held_check.release.set()
+
+    assert await check is True
+    async with asyncio.timeout(5):
+        assert await logged_in.is_logged_in() is True
+
+
+async def test_a_request_made_while_a_login_waits_waits_for_the_login_too(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # A waiting login lets no new request start, or a steady stream of requests could starve it.
+    held_check = _Held(_session_check)
+    comexio.serve("POST", BUS_WORKLOAD_PATH, held_check)
+    first = asyncio.create_task(logged_in.is_logged_in())
+    await asyncio.wait_for(held_check.arrived.wait(), 5)
+    login = asyncio.create_task(logged_in.login())
+    await asyncio.sleep(_SETTLE_SEC)
+
+    second = asyncio.create_task(logged_in.is_logged_in())
+    await asyncio.sleep(_SETTLE_SEC)
+    assert len(comexio.received_at("POST", BUS_WORKLOAD_PATH)) == 1
+    held_check.release.set()
+    await login
+
+    assert (await first, await second) == (True, True)
+    checks = [i for i, sent in enumerate(comexio.requests) if sent == ("POST", BUS_WORKLOAD_PATH)]
+    logins = [i for i, sent in enumerate(comexio.requests) if sent == ("POST", LOGIN_PATH)]
+    assert checks[1] > logins[-1]
+
+
+async def _logged_in_plan_delete(request: web.Request) -> web.Response:
+    """The plan delete as Comexio answers it: confirmed for a logged-in session, else off to the login page."""
+    if request.cookies.get(SESSION_COOKIE) != SESSION_VALUE:
+        raise web.HTTPFound(LOGIN_PATH)
+    raise web.HTTPFound(f"{FUNCTION_MODULE_PATH}?delete=ok")
+
+
+async def test_a_redirect_answered_request_made_during_a_login_waits_for_it(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    held_login = _Held(comexio.routes[("POST", LOGIN_PATH)])
+    comexio.serve("POST", LOGIN_PATH, held_login)
+    comexio.serve("GET", _PLAN_DELETE_PATH, _logged_in_plan_delete)
+
+    login = asyncio.create_task(logged_in.login())
+    await asyncio.wait_for(held_login.arrived.wait(), 5)
+    delete = asyncio.create_task(logged_in.delete_function_plan(9))
+    await asyncio.sleep(_SETTLE_SEC)
+    assert comexio.received_at("GET", _PLAN_DELETE_PATH) == []
+    held_login.release.set()
+    await login
+
+    await delete  # confirmed, so it carried the new session cookie
+
+
+async def test_concurrent_logins_run_one_after_the_other(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    # Each login clears the cookie jar, so one running inside the other would break it.
+    original = comexio.routes[("POST", LOGIN_PATH)]
+    active = peak = 0
+
+    async def counting(request: web.Request) -> web.StreamResponse:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.02)
+            return await original(request)
+        finally:
+            active -= 1
+
+    comexio.serve("POST", LOGIN_PATH, counting)
+    comexio.serve("POST", BUS_WORKLOAD_PATH, _session_check)
+
+    async with asyncio.timeout(5):
+        await asyncio.gather(logged_in.login(), logged_in.login())
+
+    assert peak == 1
+    assert await logged_in.is_logged_in() is True
+
+
+async def test_a_failed_login_lets_later_requests_and_logins_through(
+    comexio: FakeComexio, session: aiohttp.ClientSession
+) -> None:
+    client = ComexioClient(comexio.host, USERNAME, "wrong", session=session)
+    comexio.serve("POST", BUS_WORKLOAD_PATH, _session_check)
+    with pytest.raises(ComexioAuthenticationError):
+        await client.login()
+
+    async with asyncio.timeout(5):
+        assert await client.is_logged_in() is False
+        with pytest.raises(ComexioAuthenticationError):
+            await client.login()
+
+
+async def test_a_failed_request_lets_a_later_login_through(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve_text("POST", BUS_WORKLOAD_PATH, "", status=500)
+    with pytest.raises(ComexioResponseError):
+        await logged_in.is_logged_in()
+
+    async with asyncio.timeout(5):
+        await logged_in.login()
+
+
+async def test_a_login_cancelled_while_it_runs_lets_requests_through(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    held_login = _Held(comexio.routes[("POST", LOGIN_PATH)])
+    comexio.serve("POST", LOGIN_PATH, held_login)
+    comexio.serve_json("POST", BUS_WORKLOAD_PATH, {"workload": 12})
+    login = asyncio.create_task(logged_in.login())
+    await asyncio.wait_for(held_login.arrived.wait(), 5)
+
+    login.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await login
+    held_login.release.set()
+
+    async with asyncio.timeout(5):
+        assert await logged_in.is_logged_in() is True
+
+
+async def test_a_login_waits_for_a_stalled_request_only_so_long(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A request stalled without a session timeout must not hold up the login and everything behind it.
+    monkeypatch.setattr(client_module, "_LOGIN_WAIT_FOR_REQUESTS_SEC", 0.1)
+    held_check = _Held(_session_check)
+    comexio.serve("POST", BUS_WORKLOAD_PATH, held_check)
+    check = asyncio.create_task(logged_in.is_logged_in())
+    await asyncio.wait_for(held_check.arrived.wait(), 5)
+
+    caplog.set_level(logging.WARNING)
+    async with asyncio.timeout(5):
+        await logged_in.login()
+    assert caplog.messages == [_left_behind_warning(0.1, 1)]
+
+    # The next login does not wait for the request left behind again, with whatever bound.
+    monkeypatch.setattr(client_module, "_LOGIN_WAIT_FOR_REQUESTS_SEC", 10.0)
+    async with asyncio.timeout(1):
+        await logged_in.login()
+
+    # A request started after that still counts, and the one left behind ending does not cancel it out.
+    held_later = _Held(_session_check)
+    comexio.serve("POST", BUS_WORKLOAD_PATH, held_later)
+    later = asyncio.create_task(logged_in.is_logged_in())
+    await asyncio.wait_for(held_later.arrived.wait(), 5)
+    held_check.release.set()
+    assert await check is True  # sent with the old session cookie, which the fake still accepts
+    monkeypatch.setattr(client_module, "_LOGIN_WAIT_FOR_REQUESTS_SEC", 0.1)
+    caplog.clear()
+    async with asyncio.timeout(5):
+        await logged_in.login()
+    assert caplog.messages == [_left_behind_warning(0.1, 1)]
+
+    held_later.release.set()
+    assert await later is True
+    caplog.clear()
+    async with asyncio.timeout(1):
+        await logged_in.login()
+    assert _LOGIN_GOES_AHEAD not in caplog.text
+    assert await logged_in.is_logged_in() is True
+
+
+async def test_a_login_that_stalls_gives_up_and_lets_requests_through(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every request waits while a login runs, so a stalled login must end on its own.
+    monkeypatch.setattr(client_module, "_LOGIN_TIMEOUT_SEC", 0.5)  # leaves room for the steps before the held one
+    held_login = _Held(comexio.routes[("POST", LOGIN_PATH)])
+    comexio.serve("POST", LOGIN_PATH, held_login)
+    comexio.serve_json("POST", BUS_WORKLOAD_PATH, {"workload": 12})
+
+    login = asyncio.create_task(logged_in.login())
+    await asyncio.wait_for(held_login.arrived.wait(), 5)  # stalled in the login request itself
+    queued = asyncio.create_task(logged_in.is_logged_in())
+    async with asyncio.timeout(5):
+        with pytest.raises(ComexioConnectionError, match="took longer than 0.5 s"):
+            await login
+        assert not queued.done()  # it waited behind the login, so it cannot have its answer yet
+        assert await queued is True  # released by the give-up, the held login still has not answered
+
+    held_login.release.set()
+    async with asyncio.timeout(5):
+        assert await logged_in.is_logged_in() is True
+
+
+async def test_the_login_bound_leaves_out_the_wait_for_requests_in_flight(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only the login itself is bounded: one queued behind a slow request must not fail for the queueing.
+    monkeypatch.setattr(client_module, "_LOGIN_TIMEOUT_SEC", 0.5)
+    held_check = _Held(_session_check)
+    comexio.serve("POST", BUS_WORKLOAD_PATH, held_check)
+    check = asyncio.create_task(logged_in.is_logged_in())
+    await asyncio.wait_for(held_check.arrived.wait(), 5)
+    login = asyncio.create_task(logged_in.login())
+
+    await asyncio.sleep(0.8)
+    held_check.release.set()
+    async with asyncio.timeout(5):
+        await login
+    assert await check is True
+
+
+@pytest.mark.parametrize("api_username", ["api", ""], ids=["basic_auth", "no_api_credentials"])
+async def test_an_api_write_made_during_a_login_waits_for_it(
+    comexio: FakeComexio, session: aiohttp.ClientSession, api_username: str
+) -> None:
+    # Basic Auth or not, the answer may set a cookie in the jar the login renews.
+    client = ComexioClient(
+        comexio.host, USERNAME, PASSWORD, session=session, api_username=api_username, api_password=PASSWORD
+    )
+    await client.login()
+    held_login = _Held(comexio.routes[("POST", LOGIN_PATH)])
+    comexio.serve("POST", LOGIN_PATH, held_login)
+    comexio.serve_text("GET", _API_PATH, "1")
+
+    login = asyncio.create_task(client.login())
+    await asyncio.wait_for(held_login.arrived.wait(), 5)
+    write = asyncio.create_task(client.set_marker_value(5, 1))
+    await asyncio.sleep(_SETTLE_SEC)
+    assert comexio.received_at("GET", _API_PATH) == []
+    held_login.release.set()
+    await login
+    await write
+    sent = comexio.requests
+    assert sent.count(("GET", _API_PATH)) == 1
+    assert sent.index(("GET", _API_PATH)) > max(i for i, req in enumerate(sent) if req == ("POST", LOGIN_PATH))
 
 
 async def test_request_timeout_raises_connection_error(comexio: FakeComexio) -> None:
