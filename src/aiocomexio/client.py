@@ -18,7 +18,7 @@ import re
 import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -133,7 +133,7 @@ _LOGIN_NONCE_LENGTH = 20
 # that stalls longer (a session without a total timeout) must not hold up the login, and with it every
 # request queued behind the login; such a request may then fail with ComexioAuthenticationError.
 _LOGIN_WAIT_FOR_REQUESTS_SEC = 60.0
-# How long the login itself may take. Every admin request waits while it runs, so a login stalled on a
+# How long the login itself may take. Every request waits while it runs, so a login stalled on a
 # session without a total timeout must not hold them up forever; a real login takes seconds.
 _LOGIN_TIMEOUT_SEC = 300.0
 # PKCS#1 v1.5 padding takes 11 bytes of every RSA block.
@@ -478,7 +478,7 @@ def io_written_over_admin_session(identifier: str) -> bool:
 
 
 class _LoginGate:
-    """Gives login() the session to itself, while every other admin request shares it.
+    """Gives login() the session to itself, while every other request shares it.
 
     login() clears the cookie jar and starts a new session, so a request sent during a login would
     carry no session cookie and get the login form. A login therefore waits for the requests in
@@ -570,9 +570,11 @@ class ComexioClient:
     within its HTTPS origin. An invalid fingerprint string raises ValueError, a non-str TypeError.
     The port in host applies to whichever scheme is used. session must have its own cookie jar,
     since the admin login lives in it, and should have a total timeout: a login holds every other
-    admin request back while it runs, and without one a stalled login request only gives up after
-    _LOGIN_TIMEOUT_SEC. session.session_kwargs gives it both. Call login() before any other admin
-    method.
+    request back while it runs, and without one a stalled login request only gives up after
+    _LOGIN_TIMEOUT_SEC. session.session_kwargs gives it both. The session timeout covers each
+    request on the wire, not the time it waits for a login: per login up to
+    _LOGIN_WAIT_FOR_REQUESTS_SEC plus _LOGIN_TIMEOUT_SEC; a caller that needs a tighter bound sets
+    its own around the call. Call login() before any other admin method.
     api_username / api_password are the separate Comexio API user the set_*_value methods send as
     Basic Auth; without api_username they send no credentials at all.
     """
@@ -624,7 +626,8 @@ class ComexioClient:
         meets a foreign certificate, ComexioConnectionError / ComexioResponseError /
         ComexioDataError if the login could not be carried out at all, ComexioConnectionError also
         if it takes longer than _LOGIN_TIMEOUT_SEC. It starts a new session, so it waits for the
-        admin requests in flight and an admin request made meanwhile waits until the login is done;
+        requests in flight and a request made meanwhile waits until the login is done (/api/ writes
+        included: their answer may set a cookie in the jar the login renews);
         neither fails because the cookie jar is renewed under it. The wait for the requests in flight
         ends after _LOGIN_WAIT_FOR_REQUESTS_SEC: one still running then may fail as not logged in.
         """
@@ -1878,10 +1881,8 @@ class ComexioClient:
         # params= would send "+". yarl keeps valid %XX escapes, so the path with the query is safe.
         query = urlencode({_ACTION_KEY: "set", "value": value, **target}, quote_via=quote)
         try:
-            # Without API credentials the request carries only the session cookie, so it keeps to the login gate.
-            body = await self._request_text(
-                "GET", f"{_API_PATH}?{query}", what=what, admin_session=not self._api_username, headers=headers
-            )
+            # Through the login gate as well: the answer may set a cookie in the jar the login renews.
+            body = await self._request_text("GET", f"{_API_PATH}?{query}", what=what, headers=headers)
         except ComexioResponseError as err:
             if err.status != HTTPStatus.UNAUTHORIZED:
                 raise
@@ -2015,12 +2016,11 @@ class ComexioClient:
         *,
         what: str,
         check_status: bool = True,
-        admin_session: bool = True,
         **kwargs: Any,
     ) -> str:
         """Body of one request as text, with transport errors and error statuses mapped to ComexioError."""
         try:
-            async with self._response(method, path, what=what, admin_session=admin_session, **kwargs) as resp:
+            async with self._response(method, path, what=what, **kwargs) as resp:
                 if check_status and resp.status != HTTPStatus.OK:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
                 try:
@@ -2032,18 +2032,15 @@ class ComexioClient:
 
     @asynccontextmanager
     async def _response(
-        self, method: str, path: str, *, what: str, admin_session: bool = True, **kwargs: Any
+        self, method: str, path: str, *, what: str, **kwargs: Any
     ) -> AsyncIterator[aiohttp.ClientResponse]:
         """The response to one request; a pinned client follows redirects itself, only within its HTTPS origin.
 
         A redirect that leaves the pinned origin (plain http://, another host or port) raises
         ComexioResponseError before it is followed, so neither the session cookie nor credentials
-        go anywhere the pin does not cover. admin_session=False is for /api/ requests with API
-        credentials: they authenticate with Basic Auth, not the session cookie, so they neither wait
-        for a login nor hold one up.
+        go anywhere the pin does not cover. Every request goes through the login gate.
         """
-        gate: AbstractAsyncContextManager[None] = self._gate.request() if admin_session else nullcontext()
-        async with gate:
+        async with self._gate.request():
             url = f"{self._base_url}{path}"
             if self._fingerprint is None:
                 async with self._session.request(method, url, ssl=self._ssl, **kwargs) as resp:
