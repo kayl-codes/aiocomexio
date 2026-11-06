@@ -33,7 +33,9 @@ The client works on an `aiohttp.ClientSession` you create and close yourself.
 `session_kwargs()` gives it the settings Comexio needs (a cookie jar that keeps the admin
 login for an IP-address host, a request timeout; `progress_log_interval=10` adds a "still
 waiting" log line for slow requests). Give every client its own session: `login()` clears the
-session's cookie jar. Marker and KNX writes (`set_marker_value`, `set_knx_value`) go through
+session's cookie jar. Several tasks can share one client while it logs in: `login()` waits for
+the requests already in flight (at most 60 s), and requests that come up meanwhile wait until the
+login is done. No request then runs without the session cookie. Marker and KNX writes (`set_marker_value`, `set_knx_value`) go through
 Comexio's `/api/` with a separate API user: pass `api_username` / `api_password` to the client.
 `set_io_value` sends only the relay and dimmer outputs (`Q1`, `Q2`, …) and the Dali groups
 (`DG1`, …) to `/api/`, which refuses nearly every other IO. It writes the others (the 0-10 V
