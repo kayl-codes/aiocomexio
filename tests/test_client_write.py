@@ -2569,10 +2569,10 @@ async def test_set_io_value_writes_an_output_comexio_writes_itself_over_the_admi
     comexio.serve("POST", DASHBOARD_REFRESH_PATH, _admin_only_dashboard_set)
     await api_client.login()
 
-    await api_client.set_io_value("vMRSRV1", identifier, 1)
+    await api_client.set_io_value("Ext 1", identifier, 1)
 
     (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
     assert json.loads(request.form["json"]) == {
-        "1": {"action": "set", "EName": "vMRSRV1", "IOIdentifier": identifier, "Value": 1}
+        "1": {"action": "set", "EName": "Ext 1", "IOIdentifier": identifier, "Value": 1}
     }
     assert comexio.received_at("GET", API_PATH) == []

@@ -599,7 +599,7 @@ async def test_io_ext_ids_from_parse_config_feed_get_io_live_states(
 
 
 def _multiroom_conf(ext_type: Any, rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    ext = {"Name": "vMRSRV1", "Identifier": "", "TypeId": ext_type}
+    ext = {"Name": "Ext 1", "Identifier": "", "TypeId": ext_type}
     return {"FubModules": {"1": {"18": {"extension": ext, "inoutput": rows}}}}
 
 
@@ -624,15 +624,15 @@ _MULTIROOM_ROWS = {
         "Timeout": 1,
     }
     for io_id, ident, type_id in [
-        (519, "Next1", 151),
-        (521, "Prev1", 151),
-        (522, "Play1", 151),
-        (523, "Pause1", 151),
-        (525, "Toggle1", 3),
-        (526, "Alarm1", 3),
-        (527, "Bell1", 3),
-        (529, "Custom1", 3),
-        (520, "CurVol1", 56),
+        (101, "Next1", 151),
+        (102, "Prev1", 151),
+        (103, "Play1", 151),
+        (104, "Pause1", 151),
+        (105, "Toggle1", 3),
+        (106, "Alarm1", 3),
+        (107, "Bell1", 3),
+        (108, "Custom1", 3),
+        (109, "CurVol1", 56),
     ]
 }
 
@@ -673,7 +673,7 @@ def test_key_press_names_on_another_extension_are_no_momentary_ios(ext_type: Any
     ],
 )
 def test_momentary_needs_a_writable_key_press_io(change: dict[str, Any], reason: str) -> None:
-    rows = {"519": {**_MULTIROOM_ROWS["519"], **change}}
+    rows = {"101": {**_MULTIROOM_ROWS["101"], **change}}
 
     (io,) = _multiroom_ios(rows=rows).values()
 
@@ -683,7 +683,7 @@ def test_momentary_needs_a_writable_key_press_io(change: dict[str, Any], reason:
 @pytest.mark.parametrize("type_id", [999, None])
 def test_a_key_press_without_a_usable_type_row_stays_momentary(type_id: Any) -> None:
     # Device type and identifier make it a key press; the IO type table only says binary or analog.
-    rows = {"519": {**_MULTIROOM_ROWS["519"], "InOutputTypeId": type_id}}
+    rows = {"101": {**_MULTIROOM_ROWS["101"], "InOutputTypeId": type_id}}
 
     (io,) = _multiroom_ios(rows=rows).values()
 
@@ -693,8 +693,8 @@ def test_a_key_press_without_a_usable_type_row_stays_momentary(type_id: Any) -> 
 
 # A Touchpanel's IOs Comexio writes, as firmware 11.1.5 lists them (Bright1 is type 28 there, analog like 56).
 _TOUCHPANEL_ROWS = {
-    str(io_id): {**_MULTIROOM_ROWS["519"], "Id": io_id, "Identifier": ident, "InOutputTypeId": type_id}
-    for io_id, ident, type_id in [(530, "DisplayOn1", 151), (533, "Bright1", 56), (534, "Mute1", 3)]
+    str(io_id): {**_MULTIROOM_ROWS["101"], "Id": io_id, "Identifier": ident, "InOutputTypeId": type_id}
+    for io_id, ident, type_id in [(201, "DisplayOn1", 151), (202, "Bright1", 56), (203, "Mute1", 3)]
 }
 
 
@@ -720,7 +720,7 @@ def test_a_touchpanels_display_on_is_momentary(ext_type: Any) -> None:
     ],
 )
 def test_a_touchpanel_key_press_is_matched_exactly(identifier: str, flag: int, momentary: bool) -> None:
-    rows = {"530": {**_TOUCHPANEL_ROWS["530"], "Identifier": identifier, "IntIsOutput": flag}}
+    rows = {"201": {**_TOUCHPANEL_ROWS["201"], "Identifier": identifier, "IntIsOutput": flag}}
 
     (io,) = _multiroom_ios(37, rows).values()
 
@@ -733,7 +733,7 @@ def test_display_on_of_a_multiroom_server_is_no_momentary_io() -> None:
 
 @pytest.mark.parametrize("identifier", ["next1", "TOGGLE2", "pAuSe1"])
 def test_momentary_ignores_the_case_of_the_identifier(identifier: str) -> None:
-    rows = {"519": {**_MULTIROOM_ROWS["519"], "Identifier": identifier}}
+    rows = {"101": {**_MULTIROOM_ROWS["101"], "Identifier": identifier}}
 
     (io,) = _multiroom_ios(rows=rows).values()
 
