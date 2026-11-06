@@ -1013,8 +1013,8 @@ def test_int_is_output_as_digit_string(flag: str, is_input: bool) -> None:
     assert _io_all(_parse(conf))["201"]["is_input"] is is_input
 
 
-def test_int_is_output_one_does_not_change_plain_ios() -> None:
-    """Outside the Quickbus IntIsOutput 1 makes nothing writable; the identifier prefix keeps deciding."""
+def test_int_is_output_one_does_not_make_a_plain_input_writable() -> None:
+    """An I1 stays an input although its IntIsOutput says 1: the input prefix decides before the flag."""
     conf = load_json_fixture("config_quickbus.json")
     _base_ext(conf)["inoutput"]["11"]["IntIsOutput"] = 1
 

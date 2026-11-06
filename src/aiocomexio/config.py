@@ -110,15 +110,20 @@ _LOG_REPR = reprlib.Repr(
 # Line breaks and other control characters of a scraped name would forge log lines.
 _LOG_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
-# AO*: the 0-10 V analog outputs; $IOInputTypes marks their types (0-10V, 0-10V Prozent, Digital 10V)
-# as inputs, so only the identifier makes them writable (#259 of homeassistant-comexio). Matched exactly
-# (ASCII digits, \Z: no trailing newline) like client.io_written_over_admin_session, so an AO classified
-# writable here is written over that route.
+# Q*: relay/dimmer outputs. AO*: the 0-10 V analog outputs; $IOInputTypes marks their types (0-10V,
+# 0-10V Prozent, Digital 10V) as inputs, so the identifier makes them writable (#259 of
+# homeassistant-comexio). Matched exactly (ASCII digits, \Z: no trailing newline), as
+# client.io_written_over_admin_session matches the Q* it sends to /api/.
 _OUTPUT_IO_RE = re.compile(r"^(?:Q|AO)\d+\Z", re.ASCII)
 _ANALOG_0_10V_OUTPUT_IO_RE = re.compile(r"^AO\d+\Z", re.ASCII)
 _INPUT_IO_RE = re.compile(r"^(?:I|AI|QI)\d+$")
 _ANALOG_OUTPUT_IO_RE = re.compile(r"^QI\d+$")
 _BINARY_IO_RE = re.compile(r"^[QI]\d+$")
+# The Multiroom-Server's extension TypeId, and its IOs Comexio resets to 0 by itself right after a 1
+# (a key press, not a switch): measured live on firmware 11.1.5, 2026-11-06. The IO data cannot tell
+# them apart — Toggle1 shares type and timeout with the latching Alarm1, Bell1 and Custom1.
+_MULTIROOM_SERVER_TYPE_ID = "32"
+_MULTIROOM_MOMENTARY_IO_RE = re.compile(r"(?:NEXT|PREV|PLAY|PAUSE|TOGGLE)\d+\Z", re.ASCII)
 # A min/max of the IO type table written as text, e.g. "-2147483648" (Smart Meter E1-E3, OS 11.0.2).
 _NUMERIC_TEXT_RE = re.compile(r"-?\d+(?:\.\d+)?", re.ASCII)
 
@@ -387,6 +392,8 @@ def parse_config(
     "quickbus": {"device_id", "name"}, every other IO "quickbus": None). A Quickbus IO is
     addressed by its unique "id" only — its ext_name/identifier pair repeats across devices, so
     ComexioClient.set_io_value cannot reach it: treat it as read-only even when is_input is False.
+    "momentary" is True for a writable IO that Comexio resets to 0 by itself right after a 1 (the
+    Multiroom-Server's Next1, Prev1, Play1, Pause1, Toggle1): a key press, not a switch.
     Active IOs that repeat an identifier of their own device (Quickbus device or extension), and
     active Quickbus IOs whose type has no usable row in an io_types with usable rows, land only in "io_all" —
     the latter with "is_binary" None (kind unknown), as do inactive Quickbus IOs of such a type.
@@ -794,6 +801,22 @@ def _extension_meta(ext_id: str, ext_content: Mapping[str, Any]) -> tuple[str, s
     )
 
 
+def _extension_type_id(ext_content: Mapping[str, Any]) -> str | None:
+    """The extension's TypeId (Comexio's module type, 32 = Multiroom-Server) canonically, None if unusable."""
+    ext_meta = ext_content.get("extension")
+    return _strict_id(ext_meta.get("TypeId")) if isinstance(ext_meta, Mapping) else None
+
+
+def _is_momentary_io(entry: Mapping[str, Any]) -> bool:
+    """A writable Multiroom-Server IO that Comexio resets to 0 by itself: a key press, not a switch."""
+    return (
+        entry["quickbus"] is None
+        and not entry["is_input"]
+        and entry["is_binary"]
+        and _MULTIROOM_MOMENTARY_IO_RE.match(entry["identifier"].upper()) is not None
+    )
+
+
 def _strict_id(value: Any) -> str | None:
     """A Comexio id as a canonical str: a non-negative int (not bool) or an ASCII digit string; else None."""
     if isinstance(value, bool):
@@ -1053,7 +1076,7 @@ def _int_is_output_direction(io_item: Mapping[str, Any]) -> bool | None:
 
     A Quickbus IO takes its direction from this flag alone: $IOInputTypes marks e.g. the
     Multitouch gestures (type 134) as not an input, which would make every gesture a writable
-    output. A plain IO uses it only to be read-only, see _io_direction.
+    output. A plain IO lets its identifier prefix decide first, see _io_direction.
     """
     raw = io_item.get(_INT_IS_OUTPUT_KEY)
     if isinstance(raw, int) and not isinstance(raw, bool) and raw in (0, 1):
@@ -1284,6 +1307,7 @@ def _process_extension_ios(
     ext_name, ext_serial = _extension_meta(ext_id, ext_content)
     data["extensions"][ext_id] = {"name": ext_name, "serial": ext_serial}
     ext_offline = is_extension_offline(ext_serial)
+    multiroom_server = _extension_type_id(ext_content) == _MULTIROOM_SERVER_TYPE_ID
 
     entries: list[dict[str, Any]] = []
     type_ids: list[Any] = []
@@ -1301,6 +1325,7 @@ def _process_extension_ios(
         qb_device, is_input = qb.resolve(io_item)
         entry = builder.build(io_item, strict_id, ext_name, qb_device, is_input)
         entry["offline"] = ext_offline
+        entry["momentary"] = multiroom_server and _is_momentary_io(entry)
         # The extension group key; ComexioClient.get_io_live_states needs it as "ExtId".
         entry["ext_id"] = ext_id
         entries.append(entry)
@@ -1352,17 +1377,22 @@ def _io_direction(
 
     IntIsOutput 0 comes first: Comexio never writes such an IO (the Smart Meter's readings, a PIR,
     a Panic button), so it is read-only whatever its identifier says — the Smart Meter's Q1-Q3 are
-    reactive power, not relays. IntIsOutput 1 does not make an IO writable on its own.
-    Then the identifier prefix: Q* are relay/dimmer outputs and AO* analog outputs, I*/AI*/QI* are inputs. $IOInputTypes
-    is only a fallback for other identifiers, because the same TypeId (e.g. 2 = binary 0/1) is
-    shared by inputs and outputs.
+    reactive power, not relays.
+    Then the identifier prefix: Q* are relay/dimmer outputs and AO* analog outputs, I*/AI*/QI* are inputs.
+    Then IntIsOutput 1: Comexio writes the IO (a Touchpanel's Bright1, a Multiroom-Server's Alarm1 or
+    CurVol1), so it is writable, although $IOInputTypes marks most of these types as inputs; /api/
+    refuses them, client.set_io_value writes them over the admin session. $IOInputTypes is only the last
+    fallback, because the same TypeId (e.g. 2 = binary 0/1) is shared by inputs and outputs.
     """
-    if _int_is_output_direction(io_item):
+    is_input = _int_is_output_direction(io_item)
+    if is_input:
         return True
     if _OUTPUT_IO_RE.match(ident_upper):
         return False
     if _INPUT_IO_RE.match(ident_upper):
         return True
+    if is_input is False:
+        return False
     if io_input_types:
         return bool(_table_entry(io_input_types, type_id_raw).get("input", True))
     return True

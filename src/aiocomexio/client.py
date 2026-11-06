@@ -320,9 +320,11 @@ _API_SET_OK_ANSWERS = ("0", "1")
 # What /api/?action=set answers (HTTP 200) for a target it does not let the API write: the 0-10 V
 # analog outputs and the Quickbus IOs (verified live, firmware 11.1.5, 2026-11-04).
 _API_SET_FORBIDDEN_ANSWER = "forbidden"  # compared case-insensitively
-# 0-10 V analog outputs: /api/ refuses them, so they are written over the admin session's
-# dashboard/refresh "set", as Comexio's own IO page does (verified live, firmware 11.1.5, 2026-11-04).
-_ADMIN_WRITTEN_IO_RE = re.compile(r"AO\d+", re.ASCII | re.IGNORECASE)
+# The only IOs /api/ writes: relay and dimmer outputs Q*. It answers "Forbidden" for every other
+# output, so those go over the admin session's dashboard/refresh "set", as Comexio's own IO page
+# does: the 0-10 V analog outputs AO* (2026-11-04) and the IOs Comexio writes itself, e.g. the
+# Multiroom-Server's Next1, Alarm1, CurVol1 (2026-11-06; both verified live, firmware 11.1.5).
+_API_WRITTEN_IO_RE = re.compile(r"Q\d+", re.ASCII | re.IGNORECASE)
 # The key of the one entry of a dashboard/refresh "set" request, and its answer for a stored value;
 # an unknown extension or IO answers "0:io_not_found". A value beyond the IO's range is clamped.
 _DASHBOARD_SET_KEY = "1"
@@ -463,10 +465,12 @@ class LiveStates:
 def io_written_over_admin_session(identifier: str) -> bool:
     """Whether ComexioClient.set_io_value writes this IO over the admin session instead of /api/.
 
-    True for the 0-10 V analog outputs (AO1, AO2, ...), which /api/ refuses. Such a write needs a
-    logged-in admin session; a caller that keeps one can log in again on ComexioAuthenticationError.
+    True for every IO but the relay and dimmer outputs Q1, Q2, ..., which alone /api/ writes: the 0-10 V
+    analog outputs (AO1, ...) and the other IOs Comexio writes itself (Bright1, Alarm1, CurVol1, ...).
+    Such a write needs a logged-in admin session; a caller that keeps one can log in again on
+    ComexioAuthenticationError.
     """
-    return bool(_ADMIN_WRITTEN_IO_RE.fullmatch(identifier))
+    return not _API_WRITTEN_IO_RE.fullmatch(identifier)
 
 
 class ComexioClient:
@@ -924,11 +928,14 @@ class ComexioClient:
     async def set_io_value(self, ext: str, io: str, value: float) -> None:
         """Write an IO's value; ext is the extension name, io its identifier.
 
-        Most IOs go through the /api/ interface: success is only confirmed by the answer "0" or "1",
-        a "<n>:not_found" or "Forbidden" answer raises ComexioRequestRejectedError, any other unexpected
-        answer is logged at WARNING. A 0-10 V analog output (io_written_over_admin_session) goes through
-        the admin session instead, as /api/ refuses it: needs a logged-in session (else
-        ComexioAuthenticationError), and any answer but "1" raises ComexioRequestRejectedError.
+        A relay or dimmer output Q* goes through the /api/ interface: success is only confirmed by the
+        answer "0" or "1", a "<n>:not_found" or "Forbidden" answer raises ComexioRequestRejectedError, any
+        other unexpected answer is logged at WARNING. Every other IO (io_written_over_admin_session) goes
+        through the admin session instead, as /api/ refuses it: needs a logged-in session (else
+        ComexioAuthenticationError), and any answer but "1" raises ComexioRequestRejectedError. "1" only
+        says Comexio stored the value: one beyond the IO's range is clamped, and a momentary IO (parse_config)
+        falls back to 0 right after. A Quickbus IO cannot be addressed by ext and identifier (they repeat
+        across its devices) and must not be passed: the admin session could write another device's IO of that name.
         A non-finite float (nan, inf) raises ValueError.
         """
         what = f"Writing IO {io!r} of {ext!r}"

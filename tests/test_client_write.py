@@ -123,11 +123,11 @@ async def test_set_knx_and_io_values_address_their_target(api_client: ComexioCli
     comexio.serve_text("GET", API_PATH, "1")
 
     await api_client.set_knx_value(3, 1)
-    await api_client.set_io_value("UD 1", "QD2", 0)
+    await api_client.set_io_value("UD 1", "Q2", 0)
 
     knx, io = comexio.received_at("GET", API_PATH)
     assert knx.query == {"action": "set", "value": "1", "knx": "K3"}
-    assert io.query == {"action": "set", "value": "0", "ext": "UD 1", "io": "QD2"}
+    assert io.query == {"action": "set", "value": "0", "ext": "UD 1", "io": "Q2"}
 
 
 async def test_set_io_value_percent_encodes_spaces_in_the_extension_name(
@@ -196,17 +196,28 @@ async def test_set_value_forbidden_answer_raises_naming_the_target(
 @pytest.mark.parametrize(
     ("identifier", "admin"),
     [
+        # /api/ writes the relay and dimmer outputs only.
+        ("Q1", False),
+        ("q16", False),
+        # It answers "Forbidden" for every other output (#259, verified live 2026-11-04 and 2026-11-06).
         ("AO1", True),
         ("ao12", True),
-        (" AO3 ", False),  # padded: written as sent, so routed like any other unknown name
-        ("Q1", False),
-        ("QI1", False),
-        ("AI1", False),
-        ("AO", False),
-        ("AOX1", False),
-        ("AO1\n", False),
-        ("AO1a", False),
-        ("AO١", False),  # Arabic-Indic digit
+        ("Next1", True),
+        ("Alarm1", True),
+        ("CurVol1", True),
+        ("Bright1", True),
+        ("DG1", True),
+        ("R", True),
+        # Inputs are never written; would they be, /api/ would not take them either.
+        ("QI1", True),
+        ("AI1", True),
+        # Matched exactly: anything but Q and ASCII digits is no relay output.
+        (" Q3 ", True),
+        ("Q1\n", True),
+        ("Q1a", True),
+        ("QD2", True),
+        ("Q", True),
+        ("Q١", True),  # Arabic-Indic digit
     ],
 )
 def test_io_written_over_admin_session(identifier: str, admin: bool) -> None:
@@ -402,13 +413,13 @@ async def test_set_io_value_warning_quotes_names_so_a_newline_cannot_forge_a_log
     comexio.serve_text("GET", API_PATH, "ok")
 
     with caplog.at_level(logging.WARNING, logger="aiocomexio.client"):
-        await api_client.set_io_value("UD 1\nWARNING forged", "Q1\r", 1)
+        await api_client.set_io_value("UD 1\nWARNING forged", "Q1", 1)
 
     (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     message = record.getMessage()
     assert "\n" not in message
     assert "\r" not in message
-    assert "Writing IO 'Q1\\r' of 'UD 1\\nWARNING forged'" in message
+    assert "Writing IO 'Q1' of 'UD 1\\nWARNING forged'" in message
 
 
 # "1" as observed earlier; "0" is what firmware 11.1.5 answers to every stored marker write.
@@ -2545,3 +2556,19 @@ async def test_admin_actions_send_the_xhr_headers_comexio_expects(
         ("POST", UNIQUE_CHECK_PATH): (False, None),
         ("POST", MARKER_SAVE_PATH): (True, f"{base}/admin/flag/home"),
     }
+
+
+@pytest.mark.parametrize("identifier", ["Next1", "Alarm1", "CurVol1", "Bright1"])
+async def test_set_io_value_writes_an_output_comexio_writes_itself_over_the_admin_session(
+    api_client: ComexioClient, comexio: FakeComexio, identifier: str
+) -> None:
+    # /api/ answers "Forbidden" for these as for AO* (verified live on a Multiroom-Server, 2026-11-06).
+    comexio.serve_json("POST", DASHBOARD_REFRESH_PATH, {"result": {"1": "1"}})
+
+    await api_client.set_io_value("vMRSRV1", identifier, 1)
+
+    (request,) = comexio.received_at("POST", DASHBOARD_REFRESH_PATH)
+    assert json.loads(request.form["json"]) == {
+        "1": {"action": "set", "EName": "vMRSRV1", "IOIdentifier": identifier, "Value": 1}
+    }
+    assert comexio.received_at("GET", API_PATH) == []
