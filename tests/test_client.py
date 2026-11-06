@@ -420,16 +420,18 @@ async def test_a_login_that_stalls_gives_up_and_lets_requests_through(
     logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Every request waits while a login runs, so a stalled login must end on its own.
-    monkeypatch.setattr(client_module, "_LOGIN_TIMEOUT_SEC", 0.1)
+    monkeypatch.setattr(client_module, "_LOGIN_TIMEOUT_SEC", 0.5)  # leaves room for the steps before the held one
     held_login = _Held(comexio.routes[("POST", LOGIN_PATH)])
     comexio.serve("POST", LOGIN_PATH, held_login)
     comexio.serve_json("POST", BUS_WORKLOAD_PATH, {"workload": 12})
 
     login = asyncio.create_task(logged_in.login())
     await asyncio.wait_for(held_login.arrived.wait(), 5)  # stalled in the login request itself
+    queued = asyncio.create_task(logged_in.is_logged_in())
     async with asyncio.timeout(5):
-        with pytest.raises(ComexioConnectionError, match="took longer than 0.1 s"):
+        with pytest.raises(ComexioConnectionError, match="took longer than 0.5 s"):
             await login
+        assert await queued is True  # released by the give-up, the held login still has not answered
 
     held_login.release.set()
     async with asyncio.timeout(5):
