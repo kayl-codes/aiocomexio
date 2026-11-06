@@ -312,10 +312,12 @@ def test_build_webio_commands_gives_every_command_the_path_of_its_own_item(
     source = parse_config(load_json_fixture("config_quickbus.json")) if webio_class is WebioClass.QUICKBUS else parsed
 
     asked: list[tuple[WebioClass, str]] = []
+    items: list[Any] = []
 
     def path_for(cls: WebioClass, item: Any) -> str:
         path = f"/h/{cls}/{item['id']}/{item.get('ext_name', '')}"
         asked.append((cls, path))
+        items.append(item)
         return path
 
     commands = build_webio_commands(path_for, source, webio_class)
@@ -324,6 +326,10 @@ def test_build_webio_commands_gives_every_command_the_path_of_its_own_item(
     # Exactly the paths the callback returned, one per command, and only for the wanted class.
     assert sorted(cmd["Parameter"] for cmd in commands) == sorted(path for _, path in asked)
     assert {cls for cls, _ in asked} == {webio_class}
+    # Every command asked with an item of its own, and the item is one of the source's.
+    assert len({id(item) for item in items}) == len(commands)
+    source_items = [*source.get("markers", []), *source.get("io", []), *source.get("knx", [])]
+    assert all(any(item is candidate for candidate in source_items) for item in items)
 
 
 def test_generate_webio_json_forwards_path_callable_and_server(parsed: dict[str, Any]) -> None:
@@ -331,8 +337,8 @@ def test_generate_webio_json_forwards_path_callable_and_server(parsed: dict[str,
         generate_webio_json(lambda cls, item: f"/h/{cls}/{item['id']}", "n [M]", parsed, WebioClass.MARKER, server="s")
     )
 
-    expected = {f"/h/marker/{m['id']}" for m in parsed["markers"]}
-    assert {c["Parameter"] for c in template["commands"]} == expected
+    expected = [f"/h/marker/{m['id']}" for m in parsed["markers"]]
+    assert sorted(c["Parameter"] for c in template["commands"]) == sorted(expected)
     assert all('server="s"' in c["Data"] for c in template["commands"])
 
 
