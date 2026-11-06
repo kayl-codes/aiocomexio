@@ -353,6 +353,16 @@ def test_path_callable_that_handles_one_class_only_serves_that_class_upload(pars
     assert commands
 
 
+def test_non_string_server_is_rejected(parsed: dict[str, Any]) -> None:
+    with pytest.raises(TypeError, match="server must be a str"):
+        build_webio_commands(_HOOK, parsed, WebioClass.MARKER, server=5)  # type: ignore[arg-type]
+
+
+def test_path_callable_returning_a_non_string_is_rejected(parsed: dict[str, Any]) -> None:
+    with pytest.raises(TypeError, match="must return a str"):
+        build_webio_commands(lambda cls, item: 7, parsed, WebioClass.MARKER)  # type: ignore[arg-type,return-value]
+
+
 def test_server_name_with_line_break_stays_a_valid_lua_string(parsed: dict[str, Any]) -> None:
     commands = build_webio_commands(_HOOK, parsed, WebioClass.MARKER, server="a\r\nb")
 

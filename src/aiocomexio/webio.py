@@ -61,6 +61,8 @@ def lua_escape(value: Any) -> str:
 
 def _server_field(server: str | None) -> str:
     """The ``, server="..."`` tail of a webhook Lua payload, empty without a server name."""
+    if server is not None and not isinstance(server, str):
+        raise TypeError(f"server must be a str or None, not {type(server).__name__}")
     return f', server="{lua_escape(server)}"' if server else ""
 
 
@@ -359,7 +361,12 @@ def _command_path(
     """
     if isinstance(webhook_path, str):
         return webhook_path
-    return webhook_path(webio_class, item) if wanted in (None, webio_class) else ""
+    if wanted not in (None, webio_class):
+        return ""
+    path = webhook_path(webio_class, item)
+    if not isinstance(path, str):
+        raise TypeError(f"the webhook path callable must return a str, not {type(path).__name__}")
+    return path
 
 
 def build_webio_commands(
