@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import aiohttp
 import pytest
 from aiohttp import web
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from aiocomexio import (
     ComexioAuthenticationError,
@@ -130,12 +131,23 @@ async def test_login_with_unusable_key_response_raises_data_error(
     assert comexio.logins == []
 
 
+def _modulus_openssl_refuses() -> int:
+    """The smallest of a few oversized moduli that loads as a key but that OpenSSL refuses to encrypt with.
+
+    OpenSSL refuses moduli beyond 16384 bits today; the limit is OpenSSL's, so a later one may accept more.
+    """
+    for bits in (16400, 32800, 65600):
+        modulus = (1 << bits) + 1
+        try:
+            rsa.RSAPublicNumbers(0x10001, modulus).public_key().encrypt(b"probe", padding.PKCS1v15())
+        except ValueError:
+            return modulus
+    pytest.skip("this cryptography/OpenSSL encrypts with RSA moduli up to 65600 bits")
+
+
 async def test_login_with_a_key_openssl_refuses_raises_data_error(client: ComexioClient, comexio: FakeComexio) -> None:
-    # Loads as a key, but OpenSSL refuses to encrypt with a modulus beyond 16384 bits. The limit is
-    # OpenSSL's: should a later cryptography accept this size, raise the bit count.
-    comexio.serve_json(
-        "POST", LOGIN_PATH, {"salt": "U2Fseg==", "modulus": f"{(1 << 16400) + 1:x}", "exponent": "10001"}
-    )
+    modulus = _modulus_openssl_refuses()
+    comexio.serve_json("POST", LOGIN_PATH, {"salt": "U2Fseg==", "modulus": f"{modulus:x}", "exponent": "10001"})
 
     with pytest.raises(ComexioDataError, match="crypto library refuses"):
         await client.login()
