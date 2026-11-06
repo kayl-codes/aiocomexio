@@ -4,12 +4,14 @@ import asyncio
 import json
 import logging
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
 import aiohttp
 import pytest
 from aiohttp import web
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from aiocomexio import (
     ComexioAuthenticationError,
@@ -127,6 +129,57 @@ async def test_login_with_unusable_key_response_raises_data_error(
 
     with pytest.raises(ComexioDataError):
         await client.login()
+    assert comexio.logins == []
+
+
+def _modulus_openssl_refuses() -> int:
+    """The smallest of a few oversized moduli that loads as a key but that OpenSSL refuses to encrypt with.
+
+    OpenSSL refuses moduli beyond 16384 bits today; the limit is OpenSSL's, so a later one may accept more.
+    """
+    for bits in (16400, 32800, 65600):
+        modulus = (1 << bits) + 1
+        try:
+            key = rsa.RSAPublicNumbers(0x10001, modulus).public_key()
+        except ValueError:
+            continue  # refused already on load: that is the "no usable RSA key" path, not this one
+        try:
+            key.encrypt(b"probe", padding.PKCS1v15())
+        except ValueError:
+            return modulus
+    # test_login_with_a_key_the_crypto_library_refuses_raises_data_error still pins the branch then.
+    pytest.skip("this cryptography/OpenSSL refuses none of the probed RSA moduli at encrypt() after loading it")
+
+
+class _KeyTheCryptoLibraryRefuses:
+    """Stands in for a public key that loads but that the crypto library refuses to encrypt with."""
+
+    key_size = 2048
+
+    def encrypt(self, message: bytes, padding: Any) -> bytes:
+        raise ValueError("Encryption failed")
+
+
+async def test_login_with_a_key_the_crypto_library_refuses_raises_data_error(
+    client: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Independent of OpenSSL's size limit: the served key loads, encrypt() refuses it.
+    numbers = SimpleNamespace(RSAPublicNumbers=lambda e, n: SimpleNamespace(public_key=_KeyTheCryptoLibraryRefuses))
+    monkeypatch.setattr(client_module, "rsa", numbers)
+
+    with pytest.raises(ComexioDataError, match="crypto library refuses: Encryption failed"):
+        await client.login()
+    assert comexio.logins == []
+
+
+async def test_login_with_a_key_openssl_refuses_raises_data_error(client: ComexioClient, comexio: FakeComexio) -> None:
+    # The same with the real OpenSSL, as long as it refuses one of the probed sizes.
+    modulus = _modulus_openssl_refuses()
+    comexio.serve_json("POST", LOGIN_PATH, {"salt": "U2Fseg==", "modulus": f"{modulus:x}", "exponent": "10001"})
+
+    with pytest.raises(ComexioDataError, match="crypto library refuses"):
+        await client.login()
+    assert comexio.logins == []
 
 
 async def test_login_key_request_answered_with_login_form_is_a_data_error(

@@ -2151,8 +2151,14 @@ class ComexioClient:
 
 
 def _rsa_block(public_key: rsa.RSAPublicKey, message: bytes) -> str:
-    """One PKCS#1 v1.5 block as zero-padded hex, the way Comexio's login form expects it."""
-    encrypted = public_key.encrypt(message, padding.PKCS1v15())
+    """One PKCS#1 v1.5 block as zero-padded hex, the way Comexio's login form expects it.
+
+    ComexioDataError if OpenSSL refuses the key, e.g. a modulus beyond 16384 bits.
+    """
+    try:
+        encrypted = public_key.encrypt(message, padding.PKCS1v15())
+    except ValueError as err:  # the message fits (the caller checks it): the key itself is refused
+        raise ComexioDataError(f"Login key response carries an RSA key the crypto library refuses: {err}") from err
     return encrypted.hex().zfill(((public_key.key_size + 7) // 8) * 2)
 
 
