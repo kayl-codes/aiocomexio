@@ -163,7 +163,9 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 # <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
 _WEBIO_RANGE_INPUT_IDS = {"min_cmd_io_0": "min", "max_cmd_io_0": "max"}
 # The ids of the <textarea> tags that hold a Web-IO command's request path ("Parameter") and its Lua body ("Daten").
-_WEBIO_TEXT_FIELD_IDS = frozenset({"parameter", "data"})
+_WEBIO_PARAMETER_FIELD = "parameter"
+_WEBIO_DATA_FIELD = "data"
+_WEBIO_TEXT_FIELD_IDS = frozenset({_WEBIO_PARAMETER_FIELD, _WEBIO_DATA_FIELD})
 _LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
 _LEADING_LINE_BREAK_RE = re.compile(r"\A(?:\r\n|\r|\n)")
 # The end tag of a <textarea> (RCDATA): "</textarea" followed by an HTML space character (tab, LF, FF, CR, space),
@@ -1338,7 +1340,7 @@ class ComexioClient:
         self, command_id: str | int, device_id: str | int
     ) -> tuple[float | None, float | None]:
         """(Min, Max) of one Web-IO command, read from its edit form (see get_webio_command_form)."""
-        form = await self.get_webio_command_form(command_id, device_id)
+        form = await self._read_command_form(command_id, device_id, with_texts=False)
         return form.min, form.max
 
     async def get_webio_command_form(self, command_id: str | int, device_id: str | int) -> WebioCommandForm:
@@ -1350,6 +1352,12 @@ class ComexioClient:
         min/max field raises ComexioDataError (or ComexioAuthenticationError for the login form), as
         does a page that nests more than 256 elements.
         """
+        return await self._read_command_form(command_id, device_id, with_texts=True)
+
+    async def _read_command_form(
+        self, command_id: str | int, device_id: str | int, *, with_texts: bool
+    ) -> WebioCommandForm:
+        """get_webio_command_form; without the texts a range read does not process a large body it would drop."""
         html = await self._request_admin_text(
             "GET",
             _WEBIO_EDIT_COMMAND_PATH,
@@ -1357,13 +1365,13 @@ class ComexioClient:
             params={"Id": str(command_id), "TestDevice": str(device_id)},
         )
         v_min, v_max = _command_range(html, command_id)
-        texts = _command_texts(html)
+        texts = _command_texts(html) if with_texts else {}
         return WebioCommandForm(
             min=v_min,
             max=v_max,
             protocol=_command_protocol(html, command_id),
-            parameter=texts.get("parameter"),
-            data=texts.get("data"),
+            parameter=texts.get(_WEBIO_PARAMETER_FIELD),
+            data=texts.get(_WEBIO_DATA_FIELD),
         )
 
     # --- markers and KNX objects (admin session) ---
@@ -3014,25 +3022,34 @@ class _CommandRangeParser(_FormParser):
 
 
 class _CommandTextParser(_FormParser):
-    """Where the text of the first <textarea id="parameter"> and <textarea id="data"> of an edit form starts.
+    """Where the text of the first <textarea id="parameter"> and <textarea id="data"> of an edit form lies.
 
     The parser only finds the fields (a field in a <template> or <script> or inside another text-only element does
     not count, the first of an id wins, the id is compared exactly); _command_texts cuts the text out of the page
     itself, so it does not depend on whether this html.parser release reports markup inside a textarea as text.
-    starts maps "parameter"/"data" to the index in the page where the text begins.
+    spans maps "parameter"/"data" to the (start, end) indexes of its text in the page. A textarea tag that lies in
+    the text of an earlier textarea is no field, even where this html.parser release ends that text sooner than a
+    browser does (at "</textarea" plus a vertical tab, say).
     """
 
     def __init__(self, page: str) -> None:
         super().__init__()
-        self.starts: dict[str, int] = {}
+        self.spans: dict[str, tuple[int, int]] = {}
         self._page = page
+        self._text_end = 0
 
     def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        field = attributes.get("id", "")
-        if tag != "textarea" or field not in _WEBIO_TEXT_FIELD_IDS or field in self.starts:
+        if tag != "textarea":
             return
         line, column = self.getpos()
-        self.starts[field] = self._line_offset(line) + column + len(self.get_starttag_text() or "")
+        start = self._line_offset(line) + column + len(self.get_starttag_text() or "")
+        if start < self._text_end:
+            return
+        end = _TEXTAREA_END_RE.search(self._page, start)
+        self._text_end = end.start() if end else len(self._page)
+        field = attributes.get("id", "")
+        if field in _WEBIO_TEXT_FIELD_IDS and field not in self.spans:
+            self.spans[field] = (start, self._text_end)
 
     def _line_offset(self, line: int) -> int:
         """The index in the page where getpos()'s 1-based line starts (html.parser counts lines on LF only)."""
@@ -3053,10 +3070,8 @@ def _command_texts(html: str) -> dict[str, str]:
     parser.feed(html)
     parser.close()
     texts: dict[str, str] = {}
-    for field, start in parser.starts.items():
-        end = _TEXTAREA_END_RE.search(html, start)
-        raw = html[start : end.start() if end else len(html)]
-        raw, dropped = _LEADING_LINE_BREAK_RE.subn("", raw, count=1)
+    for field, (start, end) in parser.spans.items():
+        raw, dropped = _LEADING_LINE_BREAK_RE.subn("", html[start:end], count=1)
         text = unescape(raw.replace("\0", "�"))
         if not dropped:
             # The first character the browser reads after the start tag is a line feed, written as a reference.

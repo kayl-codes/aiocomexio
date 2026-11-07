@@ -2,6 +2,7 @@
 
 import base64
 import contextlib
+import functools
 import html
 import json
 import logging
@@ -2636,6 +2637,40 @@ async def test_get_webio_command_form_text_fields(
     assert (form.parameter, form.data) == (parameter, data)
 
 
+async def test_get_webio_command_range_does_not_read_the_texts(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_html: str) -> dict[str, str]:
+        raise AssertionError("a range read must not process the command texts")
+
+    monkeypatch.setattr(client_module, "_command_texts", fail)
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, _RANGE_FIELDS + '<textarea id="data">big</textarea>')
+
+    assert await logged_in.get_webio_command_range(1324, 34) == (0.0, 1.0)
+
+
+def test_command_text_parser_ignores_a_textarea_tag_inside_an_earlier_textareas_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A html.parser release that ends a textarea's text sooner than a browser does (at "</textarea" plus a vertical
+    # tab) reports the next tags as markup; the parser must still not take one of them for a field.
+    first = '<textarea id="parameter">'
+    inner = '<textarea id="data">'
+    page = f"{first}a</textarea\v>{inner}X</textarea></textarea>{inner}D</textarea>"
+    parser = client_module._CommandTextParser(page)
+    for index in (0, page.index(inner), page.rindex(inner)):
+        tag = page[index : page.index(">", index) + 1]
+        monkeypatch.setattr(parser, "getpos", functools.partial(tuple, (1, index)))
+        monkeypatch.setattr(parser, "get_starttag_text", functools.partial(str, tag))
+        parser.handle_text_only_tag("textarea", {"id": "parameter" if index == 0 else "data"})
+
+    last = page.rindex(inner) + len(inner)
+    assert parser.spans == {
+        "parameter": (len(first), page.index("</textarea></textarea>")),
+        "data": (last, page.index("</textarea>", last)),
+    }
+
+
 _TEXT_FIELD_EDGE_CASES = [
     pytest.param('<textarea id="parameter">\rx</textarea>', "x", None, id="first-cr-dropped"),
     pytest.param('<textarea id="parameter">&#10;x</textarea>', "x", None, id="decoded-first-line-feed-dropped"),
@@ -2684,6 +2719,16 @@ _TEXT_FIELD_EDGE_CASES = [
     pytest.param('<textarea id="data">a\0b</textarea>', None, "a�b", id="nul-becomes-replacement-char"),
     pytest.param('<textarea id="data">a</textarea\vb </textarea>', None, "a</textarea\vb ", id="vt-is-no-end"),
     pytest.param('<textarea id="data">a</textarea\f>b', None, "a", id="form-feed-ends-the-end-tag-name"),
+    *[
+        pytest.param(
+            f'<textarea id="parameter">a</textarea{char}><textarea id="data">X</textarea>'
+            '</textarea><textarea id="data">D</textarea>',
+            f'a</textarea{char}><textarea id="data">X',
+            "D",
+            id=f"textarea-tag-in-the-text-is-no-field-after-{name}-end-tag",
+        )
+        for name, char in (("a-vt", "\v"), ("an-nbsp", "\u00a0"))
+    ],
     pytest.param('a\rb\n<textarea id="parameter">XYZ</textarea>', "XYZ", None, id="lone-cr-then-lf-before-field"),
     pytest.param('<p>\r</p>\r\n\r<textarea id="data">Q</textarea>', None, "Q", id="mixed-cr-and-crlf-before-field"),
 ]
