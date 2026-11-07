@@ -75,7 +75,11 @@ def test_config_array_shaped_group_gives_the_same_sensors() -> None:
     as_object = {"12": {"1": _entry(1, "OT"), "2": _entry(2, "OH")}}
     as_array = {"12": [None, _entry(1, "OT"), _entry(2, "OH")]}
 
-    assert parse_onewire_config(as_array) == parse_onewire_config(as_object)
+    sensors = parse_onewire_config(as_array)
+
+    assert list(sensors) == ["OT1", "OH2"]
+    assert sensors["OH2"].config_id == 2
+    assert sensors == parse_onewire_config(as_object)
 
 
 def test_config_malformed_entries_are_skipped() -> None:
@@ -120,9 +124,20 @@ def test_config_group_of_unsupported_shape_raises(shape: object) -> None:
         parse_onewire_config({"12": shape})
 
 
-@pytest.mark.parametrize("modules", [{}, {"12": None}])
+@pytest.mark.parametrize("modules", [{}, {"12": None}, {"12": []}, {"12": [None, None]}])
 def test_config_absent_group_is_empty(modules: dict[str, object]) -> None:
     assert parse_onewire_config(modules) == {}
+
+
+@pytest.mark.parametrize("group", [["text", "x"], ["text", None], [7], {"1": "text"}])
+def test_config_group_of_only_non_objects_raises(group: object) -> None:
+    with pytest.raises(ComexioDataError, match="none an object"):
+        parse_onewire_config({"12": group})
+
+
+def test_config_group_mixing_objects_and_non_objects_does_not_raise() -> None:
+    assert list(parse_onewire_config({"12": ["text", _entry(1, "OT")]})) == ["OT1"]
+    assert parse_onewire_config({"12": ["text", _entry(1, "OT", active=0)]}) == {}
 
 
 def test_config_with_only_unusable_active_entries_raises() -> None:
@@ -153,6 +168,7 @@ def test_status_reads_value_and_error_flags_per_address() -> None:
     assert not states["OT2"].ok
     assert not states["OT2"].online
     assert not states["OT3"].visible
+    assert not states["OT3"].ok
 
 
 def test_status_value_accepts_decimal_comma_and_rejects_non_finite() -> None:
@@ -345,9 +361,36 @@ def test_status_value_accepts_json_numbers() -> None:
     assert states_for({"value": 7}).value == 7.0
 
 
-@pytest.mark.parametrize("raw", [True, "1_0", "-inf", "Infinity", "1e999", "", None])
+@pytest.mark.parametrize("raw", [True, "1_0", "-inf", "Infinity", "1e999", None])
 def test_status_value_rejects_unparseable_or_non_finite(raw: object) -> None:
     assert states_for({"value": raw}).value is None
+
+
+def test_status_value_of_unusable_type_is_logged_once_and_read_as_missing(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        assert states_for({"value": {"reading": 21.5}}).value is None
+
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.WARNING
+    assert "is not a number" in caplog.text
+
+
+@pytest.mark.parametrize("raw", [float("nan"), float("inf"), 10**400, ""])
+def test_status_non_finite_or_empty_reading_is_missing_without_a_warning(
+    caplog: pytest.LogCaptureFixture, raw: object
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        assert states_for({"value": raw}).value is None
+
+    assert caplog.text == ""
+
+
+def test_config_mixed_group_skips_non_objects_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        sensors = parse_onewire_config({"12": [None, "text", _entry(1, "OT")]})
+
+    assert list(sensors) == ["OT1"]
+    assert "Skipped 1 non-object 1-Wire config entries" in caplog.text
 
 
 def test_status_flags_must_be_booleans() -> None:

@@ -86,7 +86,8 @@ class OneWireStatus:
     """The live state of one 1-Wire sensor from read1WireStati.
 
     online False means a read error (CRC), visible False that the sensor was not found. value is
-    the reading as a float, None if the answer carried none (or a non-finite one).
+    the reading as a float, None if the answer carried none, a non-finite one, or one that is not
+    a number at all (logged).
     """
 
     address: str
@@ -195,13 +196,30 @@ def _sensor_from_entry(entry: Mapping[str, Any]) -> OneWireSensor | None:
     )
 
 
+def _group_mappings(group: Any) -> list[Mapping[str, Any]]:
+    """The object entries of group 12. A null is a placeholder; other non-objects are logged and skipped.
+
+    A group that holds entries but no object at all is a changed config and raises.
+    """
+    # A null is a placeholder and not counted as a changed entry.
+    entries = [entry for _group_id, entry in iter_group(group) if entry is not None]
+    mappings = [entry for entry in entries if isinstance(entry, Mapping)]
+    others = len(entries) - len(mappings)
+    if others and not mappings:
+        raise ComexioDataError(f"$FubModules group {ONEWIRE_GROUP} holds {others} entries, none an object")
+    if others:
+        _LOGGER.warning("Skipped %d non-object 1-Wire config entries", others)
+    return mappings
+
+
 def parse_onewire_config(fub_modules: Mapping[str, Any]) -> dict[str, OneWireSensor]:
     """The active 1-Wire sensors of $FubModules, keyed by address.
 
     Inactive entries are left out. An active entry without a usable Prefix and Id is logged and
     skipped; if active entries exist but none is usable, that is a changed config and raises
-    ComexioDataError rather than reporting no sensors. A sensor without a usable Binary flag stays
-    with kind None; the caller decides what to do with it.
+    ComexioDataError rather than reporting no sensors. A group that holds entries but no mapping at
+    all is a changed config too and raises. A sensor without a usable Binary flag stays with kind
+    None; the caller decides what to do with it.
     """
     group = fub_modules.get(ONEWIRE_GROUP)
     if group is not None and not isinstance(group, Mapping | list):
@@ -209,8 +227,8 @@ def parse_onewire_config(fub_modules: Mapping[str, Any]) -> dict[str, OneWireSen
     sensors: dict[str, OneWireSensor] = {}
     active = 0
     unusable = 0
-    for _group_id, entry in iter_group(group):
-        if not isinstance(entry, Mapping) or not _is_active(entry.get(_ACTIVE_KEY)):
+    for entry in _group_mappings(group):
+        if not _is_active(entry.get(_ACTIVE_KEY)):
             continue
         active += 1
         sensor = _sensor_from_entry(entry)
@@ -227,11 +245,11 @@ def parse_onewire_config(fub_modules: Mapping[str, Any]) -> dict[str, OneWireSen
     return sensors
 
 
-def _finite_or_none(raw: Any) -> float | None:
-    """The reading as a finite float; None for absent, non-numeric or non-finite answers.
+def _number_of(raw: Any) -> float | None:
+    """The raw reading as a float; None if its type or text is not a number Comexio writes.
 
     A JSON number is taken as it is; a string must look like a reading (a decimal comma is
-    accepted, underscores and other forms are not).
+    accepted, underscores and other forms are not). A number too large for a float is infinite.
     """
     if isinstance(raw, bool):
         return None
@@ -242,8 +260,24 @@ def _finite_or_none(raw: Any) -> float | None:
     elif not isinstance(raw, int | float):
         return None
     try:
-        number = float(raw)
+        return float(raw)
     except OverflowError:
+        return math.inf
+
+
+def _finite_or_none(raw: Any, address: str) -> float | None:
+    """The reading as a finite float; None for an absent or non-finite reading.
+
+    An empty string is the "no value yet" form and passes silently. A present value that is not a
+    number at all is logged with its sensor and read as None, so a changed answer shows up in the
+    log instead of passing as a silently missing value. Non-finite numbers (NaN, Infinity, too
+    large) are None by design and are not logged.
+    """
+    if raw is None or raw == "":
+        return None
+    number = _number_of(raw)
+    if number is None:
+        _LOGGER.warning("1-Wire reading of %s is not a number, shown as missing: %s", address, _bounded_repr(raw))
         return None
     return number if math.isfinite(number) else None
 
@@ -269,7 +303,7 @@ def _status_from_item(item: Mapping[str, Any]) -> OneWireStatus | None:
         name=_text_of(item, _STATUS_NAME_KEY),
         online=_status_flag(item, _STATUS_ONLINE_KEY, address),
         visible=_status_flag(item, _STATUS_VISIBLE_KEY, address),
-        value=_finite_or_none(item.get(_STATUS_VALUE_KEY)),
+        value=_finite_or_none(item.get(_STATUS_VALUE_KEY), address),
     )
 
 
