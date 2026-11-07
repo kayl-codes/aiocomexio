@@ -140,8 +140,15 @@ def _count_of(digits: str) -> int:
 
 
 def _bounded_repr(value: Any) -> str:
-    """repr of an external value, cut to _EXCERPT_MAX_CHARS so an error message stays short."""
-    text = _EXCERPT_REPR.repr(value)
+    """repr of an external value, cut to _EXCERPT_MAX_CHARS so an error message stays short.
+
+    Some Python 3.13 patch releases render an integer beyond sys.get_int_max_str_digits() by its
+    full repr and raise ValueError; such a value is shown by its type name instead of crashing.
+    """
+    try:
+        text = _EXCERPT_REPR.repr(value)
+    except ValueError:
+        text = f"<{type(value).__name__} with an integer beyond the digit limit>"
     return text if len(text) <= _EXCERPT_MAX_CHARS else f"{text[:_EXCERPT_MAX_CHARS]}..."
 
 

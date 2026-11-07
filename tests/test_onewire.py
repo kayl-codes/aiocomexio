@@ -8,7 +8,7 @@ import pytest
 
 from aiocomexio import ComexioAuthenticationError, ComexioClient, ComexioDataError
 from aiocomexio.config import TYPE_ANALOG, TYPE_DIGITAL
-from aiocomexio.onewire import parse_onewire_config, parse_onewire_device_count, parse_onewire_status
+from aiocomexio.onewire import _bounded_repr, parse_onewire_config, parse_onewire_device_count, parse_onewire_status
 from tests.fake_comexio import FUNCTION_MODULE_PATH, FakeComexio
 
 ONEWIRE_STATUS_PATH = "/admin/knx_one_wire/read1WireStati/"
@@ -50,6 +50,7 @@ def test_config_address_is_prefix_plus_id_and_kind_follows_binary_flag() -> None
 
     sensors = parse_onewire_config(modules)
 
+    assert list(sensors) == ["OT1", "OIB2"]
     assert sensors["OT1"].kind == TYPE_ANALOG
     assert sensors["OIB2"].kind == TYPE_DIGITAL
     assert sensors["OIB2"].config_id == 2
@@ -67,6 +68,7 @@ def test_config_binary_flag_other_than_1_or_2_gives_no_kind() -> None:
 
     sensors = parse_onewire_config(modules)
 
+    assert list(sensors) == ["OT1", "OT2"]
     assert sensors["OT1"].kind is None
     assert sensors["OT2"].kind is None
 
@@ -115,7 +117,9 @@ def test_config_same_id_in_int_and_digit_string_is_one_sensor(caplog: pytest.Log
         sensors = parse_onewire_config(modules)
 
     assert list(sensors) == ["OT7"]
-    assert "share the address" in caplog.text
+    assert [record.getMessage() for record in caplog.records] == [
+        "Two active 1-Wire entries share the address 'OT7', the later one wins"
+    ]
 
 
 @pytest.mark.parametrize("config_id", ["", " 7", "-1", "٧", "9" * 19, 10**18])
@@ -145,10 +149,12 @@ def test_config_id_bounds_are_inclusive(config_id: int) -> None:
     assert list(parse_onewire_config(modules)) == [f"OT{config_id}"]
 
 
-@pytest.mark.parametrize("shape", ["text", 7, True, (1, 2)])
-def test_config_group_of_unsupported_shape_raises(shape: object) -> None:
-    with pytest.raises(ComexioDataError, match="unsupported shape"):
+@pytest.mark.parametrize(("shape", "type_name"), [("text", "str"), (7, "int"), (True, "bool"), ((1, 2), "tuple")])
+def test_config_group_of_unsupported_shape_raises(shape: object, type_name: str) -> None:
+    with pytest.raises(ComexioDataError) as info:
         parse_onewire_config({"12": shape})
+
+    assert str(info.value) == f"$FubModules group 12 has an unsupported shape: {type_name}"
 
 
 @pytest.mark.parametrize("modules", [{}, {"12": None}, {"12": []}, {"12": [None, None]}])
@@ -156,10 +162,12 @@ def test_config_absent_group_is_empty(modules: dict[str, object]) -> None:
     assert parse_onewire_config(modules) == {}
 
 
-@pytest.mark.parametrize("group", [["text", "x"], ["text", None], [7], {"1": "text"}])
-def test_config_group_of_only_non_objects_raises(group: object) -> None:
-    with pytest.raises(ComexioDataError, match="none an object"):
+@pytest.mark.parametrize(("group", "count"), [(["text", "x"], 2), (["text", None], 1), ([7], 1), ({"1": "text"}, 1)])
+def test_config_group_of_only_non_objects_raises(group: object, count: int) -> None:
+    with pytest.raises(ComexioDataError) as info:
         parse_onewire_config({"12": group})
+
+    assert str(info.value) == f"$FubModules group 12 holds {count} entries, none an object"
 
 
 def test_config_group_mixing_objects_and_non_objects_does_not_raise() -> None:
@@ -190,6 +198,7 @@ def test_status_reads_value_and_error_flags_per_address() -> None:
 
     states = parse_onewire_status(payload)
 
+    assert list(states) == ["OT1", "OT2", "OT3"]
     assert states["OT1"].ok
     assert states["OT1"].value == pytest.approx(21.5)
     assert not states["OT2"].ok
@@ -208,6 +217,7 @@ def test_status_value_accepts_decimal_comma_and_rejects_non_finite() -> None:
 
     states = parse_onewire_status(payload)
 
+    assert list(states) == ["OT1", "OT2", "OT3", "OT4"]
     assert states["OT1"].value == pytest.approx(21.5)
     assert states["OT2"].value is None
     assert states["OT3"].value is None
@@ -221,8 +231,10 @@ def test_status_item_without_address_is_skipped() -> None:
 
 
 def test_status_answer_that_is_not_a_list_raises() -> None:
-    with pytest.raises(ComexioDataError, match="not a list"):
+    with pytest.raises(ComexioDataError) as info:
         parse_onewire_status({"id": "OT1"})
+
+    assert str(info.value) == "1-Wire status answer is not a list: dict"
 
 
 # --- client --------------------------------------------------------------------------------
@@ -235,7 +247,7 @@ async def test_get_onewire_status_posts_all_with_monitor_referer(
 
     states = await logged_in.get_onewire_status()
 
-    assert set(states) == {"OT1", "OIB10"}
+    assert sorted(states) == ["OIB10", "OT1"]
     assert states["OIB10"].online is False
     [request] = comexio.received_at("POST", ONEWIRE_STATUS_PATH)[-1:]
     assert request.form == {"all": "all"}
@@ -246,10 +258,15 @@ async def test_get_onewire_status_posts_all_with_monitor_referer(
 async def test_get_onewire_status_on_expired_session_raises_authentication_error(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
-    comexio.serve_text("POST", ONEWIRE_STATUS_PATH, '<html><form>Anmeldung<input id="loginsubmit"></form></html>')
+    page = '<html><form>Anmeldung<input id="loginsubmit"></form></html>'
+    comexio.serve_text("POST", ONEWIRE_STATUS_PATH, page)
 
-    with pytest.raises(ComexioAuthenticationError, match="login form"):
+    with pytest.raises(ComexioAuthenticationError) as info:
         await logged_in.get_onewire_status()
+
+    assert str(info.value) == (
+        f"Comexio served the login form, the session is not logged in (1-Wire status: response is not JSON: '{page}')"
+    )
 
 
 async def test_get_onewire_sensors_reads_the_configuration_page(logged_in: ComexioClient, comexio: FakeComexio) -> None:
@@ -258,13 +275,19 @@ async def test_get_onewire_sensors_reads_the_configuration_page(logged_in: Comex
 
     sensors = await logged_in.get_onewire_sensors()
 
+    assert list(sensors) == ["OT1", "OIB2"]
     assert sensors["OT1"].kind == TYPE_ANALOG
     assert sensors["OIB2"].kind == TYPE_DIGITAL
+    assert len(comexio.received_at("GET", FUNCTION_MODULE_PATH)) == 1
 
 
 # --- device count (IO home page) -----------------------------------------------------------
 
 IO_HOME_PATH = "/admin/in_output/home"
+
+
+# Anchored, so the whole message is compared and not only a fragment of it.
+_UNKNOWN_MARKUP = r"^IO home page counters have an unknown markup, the 1-Wire count is unknown$"
 
 
 def _counter(extension: str, css_class: str, value: str) -> str:
@@ -327,7 +350,7 @@ def test_device_count_ignores_long_quickbus_number_next_to_a_1wire_counter() -> 
 def test_device_count_with_malformed_counter_next_to_a_valid_one_raises() -> None:
     html = _counter("1", "number_of_type_30", "10") + _counter("2", "number_of_type_30", "n/a")
 
-    with pytest.raises(ComexioDataError, match="unknown markup"):
+    with pytest.raises(ComexioDataError, match=_UNKNOWN_MARKUP):
         parse_onewire_device_count(html)
 
 
@@ -362,7 +385,7 @@ def test_device_count_with_mismatched_quotes_is_not_a_1wire_counter() -> None:
 
 
 def test_device_count_with_single_quoted_malformed_1wire_counter_raises() -> None:
-    with pytest.raises(ComexioDataError, match="unknown markup"):
+    with pytest.raises(ComexioDataError, match=_UNKNOWN_MARKUP):
         parse_onewire_device_count("<div id='number_of_1' class='number_of_type_30'>n/a</div>")
 
 
@@ -382,14 +405,17 @@ def test_device_count_with_only_other_counters_is_zero() -> None:
 
 
 def test_device_count_with_non_ascii_digits_raises() -> None:
-    with pytest.raises(ComexioDataError, match="unknown markup"):
-        parse_onewire_device_count(_counter("1", "number_of_type_30", "٤"))
+    html = _counter("1", "number_of_type_30", "٤")
+
+    with pytest.raises(ComexioDataError, match=_UNKNOWN_MARKUP):
+        parse_onewire_device_count(html)
 
 
 async def test_get_onewire_device_count_reads_the_io_home_page(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve_text("GET", IO_HOME_PATH, _counter("1", "number_of_type_30", "4"))
 
     assert await logged_in.get_onewire_device_count() == 4
+    assert len(comexio.received_at("GET", IO_HOME_PATH)) == 1
 
 
 async def test_get_onewire_device_count_on_expired_session_raises_authentication_error(
@@ -397,8 +423,10 @@ async def test_get_onewire_device_count_on_expired_session_raises_authentication
 ) -> None:
     comexio.serve_text("GET", IO_HOME_PATH, '<html><form><input id="loginsubmit"></form></html>')
 
-    with pytest.raises(ComexioAuthenticationError, match="login form"):
+    with pytest.raises(ComexioAuthenticationError) as info:
         await logged_in.get_onewire_device_count()
+
+    assert str(info.value) == "Comexio served the login form, the session is not logged in (IO home page)"
 
 
 def test_status_value_accepts_json_numbers() -> None:
@@ -415,9 +443,10 @@ def test_status_value_of_unusable_type_is_logged_once_and_read_as_missing(caplog
     with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
         assert states_for({"value": {"reading": 21.5}}).value is None
 
-    assert len(caplog.records) == 1
+    assert [record.getMessage() for record in caplog.records] == [
+        "1-Wire reading of 'OT1' is not a number (type dict), shown as missing"
+    ]
     assert caplog.records[0].levelno == logging.WARNING
-    assert "is not a number" in caplog.text
 
 
 @pytest.mark.parametrize("raw", [float("nan"), float("inf"), 10**400, ""])
@@ -446,10 +475,9 @@ def test_log_lines_escape_a_line_break_in_the_address(caplog: pytest.LogCaptureF
     with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
         parse_onewire_status(payload)
 
-    messages = [record.getMessage() for record in caplog.records]
-    assert len(messages) == 1
-    assert "\n" not in messages[0]
-    assert "OT1\\nWARNING forged" in messages[0]
+    assert [record.getMessage() for record in caplog.records] == [
+        "1-Wire reading of 'OT1\\nWARNING forged' is not a number (type dict), shown as missing"
+    ]
 
 
 def test_debug_records_are_bounded_and_escaped(caplog: pytest.LogCaptureFixture) -> None:
@@ -490,7 +518,7 @@ def test_config_mixed_group_skips_non_objects_with_a_warning(caplog: pytest.LogC
         sensors = parse_onewire_config({"12": [None, "text", _entry(1, "OT")]})
 
     assert list(sensors) == ["OT1"]
-    assert "Skipped 1 non-object 1-Wire config entries" in caplog.text
+    assert [record.getMessage() for record in caplog.records] == ["Skipped 1 non-object 1-Wire config entries"]
 
 
 def test_status_flags_must_be_booleans() -> None:
@@ -526,8 +554,11 @@ def test_non_text_name_is_shown_blank_and_logged(caplog: pytest.LogCaptureFixtur
     with caplog.at_level(logging.WARNING):
         sensors = parse_onewire_config({"12": {"1": entry}})
 
+    assert list(sensors) == ["OT1"]
     assert sensors["OT1"].name == ""
-    assert "unexpected type int" in caplog.text
+    assert [record.getMessage() for record in caplog.records] == [
+        "1-Wire field Name has the unexpected type int, shown blank"
+    ]
 
 
 def test_non_text_status_device_id_is_shown_blank_and_logged(caplog: pytest.LogCaptureFixture) -> None:
@@ -536,8 +567,11 @@ def test_non_text_status_device_id_is_shown_blank_and_logged(caplog: pytest.LogC
     with caplog.at_level(logging.WARNING):
         states = parse_onewire_status(payload)
 
+    assert list(states) == ["OT1"]
     assert states["OT1"].device_id == ""
-    assert "unexpected type list" in caplog.text
+    assert [record.getMessage() for record in caplog.records] == [
+        "1-Wire field device_id has the unexpected type list, shown blank"
+    ]
 
 
 def test_absent_or_null_text_fields_are_blank_without_a_warning(caplog: pytest.LogCaptureFixture) -> None:
@@ -548,9 +582,10 @@ def test_absent_or_null_text_fields_are_blank_without_a_warning(caplog: pytest.L
     with caplog.at_level(logging.WARNING):
         sensors = parse_onewire_config({"12": {"1": entry}})
 
+    assert list(sensors) == ["OT1"]
     assert sensors["OT1"].name == ""
     assert sensors["OT1"].hw_id == ""
-    assert "unexpected type" not in caplog.text
+    assert caplog.records == []
 
 
 def test_status_error_repr_renders_only_a_few_elements() -> None:
@@ -576,13 +611,16 @@ def test_status_items_without_address_are_logged(caplog: pytest.LogCaptureFixtur
         states = parse_onewire_status([{"longname": "no id"}, _status_item("OT1"), "junk"])
 
     assert list(states) == ["OT1"]
-    assert "Skipped 2 1-Wire status items" in caplog.text
+    assert [record.getMessage() for record in caplog.records] == ["Skipped 2 1-Wire status items without an address"]
 
 
 def test_duplicate_sensor_address_keeps_the_later_entry() -> None:
     modules = {"12": {"1": _entry(1, "OT", name="first"), "2": _entry(1, "OT", name="second")}}
 
-    assert parse_onewire_config(modules)["OT1"].name == "second"
+    sensors = parse_onewire_config(modules)
+
+    assert list(sensors) == ["OT1"]
+    assert sensors["OT1"].name == "second"
 
 
 def test_sensor_prefix_must_be_ascii() -> None:
@@ -590,3 +628,13 @@ def test_sensor_prefix_must_be_ascii() -> None:
 
     with pytest.raises(ComexioDataError):
         parse_onewire_config(modules)
+
+
+def test_bounded_repr_of_a_repr_that_raises_shows_the_type_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RaisingRepr:
+        def repr(self, _value: object) -> str:
+            raise ValueError("Exceeds the limit (4300 digits) for integer string conversion")
+
+    monkeypatch.setattr("aiocomexio.onewire._EXCERPT_REPR", RaisingRepr())
+
+    assert _bounded_repr(10**5000) == "<int with an integer beyond the digit limit>"
