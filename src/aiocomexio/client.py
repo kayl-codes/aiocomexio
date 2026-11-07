@@ -168,12 +168,13 @@ _WEBIO_DATA_FIELD = "data"
 _WEBIO_TEXT_FIELD_IDS = frozenset({_WEBIO_PARAMETER_FIELD, _WEBIO_DATA_FIELD})
 _LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
 _LEADING_LINE_BREAK_RE = re.compile(r"\A(?:\r\n|\r|\n)")
+_TEXTAREA = "textarea"
 # The end tag of a <textarea> (RCDATA): "</textarea" followed by an HTML space character (tab, LF, FF, CR, space),
 # "/" or ">" - not by a vertical tab or a non-ASCII space, which a browser keeps in the text.
 _TEXTAREA_END_RE = re.compile(r"</textarea(?=[\t\n\f\r />])", re.IGNORECASE)
 # Elements whose content a browser reads as text (RCDATA and raw text), so markup inside them is no form field; a
 # <noscript> is raw text too, as a browser runs scripts.
-_TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"})
+_TEXT_ONLY_ELEMENTS = frozenset({_TEXTAREA, "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"})
 # html.parser releases that know a <noscript> is raw text when scripts run read it so when asked to.
 _HTML_PARSER_SCRIPTING = {"scripting": True} if "scripting" in inspect.signature(HTMLParser.__init__).parameters else {}
 # A text-only element that no end tag ends: the rest of the page is its text.
@@ -197,7 +198,7 @@ _TEMPLATE = "template"
 # Elements whose content is no option text (script-supporting elements); a <script/> stays open, as in a browser.
 _HIDDEN_ELEMENTS = frozenset({"script", _TEMPLATE})
 # Start tags that end an open <select> before a browser reads them.
-_SELECT_ENDING_TAGS = frozenset({"input", "keygen", "textarea"})
+_SELECT_ENDING_TAGS = frozenset({"input", "keygen", _TEXTAREA})
 # The elements that start SVG and MathML (foreign) content, whose elements are no HTML form fields.
 _FOREIGN_ROOTS = frozenset({"svg", "math"})
 # Start tags a browser ignores inside an open <select>, so what follows them is still markup, not their text.
@@ -248,7 +249,7 @@ _SPECIAL_ELEMENTS = frozenset(
         *("h6", "head", "header", "hgroup", "hr", "html", "iframe", "img", "input", "keygen", "li", "link"),
         *("listing", "main", "marquee", "menu", "meta", "nav", "noembed", "noframes", "noscript", "object", "ol"),
         *("p", "param", "plaintext", "pre", "script", "search", "section", "select", "source", "style", "summary"),
-        *(_TABLE, _TBODY, "td", _TEMPLATE, "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul"),
+        *(_TABLE, _TBODY, "td", _TEMPLATE, _TEXTAREA, "tfoot", "th", "thead", "title", "tr", "track", "ul"),
         *("wbr", "xmp"),
     }
 )
@@ -3039,7 +3040,7 @@ class _CommandTextParser(_FormParser):
         self._text_end = 0
 
     def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        if tag != "textarea":
+        if tag != _TEXTAREA:
             return
         line, column = self.getpos()
         start = self._line_offset(line) + column + len(self.get_starttag_text() or "")
