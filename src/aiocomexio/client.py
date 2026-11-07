@@ -3024,8 +3024,9 @@ class _CommandTextParser(_FormParser):
         super().__init__()
         self.starts: dict[str, int] = {}
         # The index of each line's first character, to turn getpos()'s (line, column) into an index of the page.
+        # html.parser counts lines on "\n" only, so a lone "\r" must not start a line here.
         self._line_starts = [0]
-        self._line_starts.extend(match.end() for match in _LINE_BREAK_RE.finditer(page))
+        self._line_starts.extend(index + 1 for index, char in enumerate(page) if char == "\n")
 
     def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
         field = attributes.get("id", "")
