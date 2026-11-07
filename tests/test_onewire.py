@@ -481,7 +481,7 @@ def test_log_lines_escape_a_line_break_in_the_address(caplog: pytest.LogCaptureF
 
 
 def test_debug_records_are_bounded_and_escaped(caplog: pytest.LogCaptureFixture) -> None:
-    payload = [{**_status_item("A" * 5000), "value": {"x": "line\nbreak"}}]
+    payload = [{**_status_item("OT1\nWARNING " + "A" * 5000), "value": "line\n" + "B" * 5000}]
 
     with caplog.at_level(logging.DEBUG, logger="aiocomexio.onewire"):
         parse_onewire_status(payload)
