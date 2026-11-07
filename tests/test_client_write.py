@@ -2677,6 +2677,10 @@ _TEXT_FIELD_EDGE_CASES = [
     pytest.param('<textarea>x</textarea><textarea id="parameter">p</textarea>', "p", None, id="textarea-without-id"),
     pytest.param('<textarea id="x" id="parameter">p</textarea>', None, None, id="first-attribute-wins"),
     pytest.param('<textarea id="parameter"/>/a<b>x</textarea>', "/a<b>x", None, id="self-closing-slash-is-ignored"),
+    pytest.param('<textarea id="data">a&#13;b&#13;&#10;c</textarea>', None, "a\nb\nc", id="decoded-cr-is-a-line-feed"),
+    pytest.param('<textarea id="data">a\0b</textarea>', None, "a�b", id="nul-becomes-replacement-char"),
+    pytest.param('<textarea id="data">a</textarea\vb </textarea>', None, "a</textarea\vb ", id="vt-is-no-end"),
+    pytest.param('<textarea id="data">a</textarea\f>b', None, "a", id="form-feed-ends-the-end-tag-name"),
     pytest.param('a\rb\n<textarea id="parameter">XYZ</textarea>', "XYZ", None, id="lone-cr-then-lf-before-field"),
     pytest.param('<p>\r</p>\r\n\r<textarea id="data">Q</textarea>', None, "Q", id="mixed-cr-and-crlf-before-field"),
 ]

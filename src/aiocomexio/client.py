@@ -166,8 +166,9 @@ _WEBIO_RANGE_INPUT_IDS = {"min_cmd_io_0": "min", "max_cmd_io_0": "max"}
 _WEBIO_TEXT_FIELD_IDS = frozenset({"parameter", "data"})
 _LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
 _LEADING_LINE_BREAK_RE = re.compile(r"\A(?:\r\n|\r|\n)")
-# The end tag of a <textarea> (RCDATA): "</textarea" followed by whitespace, "/" or ">".
-_TEXTAREA_END_RE = re.compile(r"</textarea(?=[\s/>])", re.IGNORECASE)
+# The end tag of a <textarea> (RCDATA): "</textarea" followed by an HTML space character (tab, LF, FF, CR, space),
+# "/" or ">" - not by a vertical tab or a non-ASCII space, which a browser keeps in the text.
+_TEXTAREA_END_RE = re.compile(r"</textarea(?=[\t\n\f\r />])", re.IGNORECASE)
 # Elements whose content a browser reads as text (RCDATA and raw text), so markup inside them is no form field; a
 # <noscript> is raw text too, as a browser runs scripts.
 _TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"})
@@ -1341,10 +1342,11 @@ class ComexioClient:
         return form.min, form.max
 
     async def get_webio_command_form(self, command_id: str | int, device_id: str | int) -> WebioCommandForm:
-        """Min, Max and protocol of one Web-IO command, read from its edit form in one request.
+        """Min, Max, protocol, path ("parameter") and body ("data") of one Web-IO command, from its edit form.
 
         The config scrape never carries these fields of Web-IO commands, so the edit form is the
-        only source. A field that is missing or not numeric comes back as None; a form without any
+        only source. A field that is missing or not numeric comes back as None (so does a path or
+        body textarea the form lacks); a form without any
         min/max field raises ComexioDataError (or ComexioAuthenticationError for the login form), as
         does a page that nests more than 256 elements.
         """
@@ -3023,24 +3025,29 @@ class _CommandTextParser(_FormParser):
     def __init__(self, page: str) -> None:
         super().__init__()
         self.starts: dict[str, int] = {}
-        # The index of each line's first character, to turn getpos()'s (line, column) into an index of the page.
-        # html.parser counts lines on "\n" only, so a lone "\r" must not start a line here.
-        self._line_starts = [0]
-        self._line_starts.extend(index + 1 for index, char in enumerate(page) if char == "\n")
+        self._page = page
 
     def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
         field = attributes.get("id", "")
         if tag != "textarea" or field not in _WEBIO_TEXT_FIELD_IDS or field in self.starts:
             return
         line, column = self.getpos()
-        self.starts[field] = self._line_starts[line - 1] + column + len(self.get_starttag_text() or "")
+        self.starts[field] = self._line_offset(line) + column + len(self.get_starttag_text() or "")
+
+    def _line_offset(self, line: int) -> int:
+        """The index in the page where getpos()'s 1-based line starts (html.parser counts lines on LF only)."""
+        offset = 0
+        for _ in range(line - 1):
+            offset = self._page.index("\n", offset) + 1
+        return offset
 
 
 def _command_texts(html: str) -> dict[str, str]:
     """{"parameter": ..., "data": ...} of a Web-IO command edit form; a text field the form lacks is left out.
 
-    A textarea holds text up to its own end tag (or the end of the page): entities are resolved, every line break
-    is a line feed, and one line break straight after the start tag is no part of it. A decoded one is kept.
+    A textarea holds text up to its own end tag (or the end of the page): a NUL becomes U+FFFD, entities are
+    resolved, every line break (a decoded one too) is a line feed, and one literal line break straight after the
+    start tag is no part of it.
     """
     parser = _CommandTextParser(html)
     parser.feed(html)
@@ -3050,7 +3057,7 @@ def _command_texts(html: str) -> dict[str, str]:
         end = _TEXTAREA_END_RE.search(html, start)
         raw = html[start : end.start() if end else len(html)]
         raw = _LEADING_LINE_BREAK_RE.sub("", raw, count=1)
-        texts[field] = unescape(_LINE_BREAK_RE.sub("\n", raw))
+        texts[field] = _LINE_BREAK_RE.sub("\n", unescape(raw.replace("\0", "�")))
     return texts
 
 
