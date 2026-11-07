@@ -46,6 +46,13 @@ from .exceptions import (
     ComexioResponseError,
 )
 from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_missing_collections
+from .onewire import (
+    OneWireSensor,
+    OneWireStatus,
+    parse_onewire_config,
+    parse_onewire_device_count,
+    parse_onewire_status,
+)
 from .scrape import (
     TimeServerSettings,
     parse_comexio_version,
@@ -84,6 +91,8 @@ _DASHBOARD_REFRESH_PATH = "/board/dashboard/refresh/"
 _LOAD_ELEMENTS_PATH = "/admin/function_function_module/loadelements/"
 _LOAD_ALL_ELEMENTS_PATH = "/admin/function_function_module/loadallelements"
 _BUS_WORKLOAD_PATH = "/admin/in_output/inoutputinfo"
+_ONEWIRE_STATUS_PATH = "/admin/knx_one_wire/read1WireStati/"
+_ONEWIRE_MONITOR_PATH = "/admin/knx_one_wire/one_wire/"
 _BUS_WORKLOAD_REFERER_PATH = "/admin/in_output/home"
 _EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
 _SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
@@ -970,6 +979,38 @@ class ComexioClient:
                 "POST", _BUS_WORKLOAD_PATH, what=what, headers=self._xhr_headers(_BUS_WORKLOAD_REFERER_PATH)
             ),
         )
+
+    async def get_onewire_device_count(self) -> int:
+        """The number of 1-Wire devices the IO home page counts (0: none, so get_onewire_status can be skipped).
+
+        One request for the whole IO home page (about 0.9 MB on a full installation).
+        """
+        html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what="IO home page")
+        return parse_onewire_device_count(html)
+
+    async def get_onewire_sensors(self) -> dict[str, OneWireSensor]:
+        """The active 1-Wire sensors of the configuration, keyed by address (OT1, OH3, ...).
+
+        Scrapes the function module page (see get_raw_config), so it costs one config fetch.
+        """
+        raw = await self.get_raw_config()
+        return parse_onewire_config(raw.variables["FubModules"])
+
+    async def get_onewire_status(self) -> dict[str, OneWireStatus]:
+        """The live state of every 1-Wire sensor (read1WireStati, the 1-Wire monitor), keyed by address.
+
+        Needs the admin session (see login). A sensor's value, read error (online False) and
+        not-found state (visible False) come from the same answer. The monitor is not an official
+        interface: a changed answer raises ComexioDataError.
+        """
+        payload = await self._request_json(
+            "POST",
+            _ONEWIRE_STATUS_PATH,
+            what="1-Wire status",
+            data={"all": "all"},
+            headers={"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}{_ONEWIRE_MONITOR_PATH}"},
+        )
+        return parse_onewire_status(payload)
 
     async def get_bus_workload(self) -> dict[str, Any]:
         """Internal bus workload and SD card presence (the admin in/output info)."""

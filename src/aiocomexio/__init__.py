@@ -24,6 +24,7 @@ from .exceptions import (
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
+from .onewire import OneWireSensor, OneWireStatus
 from .scrape import TimeServerSettings
 from .session import is_local_address, progress_trace_config, session_kwargs
 from .tls import fetch_certificate_fingerprint, format_fingerprint, normalize_fingerprint
@@ -43,6 +44,8 @@ __all__ = [
     "CreatedFunctionPlan",
     "IoAddress",
     "LiveStates",
+    "OneWireSensor",
+    "OneWireStatus",
     "PlacedModuleBlock",
     "RawConfig",
     "SystemInfo",
