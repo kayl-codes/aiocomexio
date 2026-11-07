@@ -105,6 +105,31 @@ async def main(stored_fingerprint: str) -> None:
 asyncio.run(main(stored_fingerprint="<the value setup() returned>"))
 ```
 
+### 1-Wire sensors
+
+The three 1-Wire calls all need the admin session (`login()` first):
+
+- `get_onewire_device_count()` counts the 1-Wire devices on the IO home page. `0` means there
+  are none, so the status poll can be skipped.
+- `get_onewire_sensors()` returns the configured sensors keyed by address (`OT1`, `OH3`, …). It
+  costs one config fetch.
+- `get_onewire_status()` returns the live state of every sensor, keyed by address. It is read from
+  Comexio's 1-Wire monitor, which is not an official interface, so a changed answer raises
+  `ComexioDataError`.
+
+Each `OneWireStatus` has `visible` (False: the sensor was not found), `online` (False: read error,
+for example a CRC error) and `value` (the reading as a float, `None` if there is none or it is not
+finite). `ok` is True only when the sensor is visible and online. A read error can still carry a
+value, so check `ok` before trusting `value`.
+
+```python
+count = await client.get_onewire_device_count()
+if count:
+    for address, status in (await client.get_onewire_status()).items():
+        if not status.ok:
+            print(address, "read error" if status.visible else "not found")
+```
+
 ## Development
 
 ```bash
