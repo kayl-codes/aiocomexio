@@ -19,12 +19,22 @@ _LOGGER = logging.getLogger(__name__)
 
 ONEWIRE_GROUP = "12"
 
-# One counter per extension block of the IO home page (/admin/in_output/home): the 1-Wire count is
-# the one with the class number_of_type_30 (the Quickbus and KNX counts carry suffixes _30_2 / _30_3).
-_ONEWIRE_COUNT_RE = re.compile(r'<div id="number_of_\w+" class="number_of_type_30">(\d+)</div>', re.ASCII)
+# One counter per extension block of the IO home page (/admin/in_output/home): every <div> with an id
+# number_of_<ext> and a class number_of_type_<n>. The 1-Wire count is the class number_of_type_30
+# (the Quickbus and KNX counts carry suffixes _30_2 / _30_3). Attribute order, whitespace and extra
+# classes do not matter, so the tag is matched first and its attributes checked separately.
+_COUNTER_TAG_RE = re.compile(r"<div\b([^>]*)>\s*(\d+)\s*</div>", re.ASCII)
+_COUNTER_ID_RE = re.compile(r'\sid\s*=\s*"number_of_\w+"', re.ASCII)
+_ONEWIRE_CLASS_RE = re.compile(r'\sclass\s*=\s*"(?:[^"]*\s)?number_of_type_30(?:\s[^"]*)?"', re.ASCII)
+_ANY_TYPE_COUNTER = "number_of_type_"
+# A count with more digits than this is a changed page, not a device count.
+_MAX_COUNT_DIGITS = 6
 # A reading as Comexio writes it: optional sign, digits, optional decimal point or comma, optional exponent.
 _READING_RE = re.compile(r"[+-]?\d+(?:[.,]\d+)?(?:[eE][+-]?\d+)?", re.ASCII)
-_ANY_TYPE_COUNTER = 'class="number_of_type_'
+# Largest config Id accepted; keeps an address (Prefix + Id) short and rules out negative or absurd values.
+_MAX_CONFIG_ID = 99_999
+# Longest excerpt of an external value that goes into an error message.
+_EXCERPT_MAX_CHARS = 80
 
 # Value of the Binary flag of a configured 1-Wire sensor. Observed on a Comexio 11.1.5 with one
 # digital (flag 1) and nine analog (flag 2) sensors; in the logic editor the digital one shows a
@@ -94,12 +104,35 @@ def parse_onewire_device_count(io_home_html: str) -> int:
     """
     if _ANY_TYPE_COUNTER not in io_home_html:
         raise ComexioDataError("IO home page carries no device counters, the 1-Wire count is unknown")
-    return sum(int(count) for count in _ONEWIRE_COUNT_RE.findall(io_home_html))
+    counters = [
+        (attrs, digits) for attrs, digits in _COUNTER_TAG_RE.findall(io_home_html) if _COUNTER_ID_RE.search(attrs)
+    ]
+    if not counters:
+        raise ComexioDataError("IO home page counters have an unknown markup, the 1-Wire count is unknown")
+    return sum(_count_of(digits) for attrs, digits in counters if _ONEWIRE_CLASS_RE.search(attrs))
+
+
+def _count_of(digits: str) -> int:
+    """The counter value; an implausibly long number is a changed page, not a count."""
+    if len(digits) > _MAX_COUNT_DIGITS:
+        raise ComexioDataError(f"IO home page counter has {len(digits)} digits, not a device count")
+    return int(digits)
+
+
+def _bounded_repr(value: Any) -> str:
+    """repr of an external value, cut to _EXCERPT_MAX_CHARS so an error message stays short."""
+    text = repr(value)
+    return text if len(text) <= _EXCERPT_MAX_CHARS else f"{text[:_EXCERPT_MAX_CHARS]}..."
 
 
 def _is_flag(value: Any, flag: int) -> bool:
     """True for the integer flag, not for a bool (bool is an int subclass in Python)."""
     return isinstance(value, int) and not isinstance(value, bool) and value == flag
+
+
+def _is_active(value: Any) -> bool:
+    """Active is 1 or the boolean True."""
+    return value is True or _is_flag(value, 1)
 
 
 def _kind_of(binary: Any) -> str | None:
@@ -118,7 +151,7 @@ def _sensor_from_entry(entry: Mapping[str, Any]) -> OneWireSensor | None:
     prefix, config_id = entry.get(_PREFIX_KEY), entry.get(_ID_KEY)
     if not isinstance(prefix, str) or not _is_address_prefix(prefix):
         return None
-    if isinstance(config_id, bool) or not isinstance(config_id, int):
+    if isinstance(config_id, bool) or not isinstance(config_id, int) or not 0 <= config_id <= _MAX_CONFIG_ID:
         return None
     name, hw_id = entry.get(_NAME_KEY), entry.get(_HW_ID_KEY)
     return OneWireSensor(
@@ -139,11 +172,14 @@ def parse_onewire_config(fub_modules: Mapping[str, Any]) -> dict[str, OneWireSen
     ComexioDataError rather than reporting no sensors. A sensor without a usable Binary flag stays
     with kind None; the caller decides what to do with it.
     """
+    group = fub_modules.get(ONEWIRE_GROUP)
+    if group is not None and not isinstance(group, Mapping | list):
+        raise ComexioDataError(f"$FubModules group {ONEWIRE_GROUP} has an unsupported shape: {type(group).__name__}")
     sensors: dict[str, OneWireSensor] = {}
     active = 0
     unusable = 0
-    for _group_id, entry in iter_group(fub_modules.get(ONEWIRE_GROUP)):
-        if not isinstance(entry, Mapping) or not _is_flag(entry.get(_ACTIVE_KEY), 1):
+    for _group_id, entry in iter_group(group):
+        if not isinstance(entry, Mapping) or not _is_active(entry.get(_ACTIVE_KEY)):
             continue
         active += 1
         sensor = _sensor_from_entry(entry)
@@ -185,7 +221,9 @@ def _status_flag(item: Mapping[str, Any], key: str, address: str) -> bool:
     """A status flag, which must be a JSON boolean: a missing or other value is a changed answer."""
     value = item.get(key)
     if not isinstance(value, bool):
-        raise ComexioDataError(f"1-Wire status of {address} has no boolean {key}: {value!r}")
+        raise ComexioDataError(
+            f"1-Wire status of {_bounded_repr(address)} has no boolean {key}: {_bounded_repr(value)}"
+        )
     return value
 
 

@@ -84,11 +84,44 @@ def test_config_malformed_entries_are_skipped() -> None:
         {**_entry(2, "OT"), "Id": True},
         {**_entry(3, "OT"), "Prefix": ""},
         {**_entry(4, "OT"), "Prefix": None},
+        {**_entry(6, "OT"), "Id": -1},
+        {**_entry(7, "OT"), "Id": 100_000},
         _entry(5, "OT"),
     ]
     modules = {"12": {str(index): entry for index, entry in enumerate(broken)}}
 
     assert list(parse_onewire_config(modules)) == ["OT5"]
+
+
+def test_config_active_true_counts_as_active() -> None:
+    modules = {"12": {"1": _entry(1, "OT", active=True)}}
+
+    assert list(parse_onewire_config(modules)) == ["OT1"]
+
+
+@pytest.mark.parametrize("active", ["1", 2, 1.0])
+def test_config_active_other_values_count_as_inactive(active: object) -> None:
+    modules = {"12": {"1": _entry(1, "OT", active=active)}}
+
+    assert parse_onewire_config(modules) == {}
+
+
+@pytest.mark.parametrize("config_id", [0, 99_999])
+def test_config_id_bounds_are_inclusive(config_id: int) -> None:
+    modules = {"12": {"1": _entry(config_id, "OT")}}
+
+    assert list(parse_onewire_config(modules)) == [f"OT{config_id}"]
+
+
+@pytest.mark.parametrize("shape", ["text", 7, True, (1, 2)])
+def test_config_group_of_unsupported_shape_raises(shape: object) -> None:
+    with pytest.raises(ComexioDataError, match="unsupported shape"):
+        parse_onewire_config({"12": shape})
+
+
+@pytest.mark.parametrize("modules", [{}, {"12": None}])
+def test_config_absent_group_is_empty(modules: dict[str, object]) -> None:
+    assert parse_onewire_config(modules) == {}
 
 
 def test_config_with_only_unusable_active_entries_raises() -> None:
@@ -169,7 +202,7 @@ async def test_get_onewire_status_posts_all_with_monitor_referer(
 async def test_get_onewire_status_on_expired_session_raises_authentication_error(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
-    comexio.serve_text("POST", ONEWIRE_STATUS_PATH, "<html><form>Anmeldung</form></html>")
+    comexio.serve_text("POST", ONEWIRE_STATUS_PATH, '<html><form>Anmeldung<input id="loginsubmit"></form></html>')
 
     with pytest.raises(ComexioAuthenticationError, match="login form"):
         await logged_in.get_onewire_status()
@@ -208,6 +241,50 @@ def test_device_count_sums_the_1wire_counter_of_every_extension() -> None:
     assert parse_onewire_device_count(html) == 13
 
 
+def test_device_count_tolerates_attribute_order_whitespace_and_extra_classes() -> None:
+    html = (
+        '<div class="box number_of_type_30 wide" id="number_of_2"  >\n 4 </div>'
+        '<div id = "number_of_3" class="number_of_type_30">2</div>'
+    )
+
+    assert parse_onewire_device_count(html) == 6
+
+
+@pytest.mark.parametrize("digits", ["1234567", "9" * 40])
+def test_device_count_with_implausibly_long_number_raises(digits: str) -> None:
+    html = _counter("1", "number_of_type_30", digits)
+
+    with pytest.raises(ComexioDataError):
+        parse_onewire_device_count(html)
+
+
+def test_device_count_accepts_six_digits() -> None:
+    assert parse_onewire_device_count(_counter("1", "number_of_type_30", "999999")) == 999999
+
+
+def test_device_count_ignores_decoy_classes_and_missing_id() -> None:
+    html = (
+        _counter("1", "number_of_type_300", "5")
+        + '<div class="xnumber_of_type_30">6</div>'
+        + '<div class="number_of_type_30">7</div>'
+        + _counter("1_2", "a number_of_type_30_2", "8")
+        + _counter("2", "number_of_type_30 wide", "3")
+    )
+
+    assert parse_onewire_device_count(html) == 3
+
+
+def test_device_count_ignores_long_quickbus_number_next_to_a_1wire_counter() -> None:
+    html = _counter("1_2", "number_of_type_30_2", "9" * 40) + _counter("1", "number_of_type_30", "2")
+
+    assert parse_onewire_device_count(html) == 2
+
+
+def test_device_count_with_single_quoted_markup_raises() -> None:
+    with pytest.raises(ComexioDataError, match="unknown markup"):
+        parse_onewire_device_count("<div id='number_of_1' class='number_of_type_30'>3</div>")
+
+
 def test_device_count_ignores_quickbus_and_knx_counters() -> None:
     html = _counter("1_2", "number_of_type_30_2", "7") + _counter("1_3", "number_of_type_30_3", "57")
 
@@ -223,8 +300,9 @@ def test_device_count_with_only_other_counters_is_zero() -> None:
     assert parse_onewire_device_count(_counter("5", "number_of_type_3", "2")) == 0
 
 
-def test_device_count_ignores_non_ascii_digits() -> None:
-    assert parse_onewire_device_count(_counter("1", "number_of_type_30", "٤")) == 0
+def test_device_count_with_non_ascii_digits_raises() -> None:
+    with pytest.raises(ComexioDataError, match="unknown markup"):
+        parse_onewire_device_count(_counter("1", "number_of_type_30", "٤"))
 
 
 async def test_get_onewire_device_count_reads_the_io_home_page(logged_in: ComexioClient, comexio: FakeComexio) -> None:
@@ -253,8 +331,29 @@ def test_status_value_rejects_unparseable_or_non_finite(raw: object) -> None:
 
 
 def test_status_flags_must_be_booleans() -> None:
+    payload = [{**_status_item("OT1"), "online": 1}]
+
     with pytest.raises(ComexioDataError):
-        parse_onewire_status([{**_status_item("OT1"), "online": 1}])
+        parse_onewire_status(payload)
+
+
+def test_status_error_message_bounds_the_external_value() -> None:
+    payload = [{**_status_item("OT1"), "online": "x" * 5000}]
+
+    with pytest.raises(ComexioDataError) as info:
+        parse_onewire_status(payload)
+
+    assert len(str(info.value)) < 300
+
+
+def test_status_error_message_bounds_a_long_address() -> None:
+    payload = [{**_status_item("A" * 5000), "online": "x"}]
+
+    with pytest.raises(ComexioDataError) as info:
+        parse_onewire_status(payload)
+
+    assert len(str(info.value)) < 300
+    assert "..." in str(info.value)
 
 
 def test_duplicate_sensor_address_keeps_the_later_entry() -> None:
@@ -264,5 +363,7 @@ def test_duplicate_sensor_address_keeps_the_later_entry() -> None:
 
 
 def test_sensor_prefix_must_be_ascii() -> None:
+    modules = {"12": {"1": _entry(1, "ÖT")}}
+
     with pytest.raises(ComexioDataError):
-        parse_onewire_config({"12": {"1": _entry(1, "ÖT")}})
+        parse_onewire_config(modules)
