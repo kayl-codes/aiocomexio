@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .config import TYPE_ANALOG, TYPE_DIGITAL, iter_group
+from .config import TYPE_ANALOG, TYPE_DIGITAL, _strict_id, iter_group
 from .exceptions import ComexioDataError
 
 _LOGGER = logging.getLogger(__name__)
@@ -22,20 +22,18 @@ ONEWIRE_GROUP = "12"
 
 # One counter per extension block of the IO home page (/admin/in_output/home): every <div> with an id
 # number_of_<ext> and a class number_of_type_<n>. The 1-Wire count is the class number_of_type_30
-# (the Quickbus and KNX counts carry suffixes _30_2 / _30_3). Attribute order, whitespace and extra
-# classes do not matter, so the tag is matched first and its attributes checked separately.
+# (the Quickbus and KNX counts carry suffixes _30_2 / _30_3). Attribute order, quote style, whitespace
+# and extra classes do not matter, so the tag is matched first and its attributes checked separately.
 _COUNTER_TAG_RE = re.compile(r"<div\b([^>]*)>\s*(\d+)\s*</div>", re.ASCII)
 _OPENING_DIV_RE = re.compile(r"<div\b([^>]*)>", re.ASCII)
-_COUNTER_ID_RE = re.compile(r'\sid\s*=\s*"number_of_\w+"', re.ASCII)
-_CLASS_ATTR_RE = re.compile(r'\sclass\s*=\s*"([^"]*)"', re.ASCII)
+_COUNTER_ID_RE = re.compile(r"""\sid\s*=\s*(["'])number_of_\w+\1""", re.ASCII)
+_CLASS_ATTR_RE = re.compile(r"""\sclass\s*=\s*(["'])([^"']*)\1""", re.ASCII)
 _ONEWIRE_CLASS = "number_of_type_30"
 _ANY_TYPE_COUNTER = "number_of_type_"
 # A count with more digits than this is a changed page, not a device count.
 _MAX_COUNT_DIGITS = 6
 # A reading as Comexio writes it: optional sign, digits, optional decimal point or comma, optional exponent.
 _READING_RE = re.compile(r"[+-]?\d+(?:[.,]\d+)?(?:[eE][+-]?\d+)?", re.ASCII)
-# Largest config Id accepted; keeps an address (Prefix + Id) short and rules out negative or absurd values.
-_MAX_CONFIG_ID = 99_999
 # Longest excerpt of an external value that goes into an error message.
 _EXCERPT_MAX_CHARS = 80
 # Builds a bounded repr: a large or deeply nested value is never rendered in full first.
@@ -131,7 +129,7 @@ def parse_onewire_device_count(io_home_html: str) -> int:
 def _is_onewire_counter(attrs: str) -> bool:
     """True when the class attribute holds the token number_of_type_30 (not a suffixed Quickbus or KNX class)."""
     match = _CLASS_ATTR_RE.search(attrs)
-    return match is not None and _ONEWIRE_CLASS in match.group(1).split()
+    return match is not None and _ONEWIRE_CLASS in match.group(2).split()
 
 
 def _count_of(digits: str) -> int:
@@ -181,14 +179,12 @@ def _text_of(item: Mapping[str, Any], key: str) -> str:
 
 def _sensor_from_entry(entry: Mapping[str, Any]) -> OneWireSensor | None:
     """The sensor of one active $FubModules["12"] entry, None if it lacks a usable address."""
-    prefix, config_id = entry.get(_PREFIX_KEY), entry.get(_ID_KEY)
-    if not isinstance(prefix, str) or not _is_address_prefix(prefix):
-        return None
-    if isinstance(config_id, bool) or not isinstance(config_id, int) or not 0 <= config_id <= _MAX_CONFIG_ID:
+    prefix, canonical = entry.get(_PREFIX_KEY), _strict_id(entry.get(_ID_KEY))
+    if not isinstance(prefix, str) or not _is_address_prefix(prefix) or canonical is None:
         return None
     return OneWireSensor(
-        address=f"{prefix}{config_id}",
-        config_id=config_id,
+        address=f"{prefix}{canonical}",
+        config_id=int(canonical),
         prefix=prefix,
         name=_text_of(entry, _NAME_KEY),
         hw_id=_text_of(entry, _HW_ID_KEY),
@@ -234,9 +230,16 @@ def parse_onewire_config(fub_modules: Mapping[str, Any]) -> dict[str, OneWireSen
         sensor = _sensor_from_entry(entry)
         if sensor is None:
             unusable += 1
+            _LOGGER.debug(
+                "Unusable active 1-Wire entry: Prefix %s, Id %s",
+                _bounded_repr(entry.get(_PREFIX_KEY)),
+                _bounded_repr(entry.get(_ID_KEY)),
+            )
             continue
         if sensor.address in sensors:
-            _LOGGER.warning("Two active 1-Wire entries share the address %r, the later one wins", sensor.address)
+            _LOGGER.warning(
+                "Two active 1-Wire entries share the address %s, the later one wins", _bounded_repr(sensor.address)
+            )
         sensors[sensor.address] = sensor
     if unusable:
         _LOGGER.warning("Skipped %d active 1-Wire entries without a usable Prefix and Id", unusable)
@@ -269,15 +272,20 @@ def _finite_or_none(raw: Any, address: str) -> float | None:
     """The reading as a finite float; None for an absent or non-finite reading.
 
     An empty string is the "no value yet" form and passes silently. A present value that is not a
-    number at all is logged with its sensor and read as None, so a changed answer shows up in the
-    log instead of passing as a silently missing value. Non-finite numbers (NaN, Infinity, too
-    large) are None by design and are not logged.
+    number at all is logged with its sensor and type (its content only at DEBUG) and read as None,
+    so a changed answer shows up in the log instead of passing as a silently missing value.
+    Non-finite numbers (NaN, Infinity, too large) are None by design and are not logged.
     """
     if raw is None or raw == "":
         return None
     number = _number_of(raw)
     if number is None:
-        _LOGGER.warning("1-Wire reading of %s is not a number, shown as missing: %s", address, _bounded_repr(raw))
+        _LOGGER.warning(
+            "1-Wire reading of %s is not a number (type %s), shown as missing",
+            _bounded_repr(address),
+            type(raw).__name__,
+        )
+        _LOGGER.debug("1-Wire reading of %s: %s", _bounded_repr(address), _bounded_repr(raw))
         return None
     return number if math.isfinite(number) else None
 
@@ -324,7 +332,9 @@ def parse_onewire_status(payload: Any) -> dict[str, OneWireStatus]:
             skipped += 1
             continue
         if status.address in states:
-            _LOGGER.warning("Two 1-Wire status items share the address %r, the later one wins", status.address)
+            _LOGGER.warning(
+                "Two 1-Wire status items share the address %s, the later one wins", _bounded_repr(status.address)
+            )
         states[status.address] = status
     if skipped:
         _LOGGER.warning("Skipped %d 1-Wire status items without an address", skipped)

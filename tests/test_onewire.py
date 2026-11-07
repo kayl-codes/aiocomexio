@@ -85,17 +85,44 @@ def test_config_array_shaped_group_gives_the_same_sensors() -> None:
 def test_config_malformed_entries_are_skipped() -> None:
     broken = [
         "not an object",
-        {**_entry(1, "OT"), "Id": "1"},
+        {**_entry(1, "OT"), "Id": "1.5"},
         {**_entry(2, "OT"), "Id": True},
         {**_entry(3, "OT"), "Prefix": ""},
         {**_entry(4, "OT"), "Prefix": None},
         {**_entry(6, "OT"), "Id": -1},
-        {**_entry(7, "OT"), "Id": 100_000},
+        {**_entry(7, "OT"), "Id": 10**18},
         _entry(5, "OT"),
     ]
     modules = {"12": {str(index): entry for index, entry in enumerate(broken)}}
 
     assert list(parse_onewire_config(modules)) == ["OT5"]
+
+
+@pytest.mark.parametrize(("config_id", "address"), [("7", "OT7"), ("007", "OT7"), (100_000, "OT100000")])
+def test_config_digit_string_or_large_id_is_accepted(config_id: object, address: str) -> None:
+    modules = {"12": {"1": {**_entry(7, "OT"), "Id": config_id}}}
+
+    sensors = parse_onewire_config(modules)
+
+    assert list(sensors) == [address]
+    assert sensors[address].config_id == int(address.removeprefix("OT"))
+
+
+def test_config_same_id_in_int_and_digit_string_is_one_sensor(caplog: pytest.LogCaptureFixture) -> None:
+    modules = {"12": {"1": {**_entry(7, "OT"), "Id": "007"}, "2": _entry(7, "OT")}}
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        sensors = parse_onewire_config(modules)
+
+    assert list(sensors) == ["OT7"]
+    assert "share the address" in caplog.text
+
+
+@pytest.mark.parametrize("config_id", ["", " 7", "-1", "٧", "9" * 19, 10**18])
+def test_config_unusable_id_is_skipped_without_raising(config_id: object) -> None:
+    modules = {"12": {"1": {**_entry(1, "OT"), "Id": config_id}, "2": _entry(2, "OT")}}
+
+    assert list(parse_onewire_config(modules)) == ["OT2"]
 
 
 def test_config_active_true_counts_as_active() -> None:
@@ -316,9 +343,27 @@ def test_device_count_matches_the_1wire_class_as_a_whole_token() -> None:
     assert parse_onewire_device_count(html) == 3
 
 
-def test_device_count_with_single_quoted_markup_raises() -> None:
+def test_device_count_reads_single_quoted_markup() -> None:
+    html = "<div id='number_of_1' class='number_of_type_30'>3</div>" + _counter("2", "number_of_type_30", "4")
+
+    assert parse_onewire_device_count(html) == 7
+
+
+def test_device_count_reads_multi_token_single_quoted_class() -> None:
+    html = "<div id=\"number_of_1\" class='number_of_type_30 extra'>3</div>"
+
+    assert parse_onewire_device_count(html) == 3
+
+
+def test_device_count_with_mismatched_quotes_is_not_a_1wire_counter() -> None:
+    html = '<div id="number_of_1" class="number_of_type_30\'>3</div>' + _counter("2", "number_of_type_30", "4")
+
+    assert parse_onewire_device_count(html) == 4
+
+
+def test_device_count_with_single_quoted_malformed_1wire_counter_raises() -> None:
     with pytest.raises(ComexioDataError, match="unknown markup"):
-        parse_onewire_device_count("<div id='number_of_1' class='number_of_type_30'>3</div>")
+        parse_onewire_device_count("<div id='number_of_1' class='number_of_type_30'>n/a</div>")
 
 
 def test_device_count_ignores_quickbus_and_knx_counters() -> None:
@@ -383,6 +428,61 @@ def test_status_non_finite_or_empty_reading_is_missing_without_a_warning(
         assert states_for({"value": raw}).value is None
 
     assert caplog.text == ""
+
+
+def test_reading_warning_keeps_the_content_out_of_warning_level(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.onewire"):
+        states_for({"value": {"marker": "zz9"}})
+
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "zz9" not in warnings[0]
+    assert "zz9" in caplog.text
+
+
+def test_log_lines_escape_a_line_break_in_the_address(caplog: pytest.LogCaptureFixture) -> None:
+    payload = [{**_status_item("OT1"), "id": "OT1\nWARNING forged", "value": {"x": 1}}]
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        parse_onewire_status(payload)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1
+    assert "\n" not in messages[0]
+    assert "OT1\\nWARNING forged" in messages[0]
+
+
+def test_debug_records_are_bounded_and_escaped(caplog: pytest.LogCaptureFixture) -> None:
+    payload = [{**_status_item("A" * 5000), "value": {"x": "line\nbreak"}}]
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.onewire"):
+        parse_onewire_status(payload)
+
+    assert caplog.records
+    assert all("\n" not in record.getMessage() for record in caplog.records)
+    assert all(len(record.getMessage()) < 300 for record in caplog.records)
+
+
+def test_duplicate_address_warning_is_bounded_and_escaped(caplog: pytest.LogCaptureFixture) -> None:
+    address = "OT1\nWARNING " + "A" * 5000
+    payload = [{**_status_item(address), "value": "1"}, {**_status_item(address), "value": "2"}]
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        parse_onewire_status(payload)
+
+    assert len(caplog.records) == 1
+    assert "\n" not in caplog.records[0].getMessage()
+    assert len(caplog.records[0].getMessage()) < 300
+
+
+def test_reading_warning_bounds_a_long_address(caplog: pytest.LogCaptureFixture) -> None:
+    payload = [{**_status_item("A" * 5000), "value": {"x": 1}}]
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        parse_onewire_status(payload)
+
+    assert caplog.records
+    assert all(len(record.getMessage()) < 300 for record in caplog.records)
 
 
 def test_config_mixed_group_skips_non_objects_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
