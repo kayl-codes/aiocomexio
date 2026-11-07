@@ -8,6 +8,7 @@ is digital when its Binary flag is 1 and analog when it is 2 (see the module con
 import logging
 import math
 import re
+import reprlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -24,8 +25,10 @@ ONEWIRE_GROUP = "12"
 # (the Quickbus and KNX counts carry suffixes _30_2 / _30_3). Attribute order, whitespace and extra
 # classes do not matter, so the tag is matched first and its attributes checked separately.
 _COUNTER_TAG_RE = re.compile(r"<div\b([^>]*)>\s*(\d+)\s*</div>", re.ASCII)
+_OPENING_DIV_RE = re.compile(r"<div\b([^>]*)>", re.ASCII)
 _COUNTER_ID_RE = re.compile(r'\sid\s*=\s*"number_of_\w+"', re.ASCII)
-_ONEWIRE_CLASS_RE = re.compile(r'\sclass\s*=\s*"(?:[^"]*\s)?number_of_type_30(?:\s[^"]*)?"', re.ASCII)
+_CLASS_ATTR_RE = re.compile(r'\sclass\s*=\s*"([^"]*)"', re.ASCII)
+_ONEWIRE_CLASS = "number_of_type_30"
 _ANY_TYPE_COUNTER = "number_of_type_"
 # A count with more digits than this is a changed page, not a device count.
 _MAX_COUNT_DIGITS = 6
@@ -35,6 +38,10 @@ _READING_RE = re.compile(r"[+-]?\d+(?:[.,]\d+)?(?:[eE][+-]?\d+)?", re.ASCII)
 _MAX_CONFIG_ID = 99_999
 # Longest excerpt of an external value that goes into an error message.
 _EXCERPT_MAX_CHARS = 80
+# Builds a bounded repr: a large or deeply nested value is never rendered in full first.
+_EXCERPT_REPR = reprlib.Repr()
+_EXCERPT_REPR.maxstring = _EXCERPT_MAX_CHARS
+_EXCERPT_REPR.maxother = _EXCERPT_MAX_CHARS
 
 # Value of the Binary flag of a configured 1-Wire sensor. Observed on a Comexio 11.1.5 with one
 # digital (flag 1) and nine analog (flag 2) sensors; in the logic editor the digital one shows a
@@ -107,9 +114,23 @@ def parse_onewire_device_count(io_home_html: str) -> int:
     counters = [
         (attrs, digits) for attrs, digits in _COUNTER_TAG_RE.findall(io_home_html) if _COUNTER_ID_RE.search(attrs)
     ]
-    if not counters:
+    onewire_counters = [(attrs, digits) for attrs, digits in counters if _is_onewire_counter(attrs)]
+    # A 1-Wire counter whose content is not a plain number is not in onewire_counters; it must not be dropped
+    # silently. Counters of other types are not read, so their markup does not matter.
+    onewire_tags = [
+        attrs
+        for attrs in _OPENING_DIV_RE.findall(io_home_html)
+        if _COUNTER_ID_RE.search(attrs) and _is_onewire_counter(attrs)
+    ]
+    if not counters or len(onewire_counters) != len(onewire_tags):
         raise ComexioDataError("IO home page counters have an unknown markup, the 1-Wire count is unknown")
-    return sum(_count_of(digits) for attrs, digits in counters if _ONEWIRE_CLASS_RE.search(attrs))
+    return sum(_count_of(digits) for _attrs, digits in onewire_counters)
+
+
+def _is_onewire_counter(attrs: str) -> bool:
+    """True when the class attribute holds the token number_of_type_30 (not a suffixed Quickbus or KNX class)."""
+    match = _CLASS_ATTR_RE.search(attrs)
+    return match is not None and _ONEWIRE_CLASS in match.group(1).split()
 
 
 def _count_of(digits: str) -> int:
@@ -121,7 +142,7 @@ def _count_of(digits: str) -> int:
 
 def _bounded_repr(value: Any) -> str:
     """repr of an external value, cut to _EXCERPT_MAX_CHARS so an error message stays short."""
-    text = repr(value)
+    text = _EXCERPT_REPR.repr(value)
     return text if len(text) <= _EXCERPT_MAX_CHARS else f"{text[:_EXCERPT_MAX_CHARS]}..."
 
 
@@ -146,6 +167,17 @@ def _is_address_prefix(prefix: str) -> bool:
     return prefix.isascii() and prefix.isalnum()
 
 
+def _text_of(item: Mapping[str, Any], key: str) -> str:
+    """A display text field: absent or null is "", a string is taken, any other type is logged and shown blank."""
+    value = item.get(key)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    _LOGGER.warning("1-Wire field %s has the unexpected type %s, shown blank", key, type(value).__name__)
+    return ""
+
+
 def _sensor_from_entry(entry: Mapping[str, Any]) -> OneWireSensor | None:
     """The sensor of one active $FubModules["12"] entry, None if it lacks a usable address."""
     prefix, config_id = entry.get(_PREFIX_KEY), entry.get(_ID_KEY)
@@ -153,13 +185,12 @@ def _sensor_from_entry(entry: Mapping[str, Any]) -> OneWireSensor | None:
         return None
     if isinstance(config_id, bool) or not isinstance(config_id, int) or not 0 <= config_id <= _MAX_CONFIG_ID:
         return None
-    name, hw_id = entry.get(_NAME_KEY), entry.get(_HW_ID_KEY)
     return OneWireSensor(
         address=f"{prefix}{config_id}",
         config_id=config_id,
         prefix=prefix,
-        name=name if isinstance(name, str) else "",
-        hw_id=hw_id if isinstance(hw_id, str) else "",
+        name=_text_of(entry, _NAME_KEY),
+        hw_id=_text_of(entry, _HW_ID_KEY),
         kind=_kind_of(entry.get(_BINARY_KEY)),
     )
 
@@ -232,11 +263,10 @@ def _status_from_item(item: Mapping[str, Any]) -> OneWireStatus | None:
     address = item.get(_STATUS_ID_KEY)
     if not isinstance(address, str) or not address:
         return None
-    name, device_id = item.get(_STATUS_NAME_KEY), item.get(_STATUS_DEVICE_KEY)
     return OneWireStatus(
         address=address,
-        device_id=device_id if isinstance(device_id, str) else "",
-        name=name if isinstance(name, str) else "",
+        device_id=_text_of(item, _STATUS_DEVICE_KEY),
+        name=_text_of(item, _STATUS_NAME_KEY),
         online=_status_flag(item, _STATUS_ONLINE_KEY, address),
         visible=_status_flag(item, _STATUS_VISIBLE_KEY, address),
         value=_finite_or_none(item.get(_STATUS_VALUE_KEY)),
@@ -253,14 +283,17 @@ def parse_onewire_status(payload: Any) -> dict[str, OneWireStatus]:
     if not isinstance(payload, list):
         raise ComexioDataError(f"1-Wire status answer is not a list: {type(payload).__name__}")
     states: dict[str, OneWireStatus] = {}
+    skipped = 0
     for item in payload:
-        if not isinstance(item, Mapping):
+        status = _status_from_item(item) if isinstance(item, Mapping) else None
+        if status is None:
+            skipped += 1
             continue
-        status = _status_from_item(item)
-        if status is not None:
-            if status.address in states:
-                _LOGGER.warning("Two 1-Wire status items share the address %r, the later one wins", status.address)
-            states[status.address] = status
+        if status.address in states:
+            _LOGGER.warning("Two 1-Wire status items share the address %r, the later one wins", status.address)
+        states[status.address] = status
+    if skipped:
+        _LOGGER.warning("Skipped %d 1-Wire status items without an address", skipped)
     if payload and not states:
         raise ComexioDataError(f"1-Wire status answer has {len(payload)} items, none with an address")
     return states

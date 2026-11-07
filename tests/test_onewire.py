@@ -1,6 +1,7 @@
 """1-Wire sensors: configuration ($FubModules["12"]) and live status (read1WireStati)."""
 
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -280,6 +281,25 @@ def test_device_count_ignores_long_quickbus_number_next_to_a_1wire_counter() -> 
     assert parse_onewire_device_count(html) == 2
 
 
+def test_device_count_with_malformed_counter_next_to_a_valid_one_raises() -> None:
+    html = _counter("1", "number_of_type_30", "10") + _counter("2", "number_of_type_30", "n/a")
+
+    with pytest.raises(ComexioDataError, match="unknown markup"):
+        parse_onewire_device_count(html)
+
+
+def test_device_count_ignores_a_broken_counter_of_another_type() -> None:
+    html = _counter("1", "number_of_type_30", "10") + _counter("2", "number_of_type_3", "n/a")
+
+    assert parse_onewire_device_count(html) == 10
+
+
+def test_device_count_matches_the_1wire_class_as_a_whole_token() -> None:
+    html = _counter("1", "foo number_of_type_30 bar", "3") + '<div id="number_of_2">4</div>'
+
+    assert parse_onewire_device_count(html) == 3
+
+
 def test_device_count_with_single_quoted_markup_raises() -> None:
     with pytest.raises(ComexioDataError, match="unknown markup"):
         parse_onewire_device_count("<div id='number_of_1' class='number_of_type_30'>3</div>")
@@ -354,6 +374,66 @@ def test_status_error_message_bounds_a_long_address() -> None:
 
     assert len(str(info.value)) < 300
     assert "..." in str(info.value)
+
+
+def test_non_text_name_is_shown_blank_and_logged(caplog: pytest.LogCaptureFixture) -> None:
+    entry = _entry(1, "OT")
+    entry["Name"] = 5
+
+    with caplog.at_level(logging.WARNING):
+        sensors = parse_onewire_config({"12": {"1": entry}})
+
+    assert sensors["OT1"].name == ""
+    assert "unexpected type int" in caplog.text
+
+
+def test_non_text_status_device_id_is_shown_blank_and_logged(caplog: pytest.LogCaptureFixture) -> None:
+    payload = [{**_status_item("OT1"), "device_id": ["28-x"]}]
+
+    with caplog.at_level(logging.WARNING):
+        states = parse_onewire_status(payload)
+
+    assert states["OT1"].device_id == ""
+    assert "unexpected type list" in caplog.text
+
+
+def test_absent_or_null_text_fields_are_blank_without_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    entry = _entry(1, "OT")
+    entry["Name"] = None
+    del entry["HwId"]
+
+    with caplog.at_level(logging.WARNING):
+        sensors = parse_onewire_config({"12": {"1": entry}})
+
+    assert sensors["OT1"].name == ""
+    assert sensors["OT1"].hw_id == ""
+    assert "unexpected type" not in caplog.text
+
+
+def test_status_error_repr_renders_only_a_few_elements() -> None:
+    calls = 0
+
+    class Spy:
+        def __repr__(self) -> str:
+            nonlocal calls
+            calls += 1
+            return "spy"
+
+    payload = [{**_status_item("OT1"), "online": [Spy() for _ in range(1000)]}]
+
+    with pytest.raises(ComexioDataError) as info:
+        parse_onewire_status(payload)
+
+    assert calls < 20
+    assert len(str(info.value)) < 300
+
+
+def test_status_items_without_address_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        states = parse_onewire_status([{"longname": "no id"}, _status_item("OT1"), "junk"])
+
+    assert list(states) == ["OT1"]
+    assert "Skipped 2 1-Wire status items" in caplog.text
 
 
 def test_duplicate_sensor_address_keeps_the_later_entry() -> None:
