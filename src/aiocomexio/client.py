@@ -161,6 +161,8 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 # The ids of the min/max <input> tags on a Web-IO command's edit form and the field each fills, e.g.
 # <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
 _WEBIO_RANGE_INPUT_IDS = {"min_cmd_io_0": "min", "max_cmd_io_0": "max"}
+# The ids of the <textarea> tags that hold a Web-IO command's request path ("Parameter") and its Lua body ("Daten").
+_WEBIO_TEXT_FIELD_IDS = frozenset({"parameter", "data"})
 # Elements whose content a browser reads as text (RCDATA and raw text), so markup inside them is no form field; a
 # <noscript> is raw text too, as a browser runs scripts.
 _TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"})
@@ -430,12 +432,16 @@ class PlacedModuleBlock:
 class WebioCommandForm:
     """The settings of one Web-IO command that only its edit form shows (see get_webio_command_form).
 
-    Each is None when the form lacks the field or its value is not numeric.
+    Each is None when the form lacks the field (min, max and protocol also when the value is not numeric).
+    parameter is the command's request path and data its Lua body, as a browser reads the two text fields: entities
+    resolved, line breaks as "\\n", a first line break dropped.
     """
 
     min: float | None
     max: float | None
     protocol: int | None
+    parameter: str | None = None
+    data: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1344,7 +1350,14 @@ class ComexioClient:
             params={"Id": str(command_id), "TestDevice": str(device_id)},
         )
         v_min, v_max = _command_range(html, command_id)
-        return WebioCommandForm(min=v_min, max=v_max, protocol=_command_protocol(html, command_id))
+        texts = _command_texts(html)
+        return WebioCommandForm(
+            min=v_min,
+            max=v_max,
+            protocol=_command_protocol(html, command_id),
+            parameter=texts.get("parameter"),
+            data=texts.get("data"),
+        )
 
     # --- markers and KNX objects (admin session) ---
 
@@ -2853,6 +2866,8 @@ class _FormParser(HTMLParser):
     def _start_html(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> bool:
         """Read an HTML start tag; True if it opened an element that stays open until an end tag closes it."""
         if tag in _TEXT_ONLY_ELEMENTS:
+            if not self._hidden:
+                self.handle_text_only_tag(tag, _first_attributes(attrs))
             self._text_only = tag
             return False
         if tag in _FOREIGN_ROOTS:
@@ -2964,6 +2979,9 @@ class _FormParser(HTMLParser):
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         """A start tag of an HTML element outside a text-only or hidden element; a <select> only when none is open."""
 
+    def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        """A start tag of a text-only element (a <textarea>, <title>, ...) outside a hidden one; its text follows."""
+
     def handle_form_endtag(self, tag: str) -> None:
         """An end tag other than </select> outside a text-only or hidden element or an open foreign element."""
 
@@ -2986,6 +3004,59 @@ class _CommandRangeParser(_FormParser):
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag == "input" and (field := _WEBIO_RANGE_INPUT_IDS.get(attributes.get("id", ""))) is not None:
             self.fields.setdefault(field, attributes.get("value"))
+
+
+class _CommandTextParser(_FormParser):
+    """The text of the first <textarea id="parameter"> and <textarea id="data"> of a Web-IO command edit form.
+
+    Read as a browser does: entities resolved, the first textarea of an id counts, a line break straight after the
+    start tag is no part of the text. texts maps "parameter"/"data" to the text (empty for an empty textarea).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.texts: dict[str, str] = {}
+        self._field: str | None = None  # the open textarea, if it is one that counts
+        self._chunks: list[str] = []
+
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        self._finish_field()
+
+    def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        self._finish_field()
+        field = attributes.get("id", "")
+        if tag == "textarea" and field in _WEBIO_TEXT_FIELD_IDS and field not in self.texts:
+            self._field = field
+            self._chunks = []
+            self.texts[field] = ""
+
+    def handle_data(self, data: str) -> None:
+        if self._field is None:
+            return
+        if self._text_only == "textarea":
+            self._chunks.append(data)
+        else:
+            self._finish_field()  # the textarea ended: this is the text after it
+
+    def close(self) -> None:
+        super().close()
+        self._finish_field()
+
+    def _finish_field(self) -> None:
+        if self._field is None:
+            return
+        text = "".join(self._chunks).replace("\r\n", "\n").replace("\r", "\n")
+        self.texts[self._field] = text.removeprefix("\n")
+        self._field = None
+        self._chunks = []
+
+
+def _command_texts(html: str) -> dict[str, str]:
+    """{"parameter": ..., "data": ...} of a Web-IO command edit form; a text field the form lacks is left out."""
+    parser = _CommandTextParser()
+    parser.feed(html)
+    parser.close()
+    return parser.texts
 
 
 class _Option(NamedTuple):

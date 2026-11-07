@@ -2585,3 +2585,52 @@ async def test_set_io_value_writes_an_output_comexio_writes_itself_over_the_admi
         "1": {"action": "set", "EName": "Ext 1", "IOIdentifier": identifier, "Value": 1}
     }
     assert comexio.received_at("GET", API_PATH) == []
+
+
+_WEBHOOK_FORM = (
+    '<tr><td><textarea id="parameter" name="parameter" spellcheck="false">/api/webhook/abc123</textarea></td></tr>'
+    '<tr><td><textarea id="data" name="data" spellcheck="false">function data(a)\r\n'
+    "  local d = { id=&quot;1&quot;, value=a, type=&quot;marker&quot;, server=&quot;iosrv1&quot; }\r\n"
+    "  return json_stringify(d)\r\nend</textarea></td></tr>"
+)
+
+
+async def test_get_webio_command_form_reads_the_path_and_the_body(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, _WEBHOOK_FORM + _RANGE_FIELDS)
+
+    form = await logged_in.get_webio_command_form(1324, 34)
+
+    assert form.parameter == "/api/webhook/abc123"
+    assert form.data == (
+        'function data(a)\n  local d = { id="1", value=a, type="marker", server="iosrv1" }\n'
+        "  return json_stringify(d)\nend"
+    )
+    assert (form.min, form.max) == (0.0, 1.0)
+
+
+@pytest.mark.parametrize(
+    ("html", "parameter", "data"),
+    [
+        pytest.param("", None, None, id="no-field"),
+        pytest.param('<textarea id="parameter"></textarea>', "", None, id="empty-field"),
+        pytest.param('<textarea id="parameter">\n/p</textarea>', "/p", None, id="first-line-break-dropped"),
+        pytest.param('<textarea id="parameter">\n\n/p</textarea>', "\n/p", None, id="only-the-first-line-break"),
+        pytest.param(
+            '<textarea id="parameter">/a</textarea><textarea id="parameter">/b</textarea>', "/a", None, id="first-wins"
+        ),
+        pytest.param('<textarea id="parameter">/a<b>&amp;</textarea>', "/a<b>&", None, id="markup-is-text"),
+        pytest.param('<textarea id="data">x</textarea>tail', None, "x", id="text-after-the-field-is-no-part"),
+        pytest.param('<textarea id="other">x</textarea>', None, None, id="other-textarea"),
+        pytest.param('<textarea id="parameter">/open', "/open", None, id="unclosed-field"),
+    ],
+)
+async def test_get_webio_command_form_text_fields(
+    logged_in: ComexioClient, comexio: FakeComexio, html: str, parameter: str | None, data: str | None
+) -> None:
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, _RANGE_FIELDS + html)
+
+    form = await logged_in.get_webio_command_form(1324, 34)
+
+    assert (form.parameter, form.data) == (parameter, data)
