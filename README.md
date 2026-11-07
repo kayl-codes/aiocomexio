@@ -110,7 +110,8 @@ asyncio.run(main(stored_fingerprint="<the value setup() returned>"))
 The three 1-Wire calls all need the admin session (`login()` first):
 
 - `get_onewire_device_count()` counts the 1-Wire devices on the IO home page. `0` means there
-  are none, so the status poll can be skipped.
+  are none, so the status poll can be skipped. A sensor added after that count is seen by the
+  next poll, not by the current one.
 - `get_onewire_sensors()` returns the active configured sensors keyed by address (`OT1`, `OH3`, …);
   inactive entries are left out. It costs one config fetch.
 - `get_onewire_status()` returns the live state of the sensors Comexio reports, keyed by address.
@@ -125,6 +126,13 @@ the sensor is visible and online. A read error can still carry a value, so check
 trusting `value`.
 
 ```python
+import asyncio
+
+import aiohttp
+
+from aiocomexio import ComexioClient, session_kwargs
+
+
 async def report_1wire_problems(client: ComexioClient) -> None:
     """Print the 1-Wire sensors that are not found or have a read error."""
     if not await client.get_onewire_device_count():
@@ -134,7 +142,14 @@ async def report_1wire_problems(client: ComexioClient) -> None:
             print(address, "read error" if status.visible else "not found")
 
 
-await report_1wire_problems(client)  # inside your async code, after login()
+async def main(stored_fingerprint: str) -> None:
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = ComexioClient("192.168.0.20", "admin", "secret", session=session, fingerprint=stored_fingerprint)
+        await client.login()
+        await report_1wire_problems(client)
+
+
+asyncio.run(main(stored_fingerprint="<the value setup() returned>"))
 ```
 
 ## Development
