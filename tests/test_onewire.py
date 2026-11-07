@@ -486,9 +486,10 @@ def test_debug_records_are_bounded_and_escaped(caplog: pytest.LogCaptureFixture)
     with caplog.at_level(logging.DEBUG, logger="aiocomexio.onewire"):
         parse_onewire_status(payload)
 
-    assert caplog.records
-    assert all("\n" not in record.getMessage() for record in caplog.records)
-    assert all(len(record.getMessage()) < 300 for record in caplog.records)
+    debug_records = [record for record in caplog.records if record.levelno == logging.DEBUG]
+    assert debug_records
+    assert all("\n" not in record.getMessage() for record in debug_records)
+    assert all(len(record.getMessage()) < 300 for record in debug_records)
 
 
 def test_duplicate_address_warning_is_bounded_and_escaped(caplog: pytest.LogCaptureFixture) -> None:
