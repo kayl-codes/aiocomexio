@@ -1357,7 +1357,7 @@ class ComexioClient:
     async def _read_command_form(
         self, command_id: str | int, device_id: str | int, *, with_texts: bool
     ) -> WebioCommandForm:
-        """get_webio_command_form; without the texts a range read does not process a large body it would drop."""
+        """get_webio_command_form; with_texts=False skips _command_texts, which a range read does not need."""
         html = await self._request_admin_text(
             "GET",
             _WEBIO_EDIT_COMMAND_PATH,
