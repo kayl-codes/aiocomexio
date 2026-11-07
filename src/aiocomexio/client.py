@@ -3046,8 +3046,8 @@ def _command_texts(html: str) -> dict[str, str]:
     """{"parameter": ..., "data": ...} of a Web-IO command edit form; a text field the form lacks is left out.
 
     A textarea holds text up to its own end tag (or the end of the page): a NUL becomes U+FFFD, entities are
-    resolved, every line break (a decoded one too) is a line feed, and one literal line break straight after the
-    start tag is no part of it.
+    resolved, every line break (a decoded one too) is a line feed, and the first line feed straight after the start
+    tag, written literally or as a reference such as "&#10;", is no part of it.
     """
     parser = _CommandTextParser(html)
     parser.feed(html)
@@ -3056,8 +3056,12 @@ def _command_texts(html: str) -> dict[str, str]:
     for field, start in parser.starts.items():
         end = _TEXTAREA_END_RE.search(html, start)
         raw = html[start : end.start() if end else len(html)]
-        raw = _LEADING_LINE_BREAK_RE.sub("", raw, count=1)
-        texts[field] = _LINE_BREAK_RE.sub("\n", unescape(raw.replace("\0", "�")))
+        raw, dropped = _LEADING_LINE_BREAK_RE.subn("", raw, count=1)
+        text = unescape(raw.replace("\0", "�"))
+        if not dropped:
+            # The first character the browser reads after the start tag is a line feed, written as a reference.
+            text = text.removeprefix("\n")
+        texts[field] = _LINE_BREAK_RE.sub("\n", text)
     return texts
 
 

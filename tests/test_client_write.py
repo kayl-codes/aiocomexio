@@ -2638,7 +2638,10 @@ async def test_get_webio_command_form_text_fields(
 
 _TEXT_FIELD_EDGE_CASES = [
     pytest.param('<textarea id="parameter">\rx</textarea>', "x", None, id="first-cr-dropped"),
-    pytest.param('<textarea id="parameter">&#10;x</textarea>', "\nx", None, id="decoded-line-break-is-kept"),
+    pytest.param('<textarea id="parameter">&#10;x</textarea>', "x", None, id="decoded-first-line-feed-dropped"),
+    pytest.param('<textarea id="parameter">&#10;&#10;x</textarea>', "\nx", None, id="only-one-decoded-lf-dropped"),
+    pytest.param('<textarea id="parameter">\n&#10;x</textarea>', "\nx", None, id="literal-then-decoded-lf"),
+    pytest.param('<textarea id="parameter">&#13;x</textarea>', "\nx", None, id="decoded-first-cr-is-kept"),
     pytest.param(
         '<textarea id="data">a<b>c<!-- d --> e</textarea>', None, "a<b>c<!-- d --> e", id="markup-and-comment"
     ),
