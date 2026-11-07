@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from html import unescape
 from html.parser import HTMLParser
 from http import HTTPStatus
 from io import StringIO
@@ -161,9 +162,19 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 # The ids of the min/max <input> tags on a Web-IO command's edit form and the field each fills, e.g.
 # <input type="text" id="min_cmd_io_0" name="min_cmd_io_0" value="-500000">.
 _WEBIO_RANGE_INPUT_IDS = {"min_cmd_io_0": "min", "max_cmd_io_0": "max"}
+# The ids of the <textarea> tags that hold a Web-IO command's request path ("Parameter") and its Lua body ("Daten").
+_WEBIO_PARAMETER_FIELD = "parameter"
+_WEBIO_DATA_FIELD = "data"
+_WEBIO_TEXT_FIELD_IDS = frozenset({_WEBIO_PARAMETER_FIELD, _WEBIO_DATA_FIELD})
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+_LEADING_LINE_BREAK_RE = re.compile(r"\A(?:\r\n|\r|\n)")
+_TEXTAREA = "textarea"
+# The end tag of a <textarea> (RCDATA): "</textarea" followed by an HTML space character (tab, LF, FF, CR, space),
+# "/" or ">" - not by a vertical tab or a non-ASCII space, which a browser keeps in the text.
+_TEXTAREA_END_RE = re.compile(r"</textarea(?=[\t\n\f\r />])", re.IGNORECASE)
 # Elements whose content a browser reads as text (RCDATA and raw text), so markup inside them is no form field; a
 # <noscript> is raw text too, as a browser runs scripts.
-_TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"})
+_TEXT_ONLY_ELEMENTS = frozenset({_TEXTAREA, "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"})
 # html.parser releases that know a <noscript> is raw text when scripts run read it so when asked to.
 _HTML_PARSER_SCRIPTING = {"scripting": True} if "scripting" in inspect.signature(HTMLParser.__init__).parameters else {}
 # A text-only element that no end tag ends: the rest of the page is its text.
@@ -187,7 +198,7 @@ _TEMPLATE = "template"
 # Elements whose content is no option text (script-supporting elements); a <script/> stays open, as in a browser.
 _HIDDEN_ELEMENTS = frozenset({"script", _TEMPLATE})
 # Start tags that end an open <select> before a browser reads them.
-_SELECT_ENDING_TAGS = frozenset({"input", "keygen", "textarea"})
+_SELECT_ENDING_TAGS = frozenset({"input", "keygen", _TEXTAREA})
 # The elements that start SVG and MathML (foreign) content, whose elements are no HTML form fields.
 _FOREIGN_ROOTS = frozenset({"svg", "math"})
 # Start tags a browser ignores inside an open <select>, so what follows them is still markup, not their text.
@@ -238,7 +249,7 @@ _SPECIAL_ELEMENTS = frozenset(
         *("h6", "head", "header", "hgroup", "hr", "html", "iframe", "img", "input", "keygen", "li", "link"),
         *("listing", "main", "marquee", "menu", "meta", "nav", "noembed", "noframes", "noscript", "object", "ol"),
         *("p", "param", "plaintext", "pre", "script", "search", "section", "select", "source", "style", "summary"),
-        *(_TABLE, _TBODY, "td", _TEMPLATE, "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul"),
+        *(_TABLE, _TBODY, "td", _TEMPLATE, _TEXTAREA, "tfoot", "th", "thead", "title", "tr", "track", "ul"),
         *("wbr", "xmp"),
     }
 )
@@ -430,12 +441,16 @@ class PlacedModuleBlock:
 class WebioCommandForm:
     """The settings of one Web-IO command that only its edit form shows (see get_webio_command_form).
 
-    Each is None when the form lacks the field or its value is not numeric.
+    Each is None when the form lacks the field (min, max and protocol also when the value is not numeric).
+    parameter is the command's request path and data its Lua body, as a browser reads the two text fields: entities
+    resolved, line breaks as "\\n", a first line break dropped.
     """
 
     min: float | None
     max: float | None
     protocol: int | None
+    parameter: str | None = None
+    data: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1326,17 +1341,24 @@ class ComexioClient:
         self, command_id: str | int, device_id: str | int
     ) -> tuple[float | None, float | None]:
         """(Min, Max) of one Web-IO command, read from its edit form (see get_webio_command_form)."""
-        form = await self.get_webio_command_form(command_id, device_id)
+        form = await self._read_command_form(command_id, device_id, with_texts=False)
         return form.min, form.max
 
     async def get_webio_command_form(self, command_id: str | int, device_id: str | int) -> WebioCommandForm:
-        """Min, Max and protocol of one Web-IO command, read from its edit form in one request.
+        """Min, Max, protocol, path ("parameter") and body ("data") of one Web-IO command, from its edit form.
 
         The config scrape never carries these fields of Web-IO commands, so the edit form is the
-        only source. A field that is missing or not numeric comes back as None; a form without any
+        only source. A field that is missing or not numeric comes back as None (so does a path or
+        body textarea the form lacks); a form without any
         min/max field raises ComexioDataError (or ComexioAuthenticationError for the login form), as
         does a page that nests more than 256 elements.
         """
+        return await self._read_command_form(command_id, device_id, with_texts=True)
+
+    async def _read_command_form(
+        self, command_id: str | int, device_id: str | int, *, with_texts: bool
+    ) -> WebioCommandForm:
+        """get_webio_command_form; with_texts=False skips _command_texts, which a range read does not need."""
         html = await self._request_admin_text(
             "GET",
             _WEBIO_EDIT_COMMAND_PATH,
@@ -1344,7 +1366,14 @@ class ComexioClient:
             params={"Id": str(command_id), "TestDevice": str(device_id)},
         )
         v_min, v_max = _command_range(html, command_id)
-        return WebioCommandForm(min=v_min, max=v_max, protocol=_command_protocol(html, command_id))
+        texts = _command_texts(html) if with_texts else {}
+        return WebioCommandForm(
+            min=v_min,
+            max=v_max,
+            protocol=_command_protocol(html, command_id),
+            parameter=texts.get(_WEBIO_PARAMETER_FIELD),
+            data=texts.get(_WEBIO_DATA_FIELD),
+        )
 
     # --- markers and KNX objects (admin session) ---
 
@@ -2853,6 +2882,8 @@ class _FormParser(HTMLParser):
     def _start_html(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> bool:
         """Read an HTML start tag; True if it opened an element that stays open until an end tag closes it."""
         if tag in _TEXT_ONLY_ELEMENTS:
+            if not self._hidden:
+                self.handle_text_only_tag(tag, _first_attributes(attrs))
             self._text_only = tag
             return False
         if tag in _FOREIGN_ROOTS:
@@ -2964,6 +2995,9 @@ class _FormParser(HTMLParser):
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         """A start tag of an HTML element outside a text-only or hidden element; a <select> only when none is open."""
 
+    def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        """A start tag of a text-only element (a <textarea>, <title>, ...) outside a hidden one; its text follows."""
+
     def handle_form_endtag(self, tag: str) -> None:
         """An end tag other than </select> outside a text-only or hidden element or an open foreign element."""
 
@@ -2986,6 +3020,68 @@ class _CommandRangeParser(_FormParser):
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag == "input" and (field := _WEBIO_RANGE_INPUT_IDS.get(attributes.get("id", ""))) is not None:
             self.fields.setdefault(field, attributes.get("value"))
+
+
+class _CommandTextParser(_FormParser):
+    """Where the text of the first <textarea id="parameter"> and <textarea id="data"> of an edit form lies.
+
+    The parser only finds the fields (a field in a <template> or <script> or inside another text-only element does
+    not count, the first of an id wins, the id is compared exactly); _command_texts cuts the text out of the page
+    itself, so it does not depend on whether this html.parser release reports markup inside a textarea as text.
+    spans maps "parameter"/"data" to the (start, end) indexes of its text in the page. A textarea tag that lies in
+    the text of an earlier textarea is no field, even where this html.parser release ends that text sooner than a
+    browser does (at "</textarea" plus a vertical tab, say).
+    """
+
+    def __init__(self, page: str) -> None:
+        super().__init__()
+        self.spans: dict[str, tuple[int, int]] = {}
+        self._page = page
+        self._text_end = 0
+        self._last_line = (1, 0)
+
+    def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        if tag != _TEXTAREA:
+            return
+        line, column = self.getpos()
+        start = self._line_offset(line) + column + len(self.get_starttag_text() or "")
+        if start < self._text_end:
+            return
+        end = _TEXTAREA_END_RE.search(self._page, start)
+        self._text_end = end.start() if end else len(self._page)
+        field = attributes.get("id", "")
+        if field in _WEBIO_TEXT_FIELD_IDS and field not in self.spans:
+            self.spans[field] = (start, self._text_end)
+
+    def _line_offset(self, line: int) -> int:
+        """The index in the page where getpos()'s 1-based line starts (html.parser counts lines on LF only)."""
+        # getpos() only moves forward, so each call goes on from the last line it was asked for.
+        current, offset = self._last_line if line >= self._last_line[0] else (1, 0)
+        for _ in range(line - current):
+            offset = self._page.index("\n", offset) + 1
+        self._last_line = (line, offset)
+        return offset
+
+
+def _command_texts(html: str) -> dict[str, str]:
+    """{"parameter": ..., "data": ...} of a Web-IO command edit form; a text field the form lacks is left out.
+
+    A textarea holds text up to its own end tag (or the end of the page): a NUL becomes U+FFFD, entities are
+    resolved, every line break (a decoded one too) is a line feed, and the first line feed straight after the start
+    tag, written literally or as a reference such as "&#10;", is no part of it.
+    """
+    parser = _CommandTextParser(html)
+    parser.feed(html)
+    parser.close()
+    texts: dict[str, str] = {}
+    for field, (start, end) in parser.spans.items():
+        raw, dropped = _LEADING_LINE_BREAK_RE.subn("", html[start:end], count=1)
+        text = unescape(raw.replace("\0", "�"))
+        if not dropped:
+            # The first character the browser reads after the start tag is a line feed, written as a reference.
+            text = text.removeprefix("\n")
+        texts[field] = _LINE_BREAK_RE.sub("\n", text)
+    return texts
 
 
 class _Option(NamedTuple):
