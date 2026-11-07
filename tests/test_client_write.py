@@ -2634,3 +2634,67 @@ async def test_get_webio_command_form_text_fields(
     form = await logged_in.get_webio_command_form(1324, 34)
 
     assert (form.parameter, form.data) == (parameter, data)
+
+
+_TEXT_FIELD_EDGE_CASES = [
+    pytest.param('<textarea id="parameter">\rx</textarea>', "x", None, id="first-cr-dropped"),
+    pytest.param('<textarea id="parameter">&#10;x</textarea>', "\nx", None, id="decoded-line-break-is-kept"),
+    pytest.param(
+        '<textarea id="data">a<b>c<!-- d --> e</textarea>', None, "a<b>c<!-- d --> e", id="markup-and-comment"
+    ),
+    pytest.param('<textarea id="data">a</TEXTAREA >b', None, "a", id="end-tag-upper-case-with-space"),
+    pytest.param('<textarea id="data">a</textareax>b</textarea>', None, "a</textareax>b", id="longer-name-is-no-end"),
+    pytest.param('<textarea id="data"></textarea><textarea id="data">x</textarea>', None, "", id="empty-first-wins"),
+    pytest.param(
+        '<textarea id="parameter"><textarea id="data">x</textarea>',
+        '<textarea id="data">x',
+        None,
+        id="nested-textarea-is-text",
+    ),
+    pytest.param(
+        '<template><textarea id="parameter">T</textarea></template><textarea id="parameter">R</textarea>',
+        "R",
+        None,
+        id="template-hides-a-field",
+    ),
+    pytest.param('<script>"<textarea id=parameter>"</script>', None, None, id="script-hides-a-field"),
+    pytest.param('<select><option>a<textarea id="data">x</textarea>', None, "x", id="textarea-ends-a-select"),
+    pytest.param(
+        '<textarea id="data">if a < b && c then x = "&lt;" end</textarea>',
+        None,
+        'if a < b && c then x = "<" end',
+        id="loose-markup-chars-and-entities",
+    ),
+    pytest.param('<TEXTAREA ID="parameter">x</TEXTAREA>', "x", None, id="upper-case-tag"),
+    pytest.param('<textarea id="PARAMETER">x</textarea>', None, None, id="id-is-case-sensitive"),
+    pytest.param(
+        '<textarea id="parameter">a</textarea><svg><text>z</text></svg><title>t</title><noscript>n</noscript>'
+        '<textarea id="data">b</textarea>',
+        "a",
+        "b",
+        id="foreign-and-text-only-elements-between-the-fields",
+    ),
+    pytest.param('<textarea>x</textarea><textarea id="parameter">p</textarea>', "p", None, id="textarea-without-id"),
+    pytest.param('<textarea id="x" id="parameter">p</textarea>', None, None, id="first-attribute-wins"),
+    pytest.param('<textarea id="parameter"/>/a<b>x</textarea>', "/a<b>x", None, id="self-closing-slash-is-ignored"),
+]
+
+
+@pytest.mark.parametrize("older_parser", [False, True], ids=["this-parser", "older-parser"])
+@pytest.mark.parametrize(("html", "parameter", "data"), _TEXT_FIELD_EDGE_CASES)
+async def test_get_webio_command_form_text_field_edge_cases(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    monkeypatch: pytest.MonkeyPatch,
+    older_parser: bool,
+    html: str,
+    parameter: str | None,
+    data: str | None,
+) -> None:
+    if older_parser:
+        _emulate_an_older_html_parser(monkeypatch)
+    comexio.serve_text("GET", WEBIO_EDIT_COMMAND_PATH, _RANGE_FIELDS + html)
+
+    form = await logged_in.get_webio_command_form(1324, 34)
+
+    assert (form.parameter, form.data) == (parameter, data)

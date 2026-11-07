@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from html import unescape
 from html.parser import HTMLParser
 from http import HTTPStatus
 from io import StringIO
@@ -163,6 +164,10 @@ _WEBIO_IN_USE_MARKER = "ui-state-error"
 _WEBIO_RANGE_INPUT_IDS = {"min_cmd_io_0": "min", "max_cmd_io_0": "max"}
 # The ids of the <textarea> tags that hold a Web-IO command's request path ("Parameter") and its Lua body ("Daten").
 _WEBIO_TEXT_FIELD_IDS = frozenset({"parameter", "data"})
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+_LEADING_LINE_BREAK_RE = re.compile(r"\A(?:\r\n|\r|\n)")
+# The end tag of a <textarea> (RCDATA): "</textarea" followed by whitespace, "/" or ">".
+_TEXTAREA_END_RE = re.compile(r"</textarea(?=[\s/>])", re.IGNORECASE)
 # Elements whose content a browser reads as text (RCDATA and raw text), so markup inside them is no form field; a
 # <noscript> is raw text too, as a browser runs scripts.
 _TEXT_ONLY_ELEMENTS = frozenset({"textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"})
@@ -3007,56 +3012,45 @@ class _CommandRangeParser(_FormParser):
 
 
 class _CommandTextParser(_FormParser):
-    """The text of the first <textarea id="parameter"> and <textarea id="data"> of a Web-IO command edit form.
+    """Where the text of the first <textarea id="parameter"> and <textarea id="data"> of an edit form starts.
 
-    Read as a browser does: entities resolved, the first textarea of an id counts, a line break straight after the
-    start tag is no part of the text. texts maps "parameter"/"data" to the text (empty for an empty textarea).
+    The parser only finds the fields (a field in a <template> or <script> or inside another text-only element does
+    not count, the first of an id wins, the id is compared exactly); _command_texts cuts the text out of the page
+    itself, so it does not depend on whether this html.parser release reports markup inside a textarea as text.
+    starts maps "parameter"/"data" to the index in the page where the text begins.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, page: str) -> None:
         super().__init__()
-        self.texts: dict[str, str] = {}
-        self._field: str | None = None  # the open textarea, if it is one that counts
-        self._chunks: list[str] = []
-
-    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        self._finish_field()
+        self.starts: dict[str, int] = {}
+        # The index of each line's first character, to turn getpos()'s (line, column) into an index of the page.
+        self._line_starts = [0]
+        self._line_starts.extend(match.end() for match in _LINE_BREAK_RE.finditer(page))
 
     def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        self._finish_field()
         field = attributes.get("id", "")
-        if tag == "textarea" and field in _WEBIO_TEXT_FIELD_IDS and field not in self.texts:
-            self._field = field
-            self._chunks = []
-            self.texts[field] = ""
-
-    def handle_data(self, data: str) -> None:
-        if self._field is None:
+        if tag != "textarea" or field not in _WEBIO_TEXT_FIELD_IDS or field in self.starts:
             return
-        if self._text_only == "textarea":
-            self._chunks.append(data)
-        else:
-            self._finish_field()  # the textarea ended: this is the text after it
-
-    def close(self) -> None:
-        super().close()
-        self._finish_field()
-
-    def _finish_field(self) -> None:
-        if self._field is None:
-            return
-        text = "".join(self._chunks).replace("\r\n", "\n").replace("\r", "\n")
-        self.texts[self._field] = text.removeprefix("\n")
-        self._field = None
-        self._chunks = []
+        line, column = self.getpos()
+        self.starts[field] = self._line_starts[line - 1] + column + len(self.get_starttag_text() or "")
 
 
 def _command_texts(html: str) -> dict[str, str]:
-    """{"parameter": ..., "data": ...} of a Web-IO command edit form; a text field the form lacks is left out."""
-    parser = _CommandTextParser()
+    """{"parameter": ..., "data": ...} of a Web-IO command edit form; a text field the form lacks is left out.
+
+    A textarea holds text up to its own end tag (or the end of the page): entities are resolved, every line break
+    is a line feed, and one line break straight after the start tag is no part of it. A decoded one is kept.
+    """
+    parser = _CommandTextParser(html)
     parser.feed(html)
     parser.close()
-    return parser.texts
+    texts: dict[str, str] = {}
+    for field, start in parser.starts.items():
+        end = _TEXTAREA_END_RE.search(html, start)
+        raw = html[start : end.start() if end else len(html)]
+        raw = _LEADING_LINE_BREAK_RE.sub("", raw, count=1)
+        texts[field] = unescape(_LINE_BREAK_RE.sub("\n", raw))
+    return texts
 
 
 class _Option(NamedTuple):
