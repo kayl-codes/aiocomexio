@@ -2649,6 +2649,15 @@ async def test_get_webio_command_range_does_not_read_the_texts(
     assert await logged_in.get_webio_command_range(1324, 34) == (0.0, 1.0)
 
 
+def test_command_text_parser_line_offsets_match_a_plain_scan_in_any_order() -> None:
+    page = "a\r\nb\n\nc\rd\n" * 3 + "end"
+    parser = client_module._CommandTextParser(page)
+    starts = [0] + [index + 1 for index, char in enumerate(page) if char == "\n"]
+
+    for line in (1, 2, 2, 5, 9, 9, 4, 1, 12, 7):
+        assert parser._line_offset(line) == starts[line - 1]
+
+
 def test_command_text_parser_ignores_a_textarea_tag_inside_an_earlier_textareas_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2728,6 +2737,15 @@ _TEXT_FIELD_EDGE_CASES = [
             id=f"textarea-tag-in-the-text-is-no-field-after-{name}-end-tag",
         )
         for name, char in (("a-vt", "\v"), ("an-nbsp", "\u00a0"))
+    ],
+    *[
+        pytest.param(
+            f'<textarea id="parameter">a</textarea{tail}><textarea id="data">D</textarea>',
+            "a",
+            "D",
+            id=f"end-tag-with-{name}-ends-the-text",
+        )
+        for name, tail in (("slash", "/"), ("space-and-slash", " /"), ("newline-and-slash", "\n/"))
     ],
     pytest.param('a\rb\n<textarea id="parameter">XYZ</textarea>', "XYZ", None, id="lone-cr-then-lf-before-field"),
     pytest.param('<p>\r</p>\r\n\r<textarea id="data">Q</textarea>', None, "Q", id="mixed-cr-and-crlf-before-field"),

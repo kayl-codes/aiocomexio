@@ -3038,6 +3038,7 @@ class _CommandTextParser(_FormParser):
         self.spans: dict[str, tuple[int, int]] = {}
         self._page = page
         self._text_end = 0
+        self._last_line = (1, 0)
 
     def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag != _TEXTAREA:
@@ -3054,9 +3055,11 @@ class _CommandTextParser(_FormParser):
 
     def _line_offset(self, line: int) -> int:
         """The index in the page where getpos()'s 1-based line starts (html.parser counts lines on LF only)."""
-        offset = 0
-        for _ in range(line - 1):
+        # getpos() only moves forward, so each call goes on from the last line it was asked for.
+        current, offset = self._last_line if line >= self._last_line[0] else (1, 0)
+        for _ in range(line - current):
             offset = self._page.index("\n", offset) + 1
+        self._last_line = (line, offset)
         return offset
 
 
