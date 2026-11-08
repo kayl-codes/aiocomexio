@@ -190,9 +190,9 @@ extension. The camera calls need the admin session (`login()` first):
 
 - `get_doorstations()` reads the IO home page and returns the Doorstations keyed by extension id.
   Each `Doorstation` has `ext_id`, `camera_id` and `name` (the extension name, `None` if the page
-  carries none). An empty map means the page lists extensions but no Doorstation; a page without the
-  device counters of its extension blocks (the ones `get_onewire_device_count()` reads) raises
-  `ComexioDataError`. Elements whose ids are not positive integers are skipped (and logged); if there are
+  carries none). An empty map means the page lists extensions but no Doorstation; a page with neither
+  the device counters of its extension blocks (the ones `get_onewire_device_count()` reads) nor an
+  element with `data-camera_id` raises `ComexioDataError`. Elements whose ids are not positive integers are skipped (and logged); if there are
   such elements but none is usable, the call raises `ComexioDataError`. Detection follows the IO home page
   of Comexio OS 11.0.2: the elements of a Doorstation tab carry `data-extid`, `data-extname` and
   `data-camera_id`.
@@ -200,8 +200,9 @@ extension. The camera calls need the admin session (`login()` first):
   (`/proxy/cam/<camera_id>/`, `multipart/x-mixed-replace`, one JPEG per part).
 - `get_doorstation_snapshot(camera_id)` returns the current image: the first complete JPEG of that
   stream, read with the admin session. A stream without a frame within 10 seconds, or one that breaks
-  off, raises `ComexioConnectionError`; one that ends or passes 4 MB without a frame, or a malformed
-  frame, raises `ComexioDataError`; the login form raises `ComexioAuthenticationError`.
+  off, raises `ComexioConnectionError`; one that ends or passes 4 MB without a frame (a frame must end
+  within the first 4 MB), or a malformed frame (one that ends before its first scan included), raises
+  `ComexioDataError`; the login form raises `ComexioAuthenticationError`.
 
 The Doorstation serves the same stream under its own address, reportedly without a login. If you
 use it, keep the Doorstation in a network segment that only trusted hosts can reach.

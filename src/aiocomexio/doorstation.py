@@ -151,8 +151,8 @@ def first_jpeg_frame(data: bytes | bytearray) -> bytes | None:
     The image runs from its SOI marker to the EOI marker that ends it: the segments before a scan are skipped by
     their length fields, so an EOI inside them (an embedded thumbnail) does not end the image early. Data before
     the first SOI (a multipart boundary and its headers) is skipped. A marker that is missing where the structure of
-    a JPEG needs one, a segment shorter than its length field, or a stuffed byte or second SOI between the segments
-    raises ComexioDataError.
+    a JPEG needs one, a segment shorter than its length field, a stuffed byte or second SOI between the segments, or
+    an EOI before the first scan (an image without picture data) raises ComexioDataError.
     """
     start = data.find(_SOI)
     if start < 0:
@@ -162,19 +162,26 @@ def first_jpeg_frame(data: bytes | bytearray) -> bytes | None:
 
 
 def _image_end(data: bytes | bytearray, pos: int) -> int | None:
-    """Offset after the EOI of the image whose segments start at pos, None if data ends before it."""
+    """Offset after the EOI of the image whose segments start at pos, None if data ends before it.
+
+    An EOI before the first scan ends an image without picture data, which raises ComexioDataError.
+    """
+    scanned = False
     while True:
         code_at = _marker_code_at(data, pos)
         if code_at is None:
             return None
         code = data[code_at]
         if code == _EOI_CODE:
+            if not scanned:
+                raise ComexioDataError(f"Camera frame ends at offset {code_at} before its first scan")
             return code_at + 1
         if code in _NO_SEGMENT_CODES:
             raise ComexioDataError(f"Camera frame has the unexpected JPEG marker 0x{code:02X} at offset {code_at}")
         next_pos = code_at + 1 if code in _STANDALONE_CODES else _segment_end(data, code, code_at + 1)
         if next_pos is None:
             return None
+        scanned = scanned or code == _SOS_CODE
         pos = next_pos
 
 

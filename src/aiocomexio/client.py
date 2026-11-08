@@ -38,7 +38,6 @@ from .config import iter_group
 from .doorstation import (
     CAMERA_ID_ATTRIBUTE,
     DOORSTATION_ATTRIBUTES,
-    EXT_ID_ATTRIBUTE,
     JPEG_EOI,
     Doorstation,
     doorstation_stream_path,
@@ -111,8 +110,10 @@ _IO_HOME_PAGE = "IO home page"
 _SNAPSHOT_TIMEOUT_SEC = 10.0
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 # Every extension block of the IO home page carries a device counter: a <div> with an id number_of_<ext> and a
-# class number_of_type_<n>, the markup parse_onewire_device_count reads.
+# class number_of_type_<n>, the markup parse_onewire_device_count reads. The Quickbus and KNX counters carry the
+# suffixes _30_2 / _30_3, so the type is a number with optional numeric suffixes.
 _EXTENSION_COUNTER_ID_PREFIX = "number_of_"
+_EXTENSION_COUNTER_CLASS_RE = re.compile(rf"{_ANY_TYPE_COUNTER}\d+(?:_\d+)*", re.ASCII)
 _EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
 _SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
 _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
@@ -3129,15 +3130,11 @@ class _DoorstationParser(_FormParser):
     def __init__(self) -> None:
         super().__init__()
         self.elements: dict[tuple[tuple[str, str], ...], None] = {}
-        self.saw_io_page = False  # an extension block's device counter or a Doorstation element was seen
+        self.saw_extension_counter = False
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        if (
-            EXT_ID_ATTRIBUTE in attributes
-            or CAMERA_ID_ATTRIBUTE in attributes
-            or _is_extension_counter(tag, attributes)
-        ):
-            self.saw_io_page = True
+        if _is_extension_counter(tag, attributes):
+            self.saw_extension_counter = True
         if CAMERA_ID_ATTRIBUTE in attributes:
             kept = tuple((name, attributes[name]) for name in DOORSTATION_ATTRIBUTES if name in attributes)
             self.elements.setdefault(kept, None)
@@ -3148,7 +3145,7 @@ def _is_extension_counter(tag: str, attributes: dict[str, str]) -> bool:
     return (
         tag == "div"
         and attributes.get("id", "").startswith(_EXTENSION_COUNTER_ID_PREFIX)
-        and any(name.startswith(_ANY_TYPE_COUNTER) for name in attributes.get("class", "").split())
+        and any(_EXTENSION_COUNTER_CLASS_RE.fullmatch(name) for name in attributes.get("class", "").split())
     )
 
 
@@ -3157,14 +3154,16 @@ def parse_doorstations(io_home_html: str) -> dict[int, Doorstation]:
 
     Every extension block of the page, BASE included, carries a device counter (see _EXTENSION_COUNTER_ID_PREFIX).
     A page with such counters but no element with data-camera_id has no Doorstation and gives an empty result. A
-    page with neither counters nor Doorstation elements is a changed page, not an installation without Doorstations:
-    that raises ComexioDataError, so a caller never drops its cameras on a silent empty result. Limit: a firmware
-    that renames data-camera_id but keeps the counters looks like an installation without Doorstations.
+    page with neither counters nor elements with data-camera_id is a changed page, not an installation without
+    Doorstations: that raises ComexioDataError, so a caller never drops its cameras on a silent empty result; other
+    Doorstation attributes alone (data-extid) do not count, a page that kept them but lost data-camera_id has
+    changed. Limit: a firmware that renames data-camera_id but keeps the counters looks like an installation
+    without Doorstations.
     """
     parser = _DoorstationParser()
     parser.feed(io_home_html)
     parser.close()
-    if not parser.saw_io_page:
+    if not parser.saw_extension_counter and not parser.elements:
         raise ComexioDataError("IO home page has no extension counters, the Doorstations are unknown")
     return doorstations_from_attributes(dict(element) for element in parser.elements)
 
@@ -3177,9 +3176,12 @@ async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
         # A frame is complete only once its EOI arrived; looking for it only in the new bytes (and the byte before
         # them, a marker may span two chunks) keeps the stream from being rescanned for every chunk.
         new_bytes = received[-len(chunk) - 1 :]
-        if JPEG_EOI in new_bytes and (frame := _complete_frame(received, what)) is not None:
+        over_cap = len(received) > _MAX_SNAPSHOT_BYTES
+        # Bytes past the cap do not count: a frame that ends beyond it is too large, like no frame at all.
+        within_cap = received[:_MAX_SNAPSHOT_BYTES] if over_cap else received
+        if JPEG_EOI in new_bytes and (frame := _complete_frame(within_cap, what)) is not None:
             return frame
-        if len(received) > _MAX_SNAPSHOT_BYTES:
+        if over_cap:
             raise ComexioDataError(f"{what}: no complete JPEG in the first {_MAX_SNAPSHOT_BYTES} bytes of the stream")
     if _LOGIN_FORM_SUBMIT_MARKER.encode() in received:
         raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")

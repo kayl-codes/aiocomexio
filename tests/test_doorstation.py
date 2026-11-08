@@ -20,7 +20,7 @@ from aiocomexio import (
 from aiocomexio import client as client_module
 from aiocomexio.client import parse_doorstations
 from aiocomexio.doorstation import doorstation_stream_path, doorstations_from_attributes, first_jpeg_frame
-from tests.fake_comexio import FakeComexio, Handler
+from tests.fake_comexio import LOGIN_PAGE, SESSION_COOKIE, SESSION_VALUE, FakeComexio, Handler
 
 IO_HOME_PATH = "/admin/in_output/home"
 STREAM_PATH = "/proxy/cam/7/"
@@ -303,11 +303,43 @@ def test_a_segment_shorter_than_its_length_field_is_malformed() -> None:
 # --- client -------------------------------------------------------------------------------------------------------
 
 
+def _logged_in(request: web.Request) -> bool:
+    return request.cookies.get(SESSION_COOKIE) == SESSION_VALUE
+
+
+def _admin_page(text: str) -> Handler:
+    """A handler that, like Comexio, serves text only with the admin session and the login form otherwise."""
+
+    async def handler(request: web.Request) -> web.Response:
+        return web.Response(text=text if _logged_in(request) else LOGIN_PAGE, content_type="text/html")
+
+    return handler
+
+
 async def test_get_doorstations_reads_the_io_home_page(logged_in: ComexioClient, comexio: FakeComexio) -> None:
-    comexio.serve_text("GET", IO_HOME_PATH, _doorstation_tab("7", "Haustür"))
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_doorstation_tab("7", "Haustür")))
 
     assert await logged_in.get_doorstations() == {7: Doorstation(ext_id=7, camera_id=7, name="Haustür")}
     assert len(comexio.received_at("GET", IO_HOME_PATH)) == 1
+
+
+async def test_both_camera_calls_need_the_admin_session(client: ComexioClient, comexio: FakeComexio) -> None:
+    # The handlers of the reads above answer only a logged-in client; without login() both calls fail.
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_doorstation_tab("7", "Haustür")))
+    comexio.serve("GET", STREAM_PATH, _stream(_part(FRAME)))
+
+    with pytest.raises(ComexioAuthenticationError) as page_info:
+        await client.get_doorstations()
+    with pytest.raises(ComexioAuthenticationError) as snapshot_info:
+        await client.get_doorstation_snapshot(7)
+
+    # Both requests reached the fake, which answered the login form: the error comes from that answer.
+    assert len(comexio.received_at("GET", IO_HOME_PATH)) == 1
+    assert len(comexio.received_at("GET", STREAM_PATH)) == 1
+    assert str(page_info.value) == "Comexio served the login form, the session is not logged in (IO home page)"
+    assert str(snapshot_info.value) == (
+        "Comexio served the login form, the session is not logged in (Doorstation camera 7 snapshot)"
+    )
 
 
 async def test_get_doorstations_on_expired_session_raises_authentication_error(
@@ -322,9 +354,14 @@ async def test_get_doorstations_on_expired_session_raises_authentication_error(
 
 
 def _stream(*chunks: bytes, keep_open: bool = True) -> Handler:
-    """A handler that sends chunks of an MJPEG stream one by one and, like a camera, does not end the stream."""
+    """A handler that sends chunks of an MJPEG stream one by one and, like a camera, does not end the stream.
+
+    Only with the admin session: without it the handler serves the login form, as Comexio does for its admin pages.
+    """
 
     async def handler(request: web.Request) -> web.StreamResponse:
+        if not _logged_in(request):
+            return web.Response(text=LOGIN_PAGE, content_type="text/html")
         response = web.StreamResponse(
             headers={"Content-Type": f"multipart/x-mixed-replace;boundary={BOUNDARY.decode()}"}
         )
@@ -522,8 +559,18 @@ def test_every_restart_marker_inside_a_scan_belongs_to_it() -> None:
     assert first_jpeg_frame(frame) == frame
 
 
-def test_an_image_that_ends_before_any_scan_is_complete() -> None:
-    assert first_jpeg_frame(b"--x\r\n\r\n" + SOI + EOI + b"\r\n") == SOI + EOI
+@pytest.mark.parametrize(
+    ("frame", "eoi_code_at"),
+    [(SOI + EOI, 3), (SOI + APP0 + THUMBNAIL_APP1 + DQT + EOI, 3 + len(APP0 + THUMBNAIL_APP1 + DQT))],
+    ids=["right-after-start", "after-tables"],
+)
+def test_an_image_that_ends_before_any_scan_is_malformed(frame: bytes, eoi_code_at: int) -> None:
+    data = b"--x\r\n\r\n" + frame + b"\r\n"
+
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(data)
+
+    assert str(info.value) == f"Camera frame ends at offset {7 + eoi_code_at} before its first scan"
 
 
 def test_an_empty_segment_is_skipped() -> None:
@@ -623,17 +670,42 @@ async def test_a_stream_of_exactly_the_byte_cap_is_read_whole(monkeypatch: pytes
     assert str(info.value) == (
         "snapshot: the stream ('multipart/x-mixed-replace') ended after 64 bytes without a complete JPEG"
     )
+    assert resp.content.read == 2
 
 
 async def test_one_byte_over_the_cap_stops_the_read(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 64)
     # An image that never ends: its start, then a segment that claims to run on far beyond the cap.
-    resp: Any = _ChunkedResponse([SOI + b"\xff\xe1\xff\xff" + bytes(57), b"\x00", b"\x00"])
+    resp: Any = _ChunkedResponse([SOI + b"\xff\xe1\xff\xff" + bytes(57), b"\x00", b"\x00", b"\x00"])
 
     with pytest.raises(ComexioDataError) as info:
         await client_module._read_first_frame(resp, "snapshot")
 
     assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
+    assert resp.content.read == 3  # the chunk that crosses the cap is the last one read
+
+
+def _frame_crossing_the_cap(padding: int) -> Any:
+    """A stream whose second chunk crosses a cap of 2 * len(FRAME) and brings a whole frame, padding bytes late."""
+    return _ChunkedResponse([bytes(len(FRAME) + padding), FRAME + b"\x00" * 8])
+
+
+async def test_a_frame_that_ends_at_the_cap_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 2 * len(FRAME))
+    resp = _frame_crossing_the_cap(padding=0)
+
+    assert await client_module._read_first_frame(resp, "snapshot") == FRAME
+
+
+async def test_a_frame_that_ends_past_the_cap_is_too_large(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The chunk that crosses the cap brings the frame's EOI, but one byte past the cap: that byte does not count.
+    monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 2 * len(FRAME))
+    resp = _frame_crossing_the_cap(padding=1)
+
+    with pytest.raises(ComexioDataError) as info:
+        await client_module._read_first_frame(resp, "snapshot")
+
+    assert str(info.value) == f"snapshot: no complete JPEG in the first {2 * len(FRAME)} bytes of the stream"
 
 
 async def test_snapshot_of_a_malformed_frame_names_the_camera(logged_in: ComexioClient, comexio: FakeComexio) -> None:
@@ -730,6 +802,11 @@ async def test_a_timeout_other_than_the_snapshots_own_is_a_transport_error(
         '<div id="number_of_1">0</div>',
         '<input id="number_of_retries" value="3">',
         '<div id="number_of_1" class="x_number_of_type_30">0</div>',
+        '<div id="number_of_1" class="number_of_type_status">0</div>',
+        '<div id="number_of_1" class="number_of_type_30_">0</div>',
+        '<div id="number_of_1" class="number_of_type_">0</div>',
+        # A page that kept the other Doorstation attributes but lost data-camera_id has changed.
+        _element(data_extid="7", data_extname="EXT1"),
     ],
     ids=[
         "hidden-in-script",
@@ -740,6 +817,10 @@ async def test_a_timeout_other_than_the_snapshots_own_is_a_transport_error(
         "no-type-class",
         "input",
         "class-not-a-prefix",
+        "type-not-a-number",
+        "type-with-empty-suffix",
+        "type-missing",
+        "extension-element-without-counter",
     ],
 )
 def test_only_an_extension_counter_marks_the_io_home_page(html: str) -> None:
@@ -751,16 +832,19 @@ def test_only_an_extension_counter_marks_the_io_home_page(html: str) -> None:
     "html",
     [
         '<div id="number_of_1" class="tab number_of_type_30_2 big">4</div>',
-        _element(data_extid="7", data_extname="EXT1"),
+        '<div id="number_of_1" class="number_of_type_30_3">0</div>',
+        _element(data_extid="7", data_camera_id=""),
     ],
-    ids=["type-class-among-others", "extension-element-without-counter"],
+    ids=["type-class-among-others", "suffixed-type", "camera-element-without-counter"],
 )
-def test_a_counter_or_an_extension_element_marks_the_io_home_page(html: str) -> None:
+def test_a_counter_or_a_camera_element_marks_the_io_home_page(html: str) -> None:
     assert parse_doorstations(html) == {}
 
 
 def test_a_camera_element_without_an_extension_id_is_named_as_unusable() -> None:
+    html = _element(data_camera_id="7")
+
     with pytest.raises(ComexioDataError) as info:
-        parse_doorstations(_element(data_camera_id="7"))
+        parse_doorstations(html)
 
     assert str(info.value) == "None of the 1 Doorstation elements has a usable extension and camera id"
