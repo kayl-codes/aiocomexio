@@ -138,7 +138,7 @@ from aiocomexio import ComexioClient, session_kwargs
 
 
 async def report_1wire_problems(client: ComexioClient) -> None:
-    """Print the 1-Wire sensors that are not found or have a read error."""
+    """Print the sensors whose status says not found or read error (not the ones missing from it)."""
     if not await client.get_onewire_device_count():
         return
     for address, status in (await client.get_onewire_status()).items():
