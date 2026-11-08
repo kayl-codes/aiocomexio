@@ -431,7 +431,7 @@ def test_lua_escape_leaves_line_breaks_of_existing_fields_alone() -> None:
 def test_server_name_with_line_break_stays_a_valid_lua_string(parsed: dict[str, Any]) -> None:
     commands = build_webio_commands(_HOOK, parsed, WebioClass.MARKER, server="a\r\nb\0c")
 
-    assert all(', server="a\\r\\nb\\0c" }' in cmd["Data"] for cmd in commands)
+    assert all(', server="a\\r\\nb\\000c" }' in cmd["Data"] for cmd in commands)
 
 
 # --- 1-Wire ---
@@ -452,6 +452,17 @@ def test_build_onewire_webio_command_analog() -> None:
     )
     assert 'local d = { id="OT2", value=a, type="onewire", server="srv" }' in command["Data"]
     assert command["Protocol"] == WEBIO_PROTOCOL_HTTP
+
+
+def test_onewire_address_with_quotes_and_line_breaks_stays_a_valid_lua_string() -> None:
+    sensor = OneWireSensor(
+        address='O"T\\1\r\n\x001', config_id=1, prefix="OT", name="Sensor 1", hw_id="28-1", kind=TYPE_ANALOG
+    )
+
+    command = build_onewire_webio_command(sensor, _HOOK)
+
+    # NUL before a digit: \0001 (NUL, then "1"), not \01 (byte 1).
+    assert 'local d = { id="O\\"T\\\\1\\r\\n\\0001", value=a, type="onewire" }' in command["Data"]
 
 
 def test_build_onewire_webio_command_digital() -> None:

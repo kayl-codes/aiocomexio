@@ -63,6 +63,16 @@ def lua_escape(value: Any) -> str:
     return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _lua_escape_text(value: str) -> str:
+    """lua_escape plus line breaks and NUL, which a Lua string literal cannot hold raw.
+
+    For the server name and the 1-Wire address only: the older id, type and IO fields keep plain
+    lua_escape, so their commands on a Comexio server stay byte-identical to what the audit builds.
+    NUL becomes the three-digit escape \\000, since Lua would read a following digit into a shorter one.
+    """
+    return lua_escape(value).replace("\n", "\\n").replace("\r", "\\r").replace("\0", "\\000")
+
+
 def _check_server(server: str | None) -> None:
     """Raise TypeError unless server is a str or None."""
     if server is not None and not isinstance(server, str):
@@ -74,9 +84,7 @@ def _server_field(server: str | None) -> str:
     _check_server(server)
     if not server:
         return ""
-    # A Lua string literal cannot hold a raw line break or NUL, and a server name is free text.
-    escaped = lua_escape(server).replace("\n", "\\n").replace("\r", "\\r").replace("\0", "\\0")
-    return f', server="{escaped}"'
+    return f', server="{_lua_escape_text(server)}"'  # free text, may hold a line break
 
 
 def _webio_data_lua(payload: str) -> str:
@@ -337,7 +345,7 @@ def build_onewire_webio_command(
         raise ValueError(f"1-Wire sensor {sensor.address!r} has an unknown kind, no Web-IO command")
     is_ana = sensor.kind == TYPE_ANALOG
     min_v, max_v = (WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX) if is_ana else (0, 1)
-    safe_id = lua_escape(sensor.address)
+    safe_id = _lua_escape_text(sensor.address)
     lua = _webio_data_lua(f'id="{safe_id}", value=a, type="{WebioClass.ONEWIRE}"{_server_field(server)}')
     return _webio_command(
         name=onewire_command_name(sensor),
