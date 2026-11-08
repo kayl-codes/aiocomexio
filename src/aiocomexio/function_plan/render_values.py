@@ -14,6 +14,9 @@ from typing import Any
 # Web-IO commands, IOs, KNX objects or 1-Wire sensors): {"name": ..., "value": ..., ...}.
 type ItemsById = Mapping[str, Mapping[str, Any]]
 
+# The 1-Wire sensor kinds with a known pin type (OneWireSensor.kind; None and anything else: unknown).
+_ONEWIRE_KINDS = ("analog", "digital")
+
 
 def io_owner(io: Mapping[str, Any]) -> str:
     """The part before "#" in an IO's address label: its Quickbus device's name, else its extension's.
@@ -54,7 +57,9 @@ def _element_analog(
         # KNX objects (11) share the marker item shape (see api._process_source_items); 1-Wire
         # sensors (12) carry the same "type" ("analog"/"digital") as OneWireSensor.kind.
         source = (typed_sources[etype] or {}).get(ref_id)
-        return None if source is None else source.get("type") == "analog"
+        if source is None or (etype == 12 and source.get("type") not in _ONEWIRE_KINDS):
+            return None  # a 1-Wire sensor of unknown kind (e.g. OneWireSensor.kind None): neither analog nor digital
+        return source.get("type") == "analog"
     if etype == 1:
         return _io_analog(ios_by_id.get(ref_id))
     if etype == 10:

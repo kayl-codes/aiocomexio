@@ -496,13 +496,32 @@ def test_a_onewire_sensor_has_its_address_as_search_id() -> None:
     assert element_search_id(_ONEWIRE_ELEMENT["1"], {}) == ""
 
 
-@pytest.mark.parametrize(("kind", "hot"), [("digital", True), ("analog", False)])
-def test_only_a_digital_onewire_sensor_reading_1_is_hot(kind: str, hot: bool) -> None:
+@pytest.mark.parametrize(
+    ("kind", "analog", "hot"),
+    [("digital", False, True), ("analog", True, False), (None, None, False), ("analogue", None, False)],
+)
+def test_a_onewire_sensor_is_hot_only_when_digital_and_reading_1(
+    kind: str | None, analog: bool | None, hot: bool
+) -> None:
+    """A sensor of unknown kind is neither analog nor digital: no pins, never hot."""
     sensors = {"3": {"name": "OT3", "address": "OT3", "type": kind, "value": 1}}
 
     geo = _build_geometries(_ONEWIRE_ELEMENT, {}, {}, {}, {}, {}, None, sensors)["1"]
 
-    assert (geo["value_raw"], geo["hot"]) == (1, hot)
+    assert (geo["value_raw"], geo["analog"], geo["hot"], geo["pins"]) == (1, analog, hot, analog is not None)
+
+
+@pytest.mark.parametrize("etype", [2, 11], ids=["marker", "knx"])
+@pytest.mark.parametrize("item", [{"name": "X", "value": 1}, {"name": "X", "type": None, "value": 1}])
+def test_a_marker_or_knx_object_without_a_type_stays_digital(etype: int, item: dict[str, Any]) -> None:
+    """Only a 1-Wire sensor of unknown kind loses its pins; markers and KNX objects default to digital."""
+    elements = {"1": {"reference": {"type": etype, "ref_id": 3}, "name": "", "position_x": 0, "position_y": 0}}
+    items = {"3": item}
+    markers, knx = (items, None) if etype == 2 else ({}, items)
+
+    geo = _build_geometries(elements, {}, {}, markers, {}, {}, knx)["1"]
+
+    assert (geo["analog"], geo["hot"], geo["pins"]) == (False, True, True)
 
 
 @pytest.mark.parametrize(
