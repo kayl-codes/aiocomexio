@@ -115,13 +115,15 @@ The three 1-Wire calls all need the admin session (`login()` first):
   status, and a sensor added after both is seen by the next poll.
 - `get_onewire_sensors()` returns the active configured sensors keyed by address (`OT1`, `OH3`, …);
   inactive entries are left out. An active entry without a usable `Prefix` or `Id` is skipped (and
-  logged); if active entries exist but none is usable, the call raises `ComexioDataError`. It costs
-  one config fetch.
+  logged); if active entries exist but none is usable, the call raises `ComexioDataError`. Two
+  active entries with the same address collapse to one: the later one wins (logged). It costs one
+  config fetch.
 - `get_onewire_status()` returns the live state of the sensors Comexio reports, keyed by address.
   It is read from Comexio's 1-Wire monitor, which is not an official interface, so a changed answer
   raises `ComexioDataError`. An item without an address is skipped (and logged), so a sensor can be
   missing from the map; if the answer has items but none has an address, the call raises
-  `ComexioDataError`. Compare the keys with `get_onewire_sensors()` if you need every sensor.
+  `ComexioDataError`. Two items with the same address collapse to one, the later one wins (logged).
+  Compare the keys with `get_onewire_sensors()` if you need every sensor.
 
 Each `OneWireStatus` has `visible` (False: the sensor was not found), `online` (False: read error,
 for example a CRC error) and `value` (the reading as a float). `value` is `None` if there is none,
