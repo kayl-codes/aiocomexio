@@ -452,11 +452,12 @@ def build_webio_commands(
     expose — they need no command pushing their values.
 
     parse_config does not read 1-Wire sensors: their commands come from parsed_data["onewire"],
-    the address -> OneWireSensor mapping of get_onewire_sensors / parse_onewire_config, which the
-    consumer adds itself (absent or None: no 1-Wire commands; any other value than such a mapping
+    the address -> OneWireSensor mapping of parse_onewire_config (each sensor under its own address),
+    which the consumer adds itself, from the same config fetch as the rest of parsed_data, so both
+    describe the same configuration (absent or None: no 1-Wire commands; any other value than such a mapping
     raises TypeError when webio_class is None or ONEWIRE, and is logged as an error by a build of
     another class, which then goes on without the sensors). A sensor of unknown kind gets no command
-    and is logged (see build_onewire_webio_command).
+    and is logged at warning (build_onewire_webio_command would raise ValueError for it).
     """
     _check_server(server)  # also when there is no command to build, so a bad value never goes unnoticed
     commands: list[tuple[WebioClass, dict[str, Any]]] = [
@@ -517,7 +518,9 @@ def _onewire_commands(
     sensors = parsed_data.get("onewire")
     if sensors is None:
         return []
-    if not isinstance(sensors, Mapping) or not all(isinstance(s, OneWireSensor) for s in sensors.values()):
+    if not isinstance(sensors, Mapping) or not all(
+        isinstance(s, OneWireSensor) and s.address == address for address, s in sensors.items()
+    ):
         if webio_class not in (None, WebioClass.ONEWIRE):
             _LOGGER.error(
                 "%s; the %s commands are built without 1-Wire sensors and not checked for name collisions with them",

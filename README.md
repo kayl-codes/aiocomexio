@@ -159,8 +159,10 @@ asyncio.run(main(stored_fingerprint="<the value setup() returned>"))
 ```
 
 The status is for spotting broken sensors. To get the values pushed, build Web-IO commands for the
-sensors. `config.parse_config` does not read them, so put the result of `get_onewire_sensors()`
-under the key `"onewire"` of the parsed config. Then `webio.build_webio_commands` (or
+sensors. `config.parse_config` does not read them, so add them under the key `"onewire"` of the
+parsed config. Take them from the same config fetch, with
+`onewire.parse_onewire_config(raw.variables["FubModules"])`: `get_onewire_sensors()` fetches a config
+of its own, which can differ if the 1-Wire setup changes in between. Then `webio.build_webio_commands` (or
 `generate_webio_json` with `WebioClass.ONEWIRE`, class `<webio name> [1Wire]`) builds one command per
 sensor:
 

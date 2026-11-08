@@ -530,11 +530,21 @@ def test_build_webio_commands_without_the_onewire_key_builds_no_onewire_command(
     assert build_webio_commands(_HOOK, parsed, WebioClass.ONEWIRE) == []
 
 
-@pytest.mark.parametrize(
-    "onewire",
-    [[], "", ["OT1"], {"OT1": {"address": "OT1", "kind": "analog"}}],
-    ids=["empty list", "empty str", "list", "dict value"],
-)
+_BAD_ONEWIRE_VALUES = [
+    pytest.param([], id="empty list"),
+    pytest.param("", id="empty str"),
+    pytest.param(["OT1"], id="list"),
+    pytest.param({"OT1": {"address": "OT1", "kind": "analog"}}, id="dict value"),
+    pytest.param({"OT2": _sensor(2, "OT", TYPE_ANALOG), "OT1": "x"}, id="one value not a sensor"),
+    pytest.param({"OT9": _sensor(2, "OT", TYPE_ANALOG)}, id="sensor under another address"),
+    pytest.param(
+        {"OT2": _sensor(2, "OT", TYPE_ANALOG), "OH9": _sensor(3, "OH", TYPE_ANALOG)},
+        id="one of two sensors under another address",
+    ),
+]
+
+
+@pytest.mark.parametrize("onewire", _BAD_ONEWIRE_VALUES)
 @pytest.mark.parametrize("webio_class", [None, WebioClass.ONEWIRE])
 def test_build_webio_commands_refuses_onewire_data_of_another_type(
     parsed: dict[str, Any], onewire: Any, webio_class: WebioClass | None
@@ -546,17 +556,7 @@ def test_build_webio_commands_refuses_onewire_data_of_another_type(
         build_webio_commands(_HOOK, source, webio_class)
 
 
-@pytest.mark.parametrize(
-    "onewire",
-    [
-        [],
-        "",
-        ["OT1"],
-        {"OT1": {"address": "OT1", "kind": "analog"}},
-        {"OT2": _sensor(2, "OT", TYPE_ANALOG), "OT1": "x"},
-    ],
-    ids=["empty list", "empty str", "list", "dict value", "one value not a sensor"],
-)
+@pytest.mark.parametrize("onewire", _BAD_ONEWIRE_VALUES)
 @pytest.mark.parametrize(
     ("webio_class", "label"),
     [(WebioClass.MARKER, "Marker"), (WebioClass.IO, "IO"), (WebioClass.KNX, "KNX"), (WebioClass.QUICKBUS, "Quickbus")],
