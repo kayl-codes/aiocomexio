@@ -3165,16 +3165,17 @@ def parse_doorstations(io_home_html: str) -> dict[int, Doorstation]:
 
     Every extension block of the page, BASE included, carries a device counter (see _EXTENSION_COUNTER_ID_PREFIX).
     A page with such counters but no element with data-camera_id has no Doorstation and gives an empty result. A
-    page with neither counters nor elements with data-camera_id is a changed page, not an installation without
-    Doorstations: that raises ComexioDataError, so a caller never drops its cameras on a silent empty result; other
-    Doorstation attributes alone (data-extid) do not count, a page that kept them but lost data-camera_id has
-    changed. Limit: a firmware that renames data-camera_id but keeps the counters looks like an installation
-    without Doorstations.
+    page with neither counters nor an element with a non-empty data-camera_id is a changed page, not an installation
+    without Doorstations: that raises ComexioDataError, so a caller never drops its cameras on a silent empty result;
+    other Doorstation attributes alone (data-extid, an empty data-camera_id) do not count, a page that kept them but
+    lost its camera ids has changed. Limit: a firmware that renames data-camera_id but keeps the counters looks like
+    an installation without Doorstations.
     """
     parser = _DoorstationParser()
     parser.feed(io_home_html)
     parser.close()
-    if not parser.saw_extension_counter and not parser.elements:
+    names_a_camera = any(dict(element).get(CAMERA_ID_ATTRIBUTE) for element in parser.elements)
+    if not parser.saw_extension_counter and not names_a_camera:
         raise ComexioDataError("IO home page has no extension counters, the Doorstations are unknown")
     return doorstations_from_attributes(dict(element) for element in parser.elements)
 
@@ -3183,6 +3184,7 @@ async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
     """The first complete JPEG of a stream response; see ComexioClient.get_doorstation_snapshot."""
     received = bytearray()
     reader = JpegFrameReader()
+    over_cap = False
     async for chunk in resp.content.iter_any():
         # Bytes past the cap are not kept: a frame that ends beyond it is too large, like no frame at all.
         kept = chunk[: _MAX_SNAPSHOT_BYTES - len(received)]
@@ -3194,9 +3196,12 @@ async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
         if JPEG_EOI in new_bytes and (frame := _complete_frame(reader, received, what)) is not None:
             return frame
         if over_cap:
-            raise ComexioDataError(f"{what}: no complete JPEG in the first {_MAX_SNAPSHOT_BYTES} bytes of the stream")
+            break
+    # A login form in the kept bytes is an expired session, also when the stream ran past the cap.
     if _LOGIN_FORM_SUBMIT_MARKER.encode() in received:
         raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
+    if over_cap:
+        raise ComexioDataError(f"{what}: no complete JPEG in the first {_MAX_SNAPSHOT_BYTES} bytes of the stream")
     raise ComexioDataError(
         f"{what}: the stream ({resp.content_type!r}) ended after {len(received)} bytes without a complete JPEG"
     )

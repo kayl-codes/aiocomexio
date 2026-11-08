@@ -532,6 +532,25 @@ async def test_get_doorstations_of_a_changed_page_raises_instead_of_finding_none
         await logged_in.get_doorstations()
 
 
+def test_a_page_whose_camera_elements_name_no_camera_and_no_counter_is_a_changed_page() -> None:
+    html = '<div data-extid="3" data-extname="Tuer" data-camera_id=""></div><div data-camera_id=""></div>'
+
+    with pytest.raises(ComexioDataError) as info:
+        parse_doorstations(html)
+
+    assert str(info.value) == "IO home page has no extension counters, the Doorstations are unknown"
+
+
+def test_one_element_that_names_a_camera_marks_the_page_beside_empty_camera_ids() -> None:
+    html = f'<div data-extid="3" data-camera_id=""></div>{_doorstation_tab("7", "Haustür")}'
+
+    assert parse_doorstations(html) == {7: Doorstation(ext_id=7, camera_id=7, name="Haustür")}
+
+
+def test_camera_elements_without_a_camera_beside_a_counter_are_no_doorstation() -> None:
+    assert parse_doorstations(f'{BASE_BLOCK}<div data-extid="3" data-camera_id=""></div>') == {}
+
+
 async def test_get_doorstations_of_a_page_without_doorstations_finds_none(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
@@ -931,6 +950,29 @@ async def test_one_byte_over_the_cap_stops_the_read(monkeypatch: pytest.MonkeyPa
     assert resp.content.read == 3  # the chunk that crosses the cap is the last one read
 
 
+async def test_a_login_form_that_runs_past_the_cap_is_an_expired_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    page = LOGIN_PAGE.encode()
+    monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", len(page) + 8)
+    resp: Any = _ChunkedResponse([page, bytes(16), bytes(16)])
+
+    with pytest.raises(ComexioAuthenticationError) as info:
+        await client_module._read_first_frame(resp, "snapshot")
+
+    assert str(info.value) == "Comexio served the login form, the session is not logged in (snapshot)"
+    assert resp.content.read == 2  # the read still stops at the chunk that crosses the cap
+
+
+async def test_a_login_form_past_the_cap_is_not_seen(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only the kept bytes count: a login form that starts beyond the cap is a stream without a frame.
+    monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 64)
+    resp: Any = _ChunkedResponse([bytes(64), LOGIN_PAGE.encode()])
+
+    with pytest.raises(ComexioDataError) as info:
+        await client_module._read_first_frame(resp, "snapshot")
+
+    assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
+
+
 def _frame_crossing_the_cap(padding: int) -> Any:
     """A stream whose second chunk crosses a cap of 2 * len(FRAME) and brings a whole frame, padding bytes late."""
     return _ChunkedResponse([bytes(len(FRAME) + padding), FRAME + b"\x00" * 8])
@@ -1104,11 +1146,10 @@ def test_only_an_extension_counter_marks_the_io_home_page(html: str) -> None:
     [
         '<div id="number_of_1" class="tab number_of_type_30_2 big">4</div>',
         '<div id="number_of_1" class="number_of_type_30_3">0</div>',
-        _element(data_extid="7", data_camera_id=""),
     ],
-    ids=["type-class-among-others", "suffixed-type", "camera-element-without-counter"],
+    ids=["type-class-among-others", "suffixed-type"],
 )
-def test_a_counter_or_a_camera_element_marks_the_io_home_page(html: str) -> None:
+def test_a_counter_among_other_or_with_suffixed_classes_marks_the_io_home_page(html: str) -> None:
     assert parse_doorstations(html) == {}
 
 

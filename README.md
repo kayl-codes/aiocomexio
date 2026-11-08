@@ -197,7 +197,7 @@ extension. The camera calls need the admin session (`login()` first):
   Each `Doorstation` has `ext_id`, `camera_id` and `name` (the extension name, `None` if the page
   carries none). An empty map means the page lists extensions but no Doorstation; a page with neither
   the device counters of its extension blocks (the ones `get_onewire_device_count()` reads) nor an
-  element with `data-camera_id` raises `ComexioDataError`. Elements whose ids are not positive integers are skipped (and logged); if there are
+  element with a non-empty `data-camera_id` raises `ComexioDataError`. Elements whose ids are not positive integers are skipped (and logged); if there are
   such elements but none is usable, the call raises `ComexioDataError`. Detection follows the IO home page
   of Comexio OS 11.0.2: the elements of a Doorstation tab carry `data-extid`, `data-extname` and
   `data-camera_id`.
