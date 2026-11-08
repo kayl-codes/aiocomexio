@@ -160,9 +160,12 @@ def _fmt_value(value: Any) -> str:
 
 
 def _strip_prefix(text: str, prefix: str) -> str:
-    """Drop a leading id prefix from a schema-formatted name (best effort)."""
+    """Drop a leading id prefix from a schema-formatted name (best effort).
+
+    Only a whole prefix: "OT10 Boiler" keeps its "OT1", since the next character continues the id.
+    """
     text = text.strip()
-    if prefix and text.startswith(prefix):
+    if prefix and text.startswith(prefix) and not text[len(prefix) : len(prefix) + 1].isalnum():
         return text[len(prefix) :].strip() or text
     return text
 

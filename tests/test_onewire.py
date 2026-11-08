@@ -136,6 +136,16 @@ def test_config_same_id_under_two_prefixes_keeps_both_with_a_warning(caplog: pyt
     ]
 
 
+def test_shared_id_warning_is_bounded_for_a_long_prefix(caplog: pytest.LogCaptureFixture) -> None:
+    modules = {"12": {"1": _entry(3, "O" * 100_000), "2": _entry(3, "OH")}}
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        parse_onewire_config(modules)
+
+    assert len(caplog.records) == 1
+    assert len(caplog.records[0].getMessage()) < 500
+
+
 def test_config_with_distinct_ids_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
         parse_onewire_config({"12": {"1": _entry(3, "OT"), "2": _entry(4, "OH")}})

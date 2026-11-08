@@ -23,7 +23,7 @@ from aiocomexio.function_plan import (
 )
 from aiocomexio.function_plan.render_geometry import _build_geometries
 from aiocomexio.function_plan.render_labels import strip_xml_forbidden, with_block_values
-from aiocomexio.function_plan.render_values import _fmt_value
+from aiocomexio.function_plan.render_values import _fmt_value, _strip_prefix
 from tests.common import FIXTURES_DIR, load_json_fixture
 
 
@@ -479,8 +479,10 @@ def test_a_onewire_sensor_without_its_entry_renders_by_config_id(sensors: dict[s
     [
         ({"name": "Keller", "address": "OT3", "type": "analog", "value": None}, ["OT3", "Keller"]),
         ({"name": "Keller", "type": "analog"}, ["1-Wire", "Keller"]),
+        ({"name": "OT30 Boiler", "address": "OT3", "type": "analog"}, ["OT3", "OT30 Boiler"]),
+        ({"name": "OT3/Boiler", "address": "OT3", "type": "analog"}, ["OT3", "/Boiler"]),
     ],
-    ids=["name without the address", "no address"],
+    ids=["name without the address", "no address", "address continued by a digit", "address then a separator"],
 )
 def test_a_onewire_pill_keeps_a_name_that_does_not_start_with_the_address(
     sensor: dict[str, Any], texts: list[str]
@@ -537,6 +539,24 @@ def test_a_non_finite_reading_shows_as_no_value(value: float) -> None:
 def test_fmt_value_hides_only_non_finite_numbers(value: object, text: str) -> None:
     """Shared by every pill (marker, KNX, IO, 1-Wire) and the t1/t2 block labels."""
     assert _fmt_value(value) == text
+
+
+@pytest.mark.parametrize(
+    ("name", "prefix", "rest"),
+    [
+        ("M1 Licht", "M1", "Licht"),
+        ("M10 Licht", "M1", "M10 Licht"),
+        ("BASE I1 Taster", "BASE I1", "Taster"),
+        ("BASE I10 Taster", "BASE I1", "BASE I10 Taster"),
+        ("OT3 Boiler", "OT3", "Boiler"),
+        ("OT3/Boiler", "OT3", "/Boiler"),
+        ("M1", "M1", "M1"),
+        ("M5Pump", "M5", "M5Pump"),  # a schema without a separator keeps the full name, like any custom schema
+    ],
+)
+def test_strip_prefix_drops_only_a_whole_id(name: str, prefix: str, rest: str) -> None:
+    """Shared by the marker, KNX, IO and 1-Wire pills: an id continued by a digit or letter is another id."""
+    assert _strip_prefix(name, prefix) == rest
 
 
 def test_flow_diagram_names_onewire_sensors_and_knx_objects_from_their_maps() -> None:

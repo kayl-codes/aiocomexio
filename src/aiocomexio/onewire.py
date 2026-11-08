@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .config import TYPE_ANALOG, TYPE_DIGITAL, _strict_id, iter_group
+from .config import TYPE_ANALOG, TYPE_DIGITAL, _strict_id, iter_group, log_excerpt
 from .exceptions import ComexioDataError
 
 _LOGGER = logging.getLogger(__name__)
@@ -269,7 +269,7 @@ def _warn_on_shared_ids(sensors: Mapping[str, OneWireSensor]) -> None:
         if len(addresses) > 1:
             _LOGGER.warning(
                 "1-Wire sensors %s share the Id %d, a function plan element shows only one of them",
-                ", ".join(sorted(addresses)),
+                log_excerpt(sorted(addresses)),  # a Prefix has no length limit
                 config_id,
             )
 
