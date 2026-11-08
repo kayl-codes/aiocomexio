@@ -15,8 +15,8 @@ provide the communication layer of the
 > Quantum modules with their configs, run / stop
 > (`ComexioClient`), admin page scraping (`aiocomexio.scrape`), config parsing
 > (`aiocomexio.config`, including Quickbus devices such as Multitouch panels and their IOs), KNX
-> DPT tables (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`, with a separate
-> class for Quickbus IOs), function plan rendering
+> DPT tables (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`, with separate
+> classes for Quickbus IOs and 1-Wire sensors), function plan rendering
 > (with block settings in the hover text) and diffing (`aiocomexio.function_plan`) and the
 > block-type reference catalog that resolves Comexio catalog ids per server by stable key
 > (`aiocomexio.reference_catalog`). The API may still change.
@@ -157,6 +157,20 @@ async def main(stored_fingerprint: str) -> None:
 
 asyncio.run(main(stored_fingerprint="<the value setup() returned>"))
 ```
+
+The status is for spotting broken sensors. To get the values pushed, build Web-IO commands for the
+sensors. `config.parse_config` does not read them, so put the result of `get_onewire_sensors()`
+under the key `"onewire"` of the parsed config. Then `webio.build_webio_commands` (or
+`generate_webio_json` with `WebioClass.ONEWIRE`, class `<webio name> [1Wire]`) builds one command per
+sensor:
+
+- The command is named `HA 1Wire <address>`.
+- It pushes `{"id": "<address>", "value": …, "type": "onewire"}`.
+- An analog sensor gets the generic analog range and a digital one gets 0/1.
+- A sensor of unknown kind gets no command.
+
+In a function plan, a sensor is element type 12 with its `config_id` as `ref_id`. Wire it to its
+command like a marker.
 
 ## Development
 

@@ -1,6 +1,6 @@
 """Builders for the Web-IO commands and class templates a consumer uploads to the Comexio server.
 
-Each marker, IO and KNX object gets one Web-IO command that pushes its value to a webhook on
+Each marker, IO, KNX object and 1-Wire sensor gets one Web-IO command that pushes its value to a webhook on
 change; each K-element wired to a bridge marker additionally gets an API-loopback command
 (see build_knx_loopback_webio_command). Pure logic: nothing here touches the network.
 """
@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Callable, Collection, Mapping
 from typing import Any
 
-from .config import TYPE_ANALOG, log_excerpt
+from .config import TYPE_ANALOG, TYPE_DIGITAL, log_excerpt
 from .const import (
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_INT16_DANGER_ZONE,
@@ -24,6 +24,7 @@ from .const import (
     knx_loopback_command_name,
 )
 from .knx import KNX_DPT_ANALOG_RANGES, resolve_knx_dpt
+from .onewire import OneWireSensor
 
 __all__ = [
     "CONTENT_TYPE_JSON",
@@ -32,6 +33,7 @@ __all__ = [
     "build_io_webio_command",
     "build_knx_loopback_webio_command",
     "build_marker_webio_command",
+    "build_onewire_webio_command",
     "build_quickbus_webio_command",
     "build_webio_commands",
     "generate_webio_json",
@@ -39,6 +41,7 @@ __all__ = [
     "knx_loopback_range",
     "knx_webio_range",
     "lua_escape",
+    "onewire_command_name",
     "quickbus_command_name",
     "safe_webio_range",
 ]
@@ -303,6 +306,48 @@ def build_quickbus_webio_command(
     )
 
 
+# The 1-Wire sensor kinds that get a Web-IO command.
+_ONEWIRE_KINDS = frozenset({TYPE_ANALOG, TYPE_DIGITAL})
+
+
+def onewire_command_name(sensor: OneWireSensor) -> str:
+    """Web-IO command name of a 1-Wire sensor, e.g. "HA 1Wire OT1".
+
+    The address is unique on a server and stays the same when the sensor is renamed; a sensor
+    whose address changes (another prefix) gets a new command, just as it gets a new entity.
+    """
+    return f"HA 1Wire {sensor.address}"
+
+
+def build_onewire_webio_command(
+    sensor: OneWireSensor, webhook_path: str, *, protocol: int = WEBIO_PROTOCOL_HTTP, server: str | None = None
+) -> dict[str, Any]:
+    """Build the Web-IO command dict for a single 1-Wire sensor.
+
+    The payload names the sensor by its address (``id="OT1", type="onewire"``), the key
+    get_onewire_sensors and get_onewire_status use too. An analog sensor gets the generic
+    WEBIO_MARKER_ANALOG_MIN/MAX range (temperature, humidity, pressure, illuminance and supply
+    voltages all fit in it), a digital one 0/1. A sensor of any other kind (None: unknown) raises
+    ValueError: a guessed command type would push wrong values. protocol, server: see
+    build_marker_webio_command.
+    """
+    if sensor.kind not in _ONEWIRE_KINDS:
+        raise ValueError(f"1-Wire sensor {sensor.address!r} has an unknown kind, no Web-IO command")
+    is_ana = sensor.kind == TYPE_ANALOG
+    min_v, max_v = (WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX) if is_ana else (0, 1)
+    safe_id = lua_escape(sensor.address)
+    lua = _webio_data_lua(f'id="{safe_id}", value=a, type="{WebioClass.ONEWIRE}"{_server_field(server)}')
+    return _webio_command(
+        name=onewire_command_name(sensor),
+        type_id=2 if is_ana else 1,
+        min_v=min_v,
+        max_v=max_v,
+        data=lua,
+        webhook_path=webhook_path,
+        protocol=protocol,
+    )
+
+
 def build_knx_loopback_webio_command(
     *,
     k_id: int,
@@ -356,12 +401,18 @@ def build_knx_loopback_webio_command(
     }
 
 
-WebhookPath = str | Callable[[WebioClass, Mapping[str, Any]], str]
-"""A Web-IO webhook path: one for every command, or computed per command from its class and its item."""
+WebhookPath = str | Callable[[WebioClass, Mapping[str, Any] | OneWireSensor], str]
+"""A Web-IO webhook path: one for every command, or computed per command from its class and its item.
+
+The item is the parsed marker, KNX object or IO dict, or the OneWireSensor of a 1-Wire command.
+"""
 
 
 def _command_path(
-    webhook_path: WebhookPath, webio_class: WebioClass, item: Mapping[str, Any], wanted: WebioClass | None
+    webhook_path: WebhookPath,
+    webio_class: WebioClass,
+    item: Mapping[str, Any] | OneWireSensor,
+    wanted: WebioClass | None,
 ) -> str:
     """The webhook path of one command: webhook_path itself, or what it returns for the class and item.
 
@@ -392,11 +443,16 @@ def build_webio_commands(
 
     webhook_path is the URL path every command POSTs to, over protocol (WEBIO_PROTOCOL_HTTP or
     WEBIO_PROTOCOL_HTTPS) — or a callable that returns the path of one command from its class and its
-    parsed item (a marker, KNX object or IO dict), for a path of its own per command. server is
-    added to every payload (see build_marker_webio_command). webio_class restricts the result to
-    one Web-IO class, for a per-class bulk upload (generate_webio_json); None returns all.
-    ignored_marker_ids / ignored_knx_ids exclude items the consumer does not expose — they
-    need no command pushing their values.
+    parsed item (a marker, KNX object or IO dict, or a OneWireSensor), for a path of its own per
+    command. server is added to every payload (see build_marker_webio_command). webio_class
+    restricts the result to one Web-IO class, for a per-class bulk upload (generate_webio_json);
+    None returns all. ignored_marker_ids / ignored_knx_ids exclude items the consumer does not
+    expose — they need no command pushing their values.
+
+    parse_config does not read 1-Wire sensors: their commands come from parsed_data["onewire"],
+    the address -> OneWireSensor mapping of get_onewire_sensors / parse_onewire_config, which the
+    consumer adds itself (absent or None: no 1-Wire commands, any other value than such a mapping:
+    TypeError). A sensor of unknown kind gets no command and is logged (see build_onewire_webio_command).
     """
     _check_server(server)  # also when there is no command to build, so a bad value never goes unnoticed
     commands: list[tuple[WebioClass, dict[str, Any]]] = [
@@ -432,8 +488,49 @@ def build_webio_commands(
         for knx_item in parsed_data.get("knx", [])
         if not _is_ignored(knx_item["id"], ignored_knx_ids)
     )
+    commands.extend(_onewire_commands(webhook_path, parsed_data, webio_class, protocol=protocol, server=server))
     # Collisions are found across all classes, so a per-class upload leaves out the same ones.
     return [cmd for cls, cmd in _without_colliding_names(commands) if webio_class in (None, cls)]
+
+
+def _onewire_commands(
+    webhook_path: WebhookPath,
+    parsed_data: Mapping[str, Any],
+    webio_class: WebioClass | None,
+    *,
+    protocol: int,
+    server: str | None,
+) -> list[tuple[WebioClass, dict[str, Any]]]:
+    """The 1-Wire commands of parsed_data["onewire"] by config id; a sensor of unknown kind is skipped (logged).
+
+    Absent or None means no 1-Wire sensors; anything but a mapping of OneWireSensor raises TypeError,
+    so a wrong value never passes as an installation without sensors.
+    """
+    sensors = parsed_data.get("onewire")
+    if sensors is None:
+        return []
+    if not isinstance(sensors, Mapping) or not all(isinstance(s, OneWireSensor) for s in sensors.values()):
+        raise TypeError('parsed_data["onewire"] must map addresses to OneWireSensor')
+    known = sorted((s for s in sensors.values() if s.kind in _ONEWIRE_KINDS), key=lambda s: (s.config_id, s.address))
+    if unknown := sorted(s.address for s in sensors.values() if s.kind not in _ONEWIRE_KINDS):
+        # Like a name collision, logged on every build: the sensor stays without pushed values until fixed.
+        _LOGGER.warning(
+            "%d 1-Wire sensors are of unknown kind (neither analog nor digital) and get no Web-IO command: %s",
+            len(unknown),
+            log_excerpt(unknown),
+        )
+    return [
+        (
+            WebioClass.ONEWIRE,
+            build_onewire_webio_command(
+                sensor,
+                _command_path(webhook_path, WebioClass.ONEWIRE, sensor, webio_class),
+                protocol=protocol,
+                server=server,
+            ),
+        )
+        for sensor in known
+    ]
 
 
 def _is_ignored(item_id: Any, ignored_ids: Collection[int] | None) -> bool:

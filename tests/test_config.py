@@ -335,6 +335,32 @@ def test_legacy_single_webio_device_logs_migration_hint(caplog: pytest.LogCaptur
     parse_config({"WebDevices": {"1": {"Name": "HomeAssistant", "Ip": "192.168.1.20"}}})
 
     assert "Found a legacy Web-IO device named 'HomeAssistant'" in caplog.text
+    # Only the split classes are named: a pre-split install never had a Quickbus or 1-Wire class.
+    assert "missing class(es): Marker, IO, KNX." in caplog.text
+
+
+def _devices(*suffixes: str) -> dict[str, Any]:
+    names = ["HomeAssistant", *(f"HomeAssistant {suffix}" for suffix in suffixes)]
+    return {str(i): {"Name": name, "Ip": "192.168.1.20", "WebDeviceBaseId": i} for i, name in enumerate(names, start=1)}
+
+
+def test_legacy_hint_ignores_the_classes_added_after_the_split(caplog: pytest.LogCaptureFixture) -> None:
+    """A missing Quickbus or 1-Wire class says nothing about a legacy install: no hint for them alone."""
+    parse_config({"WebDevices": _devices("[M]", "[IO]", "[KNX]")})
+
+    assert "legacy Web-IO device" not in caplog.text
+
+
+def test_legacy_hint_names_only_the_missing_split_classes(caplog: pytest.LogCaptureFixture) -> None:
+    parse_config({"WebDevices": _devices("[M]", "[IO]")})
+
+    assert "missing class(es): KNX." in caplog.text
+
+
+def test_onewire_class_device_is_assigned_by_its_suffix() -> None:
+    result = parse_config({"WebDevices": _devices("[1Wire]")})
+
+    assert result["webio_devices"][WebioClass.ONEWIRE]["device_id"] == "2"
 
 
 def test_options_override_names_and_schema() -> None:
