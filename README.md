@@ -175,7 +175,10 @@ sensor:
 In a function plan, a sensor is element type 12 with its `config_id` as `ref_id`. Wire it to its
 command like a marker. To show the sensors by name in `function_plan.render_plan_svg`, pass
 `onewire_by_id`: the sensors keyed by `str(config_id)`, each `{"name": …, "address": …, "type":
-sensor.kind, "value": …}`. Without it a sensor renders as `1-Wire ref=<config_id>`.
+sensor.kind, "value": …}`. Without it a sensor renders as `1-Wire ref=<config_id>`. A plan
+cannot tell apart sensors that share an `Id` under different prefixes (`parse_onewire_config` logs
+them): leave such an Id out of the map, and its elements render as `1-Wire ref=<config_id>`
+instead of showing one of the sensors.
 `render_flow_svg` takes the same map (and `knx_by_id`) for its box labels. A value that is not
 finite (`nan`, `inf`) shows as no value.
 
