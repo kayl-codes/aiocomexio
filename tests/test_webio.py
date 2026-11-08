@@ -593,19 +593,32 @@ def test_onewire_sensors_leave_the_other_classes_untouched(parsed: dict[str, Any
     assert not any(isinstance(item, OneWireSensor) for _, item in asked)
 
 
+@pytest.mark.parametrize(
+    ("marker_name", "logged_names"),
+    [("1Wire OT2", "1 Web-IO command names"), ("1wire ot2", "2 Web-IO command names")],
+    ids=["same case", "other case"],
+)
 def test_a_onewire_command_name_colliding_with_a_marker_drops_both(
-    parsed: dict[str, Any], caplog: pytest.LogCaptureFixture
+    parsed: dict[str, Any], caplog: pytest.LogCaptureFixture, marker_name: str, logged_names: str
 ) -> None:
-    clash = {"id": "99", "name": "1Wire OT2", "type": "analog"}
+    """Names collide ignoring case, like every other Web-IO command name."""
+    clash = {"id": "99", "name": marker_name, "type": "analog"}
     source = {**_source(parsed, WebioClass.ONEWIRE), "markers": [*parsed["markers"], clash]}
 
-    for webio_class in (WebioClass.ONEWIRE, WebioClass.MARKER):
-        assert "HA 1Wire OT2" not in [cmd["Name"] for cmd in build_webio_commands(_HOOK, source, webio_class)]
+    onewire_commands = build_webio_commands(_HOOK, source, WebioClass.ONEWIRE)
+    marker_commands = build_webio_commands(_HOOK, source, WebioClass.MARKER)
+
+    # Only the two colliding commands go: the other sensors and markers stay.
+    assert [cmd["Name"] for cmd in onewire_commands] == ["HA 1Wire OH3", "HA 1Wire OIB10"]
+    assert marker_commands == build_webio_commands(_HOOK, parsed, WebioClass.MARKER)
+    assert marker_commands
+    names = sorted({"HA 1Wire OT2", f"HA {marker_name}"})
     collision = (
         logging.WARNING,
-        "1 Web-IO command names are generated more than once, those commands are left out "
-        "(rename the item in Comexio or change the naming schema): HA 1Wire OT2",
+        f"{logged_names} are generated more than once, those commands are left out "
+        f"(rename the item in Comexio or change the naming schema): {', '.join(names)}",
     )
+    # Logged once per build: the ONEWIRE and the MARKER build above.
     assert _webio_log(caplog) == [collision, collision]
 
 
