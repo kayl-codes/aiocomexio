@@ -172,7 +172,9 @@ sensor:
 - A sensor of unknown kind gets no command.
 
 In a function plan, a sensor is element type 12 with its `config_id` as `ref_id`. Wire it to its
-command like a marker.
+command like a marker. To show the sensors by name in `function_plan.render_plan_svg`, pass
+`onewire_by_id`: the sensors keyed by `str(config_id)`, each `{"name": …, "address": …, "type":
+sensor.kind, "value": …}`. Without it a sensor renders as `1-Wire ref=<config_id>`.
 
 ## Development
 

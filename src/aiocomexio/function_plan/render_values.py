@@ -7,11 +7,11 @@ goes in its pill" — no SVG markup and no geometry/coordinate math (see
 render_geometry.py for that).
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 # Object id (str, as in an element's reference.ref_id) -> item of one lookup source (markers,
-# Web-IO commands, IOs or KNX objects): {"name": ..., "value": ..., ...}.
+# Web-IO commands, IOs, KNX objects or 1-Wire sensors): {"name": ..., "value": ..., ...}.
 type ItemsById = Mapping[str, Mapping[str, Any]]
 
 
@@ -43,14 +43,17 @@ def _element_analog(
     webio_by_id: ItemsById,
     ios_by_id: ItemsById,
     knx_by_id: ItemsById | None = None,
+    onewire_by_id: ItemsById | None = None,
 ) -> bool | None:
     """Analog/digital classification of a pill element for its pins (None = unknown)."""
     ref = elem.get("reference") or {}
     etype = ref.get("type")
     ref_id = str(ref.get("ref_id", "?"))
-    if etype in (2, 11):
-        # KNX objects (11) share the marker item shape (see api._process_source_items).
-        source = (markers_by_id if etype == 2 else knx_by_id or {}).get(ref_id)
+    typed_sources: dict[Any, ItemsById | None] = {2: markers_by_id, 11: knx_by_id, 12: onewire_by_id}
+    if etype in typed_sources:
+        # KNX objects (11) share the marker item shape (see api._process_source_items); 1-Wire
+        # sensors (12) carry the same "type" ("analog"/"digital") as OneWireSensor.kind.
+        source = (typed_sources[etype] or {}).get(ref_id)
         return None if source is None else source.get("type") == "analog"
     if etype == 1:
         return _io_analog(ios_by_id.get(ref_id))
@@ -69,11 +72,18 @@ def _element_raw_value(
     webio_by_id: ItemsById,
     ios_by_id: ItemsById,
     knx_by_id: ItemsById | None = None,
+    onewire_by_id: ItemsById | None = None,
 ) -> Any:
     """Live value of a pill element (None when the source carries no value)."""
     ref = elem.get("reference") or {}
     rid = str(ref.get("ref_id", "?"))
-    sources: dict[Any, ItemsById] = {2: markers_by_id, 1: ios_by_id, 10: webio_by_id, 11: knx_by_id or {}}
+    sources: dict[Any, ItemsById] = {
+        2: markers_by_id,
+        1: ios_by_id,
+        10: webio_by_id,
+        11: knx_by_id or {},
+        12: onewire_by_id or {},
+    }
     by_id = sources.get(ref.get("type"))
     return (by_id.get(rid) or {}).get("value") if by_id is not None else None
 
@@ -97,8 +107,8 @@ def element_id_sort_key(eid: str) -> tuple[int, Any]:
 _SEARCH_ID_PREFIX: dict[Any, str] = {2: "M", 11: "K", 4: "T", 3: "C"}
 
 
-def element_search_id(elem: dict[str, Any], ios_by_id: ItemsById) -> str:
-    """Object id the plan search matches by default ("M416", "K54", "T12", "C3", "IOX3#AI5").
+def element_search_id(elem: dict[str, Any], ios_by_id: ItemsById, onewire_by_id: ItemsById | None = None) -> str:
+    """Object id the plan search matches by default ("M416", "K54", "T12", "C3", "IOX3#AI5", "OT1").
 
     Empty for elements without an own object id (Web-IO commands, blocks, constants,
     comments) — those are only found by a quoted text search over the full label (see
@@ -111,6 +121,8 @@ def element_search_id(elem: dict[str, Any], ios_by_id: ItemsById) -> str:
         return f"{prefix}{rid}"
     if etype == 1 and (io := ios_by_id.get(rid)):
         return f"{io_owner(io)}#{io.get('identifier', '')}"
+    if etype == 12 and (sensor := (onewire_by_id or {}).get(rid)):
+        return str(sensor.get("address") or "")
     return ""
 
 
@@ -162,6 +174,14 @@ def _pill_parts_knx(rid: str, knx_by_id: ItemsById) -> tuple[str, str, str]:
     return f"K{rid}", "(unknown)", ""
 
 
+def _pill_parts_onewire(rid: str, onewire_by_id: ItemsById) -> tuple[str, str, str]:
+    """|OT1|name value| pill of a 1-Wire sensor; its address leads the name like a marker's id."""
+    if sensor := onewire_by_id.get(rid):
+        address = str(sensor.get("address") or "1-Wire")
+        return address, _strip_prefix(sensor["name"], address), _fmt_value(sensor.get("value"))
+    return "1-Wire", f"ref={rid}", ""
+
+
 def _pill_parts_io(rid: str, ios_by_id: ItemsById) -> tuple[str, str, str]:
     if io := ios_by_id.get(rid):
         ext, ident = io_owner(io), io.get("identifier", "")
@@ -179,6 +199,7 @@ def _pill_parts(
     webio_by_id: ItemsById,
     ios_by_id: ItemsById,
     knx_by_id: ItemsById | None = None,
+    onewire_by_id: ItemsById | None = None,
 ) -> tuple[str, str, str]:
     """(id_text, description, value) for Studio's split pill layout |ID|description value|.
 
@@ -189,12 +210,15 @@ def _pill_parts(
     ref = elem.get("reference") or {}
     etype = ref.get("type")
     rid = str(ref.get("ref_id", "?"))
-    if etype == 2:
-        return _pill_parts_marker(rid, markers_by_id)
-    if etype == 1:
-        return _pill_parts_io(rid, ios_by_id)
-    if etype == 11:
-        return _pill_parts_knx(rid, knx_by_id or {})
+    by_source: dict[Any, tuple[Callable[[str, ItemsById], tuple[str, str, str]], ItemsById]] = {
+        2: (_pill_parts_marker, markers_by_id),
+        1: (_pill_parts_io, ios_by_id),
+        11: (_pill_parts_knx, knx_by_id or {}),
+        12: (_pill_parts_onewire, onewire_by_id or {}),
+    }
+    if source := by_source.get(etype):
+        parts_of, items = source
+        return parts_of(rid, items)
     if etype == 4:
         time_module = catalog.get("time_modules", {}).get(rid) or {}
         return f"T{rid}", time_module.get("name") or "Zeitglied", ""

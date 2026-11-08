@@ -21,6 +21,7 @@ from aiocomexio.function_plan import (
     render_flow_svg,
     render_plan_svg,
 )
+from aiocomexio.function_plan.render_geometry import _build_geometries
 from aiocomexio.function_plan.render_labels import strip_xml_forbidden, with_block_values
 from tests.common import FIXTURES_DIR, load_json_fixture
 
@@ -442,6 +443,93 @@ def test_unconnected_pill_and_block_carry_the_tooltip_on_the_group() -> None:
         assert rect.get("class") == "node-orphan"
         assert groups[eid].find(f"{_SVG_NS}rect/{_SVG_NS}title") is None
     assert groups["1"][0].text == "M7 Frei"
+
+
+_ONEWIRE_ELEMENT = {"1": {"reference": {"type": 12, "ref_id": 3}, "name": "", "position_x": 0, "position_y": 0}}
+
+
+def _group_of(svg: str, eid: str) -> ElementTree.Element:
+    return next(g for g in ElementTree.fromstring(svg).iter(f"{_SVG_NS}g") if g.get("data-eid") == eid)
+
+
+@pytest.mark.parametrize(("kind", "glyph"), [("analog", "circle"), ("digital", "path")])
+def test_a_onewire_sensor_renders_as_a_named_source_pill(kind: str, glyph: str) -> None:
+    sensors = {"3": {"name": "OT3 Keller", "address": "OT3", "type": kind, "value": 21.5}}
+
+    group = _group_of(render_plan_svg(_ONEWIRE_ELEMENT, {}, {}, {}, {}, {}, title="T", onewire_by_id=sensors), "1")
+
+    assert group[0].text == "OT3 Keller"
+    assert [t.text for t in group.iter(f"{_SVG_NS}text")] == ["OT3", "21,5", "Keller"]
+    # A sensor is a pure source: only the output pin, no input pin.
+    assert [p.tag for p in group.iter() if p.get("class") == "port-glyph"] == [f"{_SVG_NS}{glyph}"]
+
+
+@pytest.mark.parametrize("sensors", [None, {}, {"4": {"name": "OT4", "address": "OT4", "type": "analog"}}])
+def test_a_onewire_sensor_without_its_entry_renders_by_config_id(sensors: dict[str, Any] | None) -> None:
+    group = _group_of(render_plan_svg(_ONEWIRE_ELEMENT, {}, {}, {}, {}, {}, title="T", onewire_by_id=sensors), "1")
+
+    assert group[0].text == "1-Wire ref=3"
+    assert [t.text for t in group.iter(f"{_SVG_NS}text")] == ["1-Wire", "ref=3"]
+    assert not [p for p in group.iter() if p.get("class") == "port-glyph"]
+
+
+@pytest.mark.parametrize(
+    ("sensor", "texts"),
+    [
+        ({"name": "Keller", "address": "OT3", "type": "analog", "value": None}, ["OT3", "Keller"]),
+        ({"name": "Keller", "type": "analog"}, ["1-Wire", "Keller"]),
+    ],
+    ids=["name without the address", "no address"],
+)
+def test_a_onewire_pill_keeps_a_name_that_does_not_start_with_the_address(
+    sensor: dict[str, Any], texts: list[str]
+) -> None:
+    svg = render_plan_svg(_ONEWIRE_ELEMENT, {}, {}, {}, {}, {}, title="T", onewire_by_id={"3": sensor})
+
+    assert [t.text for t in _group_of(svg, "1").iter(f"{_SVG_NS}text")] == texts
+
+
+def test_a_onewire_sensor_has_its_address_as_search_id() -> None:
+    sensors = {"3": {"name": "OT3 Keller", "address": "OT3", "type": "analog"}}
+
+    assert element_search_id(_ONEWIRE_ELEMENT["1"], {}, sensors) == "OT3"
+    assert element_search_id(_ONEWIRE_ELEMENT["1"], {}) == ""
+
+
+@pytest.mark.parametrize(("kind", "hot"), [("digital", True), ("analog", False)])
+def test_only_a_digital_onewire_sensor_reading_1_is_hot(kind: str, hot: bool) -> None:
+    sensors = {"3": {"name": "OT3", "address": "OT3", "type": kind, "value": 1}}
+
+    geo = _build_geometries(_ONEWIRE_ELEMENT, {}, {}, {}, {}, {}, None, sensors)["1"]
+
+    assert (geo["value_raw"], geo["hot"]) == (1, hot)
+
+
+@pytest.mark.parametrize(
+    ("knx", "label", "texts", "glyphs"),
+    [
+        (
+            {"5": {"name": "K5 Licht", "type": "digital", "value": 0}},
+            "K5 Licht",
+            ["K5", "0", "Licht"],
+            [f"{_SVG_NS}path"],
+        ),
+        (None, "K5 (unknown)", ["K5", "(unknown)"], []),
+    ],
+    ids=["named", "unknown"],
+)
+def test_a_knx_object_renders_as_its_pill(
+    knx: dict[str, Any] | None, label: str, texts: list[str], glyphs: list[str]
+) -> None:
+    """The type-dispatch of _pill_parts and _element_analog also routes KNX objects (type 11)."""
+    elements = {"1": {"reference": {"type": 11, "ref_id": 5}, "name": "", "position_x": 0, "position_y": 0}}
+
+    group = _group_of(render_plan_svg(elements, {}, {}, {}, {}, {}, title="T", knx_by_id=knx), "1")
+
+    assert group[0].text == label
+    assert [t.text for t in group.iter(f"{_SVG_NS}text")] == texts
+    # A KNX object takes an input pin as well as an output pin.
+    assert [p.tag for p in group.iter() if p.get("class") == "port-glyph"] == glyphs * 2
 
 
 def test_strip_xml_forbidden_matches_the_xml_char_production_for_every_bmp_character() -> None:

@@ -152,6 +152,7 @@ def _build_geometries(
     webio_by_id: ItemsById,
     ios_by_id: ItemsById,
     knx_by_id: ItemsById | None = None,
+    onewire_by_id: ItemsById | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Per-element geometry at Comexio's own position_x/position_y.
 
@@ -165,7 +166,17 @@ def _build_geometries(
     fub_base = catalog.get("fub_base", {})
     return {
         elem_id: _build_one_geometry(
-            elem_id, elem, catalog, markers_by_id, webio_by_id, ios_by_id, fub_base, used_in, used_out, knx_by_id
+            elem_id,
+            elem,
+            catalog,
+            markers_by_id,
+            webio_by_id,
+            ios_by_id,
+            fub_base,
+            used_in,
+            used_out,
+            knx_by_id,
+            onewire_by_id,
         )
         for elem_id, elem in elements.items()
     }
@@ -202,6 +213,8 @@ def _apply_geometry_target_fields(
         geo["target"] = f"{io_owner(io)}#{io.get('identifier', '')}"
         geo["io_input"] = bool(io.get("is_input"))
         geo["writable"] = not geo["io_input"] and not geo["inactive"] and not io.get("quickbus")
+    elif etype == 12:
+        geo["io_input"] = True  # a 1-Wire sensor is a pure source like an IO input: no input pin
 
 
 def _build_one_geometry(
@@ -215,6 +228,7 @@ def _build_one_geometry(
     used_in: dict[str, set[int]],
     used_out: dict[str, set[int]],
     knx_by_id: ItemsById | None = None,
+    onewire_by_id: ItemsById | None = None,
 ) -> dict[str, Any]:
     """Geometry for a single plan element (see _build_geometries)."""
     ref = elem.get("reference") or {}
@@ -229,7 +243,7 @@ def _build_one_geometry(
         "etype": etype,
         "in": [],
         "out": [],
-        "analog": _element_analog(elem, markers_by_id, webio_by_id, ios_by_id, knx_by_id),
+        "analog": _element_analog(elem, markers_by_id, webio_by_id, ios_by_id, knx_by_id, onewire_by_id),
         # Greyed elements — via CSS classes separate from node-orphan so all remain
         # independently stylable (see _STYLE).
         "inactive": _geometry_is_inactive(etype, ref_id, ios_by_id, markers_by_id),
@@ -242,15 +256,15 @@ def _build_one_geometry(
     # that WRITES M4 — only the wires leaving M4's output). Red additionally
     # requires a DIGITAL source (user rule): an analog output reading 1 is a
     # value, not a HIGH state.
-    geo["value_raw"] = _element_raw_value(elem, markers_by_id, webio_by_id, ios_by_id, knx_by_id)
+    geo["value_raw"] = _element_raw_value(elem, markers_by_id, webio_by_id, ios_by_id, knx_by_id, onewire_by_id)
     geo["hot"] = _is_high(geo["value_raw"]) and geo["analog"] is False
     _shape_special(geo, elem, fub_base, used_in.get(elem_id, set()), used_out.get(elem_id, set()))
     _apply_geometry_target_fields(geo, etype, ref_id, markers_by_id, ios_by_id)
-    geo["search_id"] = element_search_id(elem, ios_by_id)
+    geo["search_id"] = element_search_id(elem, ios_by_id, onewire_by_id)
     geo["pins"] = geo["kind"] == "block" or (geo["kind"] in ("pill", "const") and geo["analog"] is not None)
     if geo["kind"] == "pill":
         geo["id_text"], geo["desc"], geo["value"] = _pill_parts(
-            elem, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id
+            elem, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id, onewire_by_id
         )
     return geo
 
