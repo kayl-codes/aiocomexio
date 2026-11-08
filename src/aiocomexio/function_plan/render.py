@@ -77,6 +77,7 @@ def render_plan_svg(
     knx_by_id: ItemsById | None = None,
     plan_id: str | None = None,
     block_values: BlockValues | None = None,
+    onewire_by_id: ItemsById | None = None,
 ) -> str:
     """Render elements at Comexio's own position_x/position_y with port-accurate wiring.
 
@@ -103,6 +104,11 @@ def render_plan_svg(
     knx_by_id: optional KNX object id -> item map (homeassistant-comexio: coordinator.function_plan_knx_label_map)
     for "K{id}" pills; without it KNX elements still render as "K{id}" pills, just unnamed.
 
+    onewire_by_id: optional 1-Wire sensor map for the sensor elements (type 12), keyed by the
+    sensor's config_id as str (the element's ref_id), each item {"name": display name, "address":
+    "OT1", "type": "analog"/"digital" (OneWireSensor.kind), "value": live value or None}. Without it
+    a sensor renders as an unnamed "1-Wire ref={config_id}" pill.
+
     plan_id: optional stable plan identity (the fub_id), emitted as data-plan-id on the root
     <svg>. The plan card keeps its scroll position across a refresh only while this stays the
     same — the viewBox alone can't tell plans apart, since every plan on the same paper
@@ -116,7 +122,9 @@ def render_plan_svg(
     the plan, for a backup snapshot the settings stored in that snapshot — never the live ones,
     since Comexio may have renumbered the blocks since and the hover would show unrelated settings.
     """
-    geos = _build_geometries(elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id)
+    geos = _build_geometries(
+        elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id, onewire_by_id
+    )
     if canvas:
         # Paper mode: absolute coordinates, canvas grows only if content overflows the paper.
         _min_x, _min_y, max_x, max_y = _bounding_box(geos)
@@ -128,7 +136,9 @@ def render_plan_svg(
         width, height = _fit_to_bounding_box(geos)
 
     labels = {
-        elem_id: resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id, sun_times, knx_by_id)
+        elem_id: resolve_element_label(
+            elem, catalog, markers_by_id, webio_by_id, ios_by_id, sun_times, knx_by_id, onewire_by_id
+        )
         for elem_id, elem in elements.items()
     }
     for elem_id in detect_self_reset_elements(elements, connections, catalog):

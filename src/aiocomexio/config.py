@@ -70,6 +70,10 @@ _KEY_WEBIO_DUPLICATES = "webio_command_duplicates"
 _KEY_DPT_AMBIGUOUS = "dpt_ambiguous"
 _KEY_QUICKBUS_DEVICES = "quickbus_devices"
 
+# Web-IO classes introduced after the [M]/[IO] split: a legacy single-device install never had them,
+# so their absence says nothing about that install (see _process_device_info).
+_CLASSES_ADDED_AFTER_SPLIT = frozenset({WebioClass.QUICKBUS, WebioClass.ONEWIRE})
+
 # $FubModules keys of the three source categories and of the Web-IO command groups.
 _MODULE_IO = "1"
 _MODULE_MARKER = "2"
@@ -503,7 +507,7 @@ def _process_device_info(
             len(duplicates),
             log_excerpt([f"{d['name']} (webIoId {d['webIoId']}, {d['webioClass']})" for d in duplicates]),
         )
-    missing_classes = [c for c in missing_classes if c != WebioClass.QUICKBUS]
+    missing_classes = [c for c in missing_classes if c not in _CLASSES_ADDED_AFTER_SPLIT]
     if missing_classes and any(d.get("Name") == webio_name for d in web_devices.values()):
         # Pre-split installs have a single Web-IO device named exactly `webio_name`; it won't
         # match the "<name> [M]"/"<name> [IO]" class names, so the classes look missing.

@@ -15,8 +15,8 @@ provide the communication layer of the
 > Quantum modules with their configs, run / stop
 > (`ComexioClient`), admin page scraping (`aiocomexio.scrape`), config parsing
 > (`aiocomexio.config`, including Quickbus devices such as Multitouch panels and their IOs), KNX
-> DPT tables (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`, with a separate
-> class for Quickbus IOs), function plan rendering
+> DPT tables (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`, with separate
+> classes for Quickbus IOs and 1-Wire sensors), function plan rendering
 > (with block settings in the hover text) and diffing (`aiocomexio.function_plan`) and the
 > block-type reference catalog that resolves Comexio catalog ids per server by stable key
 > (`aiocomexio.reference_catalog`). The API may still change.
@@ -116,8 +116,9 @@ The three 1-Wire calls all need the admin session (`login()` first):
 - `get_onewire_sensors()` returns the active configured sensors keyed by address (`OT1`, `OH3`, …);
   inactive entries are left out. An active entry without a usable `Prefix` or `Id` is skipped (and
   logged); if active entries exist but none is usable, the call raises `ComexioDataError`. Two
-  active entries with the same address collapse to one: the later one wins (logged). It costs one
-  config fetch.
+  active entries with the same address collapse to one: the later one wins (logged). Two entries
+  with the same `Id` but different prefixes both stay, and a warning is logged, because a function
+  plan names a sensor by its `Id` alone. It costs one config fetch.
 - `get_onewire_status()` returns the live state of the sensors Comexio reports, keyed by address.
   It is read from Comexio's 1-Wire monitor, which is not an official interface, so a changed answer
   raises `ComexioDataError`. An item without an address is skipped (and logged), so a sensor can be
@@ -157,6 +158,29 @@ async def main(stored_fingerprint: str) -> None:
 
 asyncio.run(main(stored_fingerprint="<the value setup() returned>"))
 ```
+
+The status is for spotting broken sensors. To get the values pushed, build Web-IO commands for the
+sensors. `config.parse_config` does not read them, so add them under the key `"onewire"` of the
+parsed config. Take them from the same config fetch, with
+`onewire.parse_onewire_config(raw.variables["FubModules"])`: `get_onewire_sensors()` fetches a config
+of its own, which can differ if the 1-Wire setup changes in between. Then `webio.build_webio_commands` (or
+`generate_webio_json` with `WebioClass.ONEWIRE`, class `<webio name> [1Wire]`) builds one command per
+sensor:
+
+- The command is named `HA 1Wire <address>`.
+- It pushes `{"id": "<address>", "value": …, "type": "onewire"}`.
+- An analog sensor gets the generic analog range and a digital one gets 0/1.
+- A sensor of unknown kind gets no command.
+
+In a function plan, a sensor is element type 12 with its `config_id` as `ref_id`. Wire it to its
+command like a marker. To show the sensors by name in `function_plan.render_plan_svg`, pass
+`onewire_by_id`: the sensors keyed by `str(config_id)`, each `{"name": …, "address": …, "type":
+sensor.kind, "value": …}`. Without it a sensor renders as `1-Wire ref=<config_id>`. A plan
+cannot tell apart sensors that share an `Id` under different prefixes (`parse_onewire_config` logs
+them): leave such an Id out of the map, and its elements render as `1-Wire ref=<config_id>`
+instead of showing one of the sensors.
+`render_flow_svg` takes the same map (and `knx_by_id`) for its box labels. A value that is not
+finite (`nan`, `inf`) shows as no value.
 
 ## Development
 

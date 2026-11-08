@@ -122,6 +122,37 @@ def test_config_same_id_in_int_and_digit_string_is_one_sensor(caplog: pytest.Log
     ]
 
 
+def test_config_same_id_under_two_prefixes_keeps_both_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """A function plan names a sensor by Id alone, so a shared Id is logged; both sensors keep their address."""
+    modules = {"12": {"1": _entry(3, "OT"), "2": _entry(3, "OH"), "3": _entry(4, "OT"), "4": _entry(3, "OP")}}
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        sensors = parse_onewire_config(modules)
+
+    assert list(sensors) == ["OT3", "OH3", "OT4", "OP3"]
+    # One warning per shared Id, not one per pair.
+    assert [record.getMessage() for record in caplog.records] == [
+        "1-Wire sensors OH3, OP3, OT3 share the Id 3, a function plan element shows only one of them"
+    ]
+
+
+def test_shared_id_warning_is_bounded_for_a_long_prefix(caplog: pytest.LogCaptureFixture) -> None:
+    modules = {"12": {"1": _entry(3, "O" * 100_000), "2": _entry(3, "OH")}}
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        parse_onewire_config(modules)
+
+    assert len(caplog.records) == 1
+    assert len(caplog.records[0].getMessage()) < 500
+
+
+def test_config_with_distinct_ids_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.onewire"):
+        parse_onewire_config({"12": {"1": _entry(3, "OT"), "2": _entry(4, "OH")}})
+
+    assert caplog.records == []
+
+
 @pytest.mark.parametrize("config_id", ["", " 7", "-1", "٧", "9" * 19, 10**18])
 def test_config_unusable_id_is_skipped_without_raising(config_id: object) -> None:
     modules = {"12": {"1": {**_entry(1, "OT"), "Id": config_id}, "2": _entry(2, "OT")}}
