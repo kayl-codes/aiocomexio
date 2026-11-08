@@ -45,6 +45,13 @@ _IN_SCAN_CODES = frozenset({0x00, *range(0xD0, 0xD8)})
 _MARKERS_ONLY = re.compile(rb"(?:\xff+[\xd0-\xd7])*")
 # A segment's length field counts itself, so it is at least 2.
 _MIN_SEGMENT_LENGTH = 2
+# An SOS header (T.81, B.2.3): length field, Ns, two bytes per scan component, then Ss, Se and Ah/Al, with 1 to 4
+# components; its length is 6 + 2 * Ns.
+_SOS_FIXED_LENGTH = 6
+_SOS_BYTES_PER_COMPONENT = 2
+_MAX_SCAN_COMPONENTS = 4
+# Offset of Ns from the SOS code: the two bytes of the length field lie between them.
+_SOS_COMPONENTS_OFFSET = 3
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -154,9 +161,10 @@ def first_jpeg_frame(data: bytes | bytearray) -> bytes | None:
     The image runs from its SOI marker to the EOI marker that ends it: the segments before a scan are skipped by
     their length fields, so an EOI inside them (an embedded thumbnail) does not end the image early. Data before
     the first SOI (a multipart boundary and its headers) is skipped. A marker that is missing where the structure of
-    a JPEG needs one, a segment shorter than its length field, a stuffed byte or second SOI between the segments, a
-    scan without entropy-coded data (nothing but restart markers counts as none), or an EOI before the first scan (an
-    image without picture data) raises ComexioDataError.
+    a JPEG needs one, a segment shorter than its length field, a stuffed byte or second SOI between the segments, an
+    SOS header whose length does not fit its 1 to 4 scan components, a scan without entropy-coded data (nothing but
+    restart markers counts as none), or an EOI before the first scan (an image without picture data) raises
+    ComexioDataError.
     """
     return JpegFrameReader().frame(data)
 
@@ -225,6 +233,9 @@ class JpegFrameReader:
         if end is None:
             return False
         if code == _SOS_CODE:
+            if code_at + _SOS_COMPONENTS_OFFSET >= len(data):
+                return False  # the component count has not arrived yet
+            _check_sos_header(data, code_at, end)
             self._scanned = True
             self._scan_from = self._scan_pos = end
         self._pos = end
@@ -239,6 +250,17 @@ def _segment_end(data: bytes | bytearray, pos: int) -> int | None:
     if length < _MIN_SEGMENT_LENGTH:
         raise ComexioDataError(f"Camera frame has a JPEG segment of length {length}")
     return pos + length
+
+
+def _check_sos_header(data: bytes | bytearray, code_at: int, end: int) -> None:
+    """Raise ComexioDataError unless the SOS segment from code_at to end has 1 to 4 components and their length."""
+    components = data[code_at + _SOS_COMPONENTS_OFFSET]
+    length = end - code_at - 1  # the length field, which counts itself but not the code
+    if (
+        not 1 <= components <= _MAX_SCAN_COMPONENTS
+        or length != _SOS_FIXED_LENGTH + _SOS_BYTES_PER_COMPONENT * components
+    ):
+        raise ComexioDataError(f"Camera frame has a malformed SOS header (length {length}) at offset {code_at}")
 
 
 def _marker_code_at(data: bytes | bytearray, pos: int) -> int | None:

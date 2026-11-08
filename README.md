@@ -64,8 +64,9 @@ HTTPS; a server presenting any other certificate raises `ComexioCertificateMisma
 `ComexioConnectionError`: retrying cannot help, the certificate was replaced or something else
 answers) before the request that met it is sent — if that request was a redirect hop, the hops
 before it did reach the pinned server. Without `fingerprint` the client uses plain HTTP and
-follows redirects only on the Comexio host (scheme and port may change); a redirect to any other
-host raises `ComexioResponseError` before anything is sent there. A redirect on to HTTPS checks
+follows redirects only on the Comexio server: on the same scheme, host and port, or on to HTTPS on
+port 443 of the same host. A redirect anywhere else (another host, or another port of the same
+host) raises `ComexioResponseError` before anything is sent there. A redirect on to HTTPS checks
 the certificate against the system's CAs, so Comexio's self-signed one fails there with
 `ComexioConnectionError` — pin it instead.
 
@@ -205,9 +206,10 @@ extension. The camera calls need the admin session (`login()` first):
 - `get_doorstation_snapshot(camera_id)` returns the current image: the first complete JPEG of that
   stream, read with the admin session. A stream without a frame within 10 seconds, or one that breaks
   off, raises `ComexioConnectionError`; one that ends or passes 4 MB without a frame (a frame must end
-  within the first 4 MB; bytes past it are not kept), or a malformed frame (also one with an empty scan
-  or one that ends before its first scan), raises
-  `ComexioDataError`; the login form raises `ComexioAuthenticationError`.
+  within the first 4 MB; bytes past it are not kept), a malformed frame (also one with an empty scan
+  or one that ends before its first scan), or a stream sent compressed (it is asked for unencoded and
+  never decompressed, so the 4 MB cap holds) raises `ComexioDataError`; the login form raises
+  `ComexioAuthenticationError`.
 
 The Doorstation serves the same stream under its own address, reportedly without a login. If you
 use it, keep the Doorstation in a network segment that only trusted hosts can reach.

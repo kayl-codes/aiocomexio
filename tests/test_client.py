@@ -1740,11 +1740,12 @@ async def test_unpinned_client_follows_a_redirect_on_the_same_host(
     assert comexio.requests == [("GET", _FROM_PATH), ("GET", _TO_PATH)]
 
 
-async def test_unpinned_client_follows_a_redirect_to_another_port_of_the_same_host(
-    client: ComexioClient, comexio: FakeComexio
+@pytest.mark.parametrize("location", ["https://127.0.0.1/admin/to", "HTTPS://127.0.0.1:443/admin/to"])
+async def test_unpinned_client_follows_a_redirect_on_to_https_of_the_same_host(
+    client: ComexioClient, comexio: FakeComexio, location: str
 ) -> None:
-    # Port 1 does not answer: the connection error shows the redirect was followed rather than refused.
-    comexio.serve("GET", _FROM_PATH, _redirect_to("https://127.0.0.1:1/admin/to"))
+    # Nothing serves HTTPS on 127.0.0.1:443 here: the connection error shows the redirect was followed, not refused.
+    comexio.serve("GET", _FROM_PATH, _redirect_to(location))
 
     with pytest.raises(ComexioConnectionError):
         await client._request_text("GET", _FROM_PATH, what="Moved")
@@ -1754,12 +1755,16 @@ async def test_unpinned_client_follows_a_redirect_to_another_port_of_the_same_ho
     "location",
     [
         "http://comexio.example.com/admin/to",  # another host
+        "https://comexio.example.com/admin/to",  # HTTPS on its default port, but another host
         "//comexio.example.com/admin/to",  # scheme-relative, another host
         "http://localhost:{port}/admin/to",  # the same server under another host name
         "ftp://{host}/admin/to",  # not http(s)
+        "http://127.0.0.1:1/admin/to",  # another port of the same host: maybe another service
+        "https://127.0.0.1:8443/admin/to",  # HTTPS, but not on its default port
+        "https://{host}/admin/to",  # HTTPS on the port of the plain HTTP server
     ],
 )
-async def test_unpinned_client_refuses_a_redirect_to_another_host(
+async def test_unpinned_client_refuses_a_redirect_away_from_the_comexio_server(
     client: ComexioClient, comexio: FakeComexio, location: str
 ) -> None:
     location = location.format(host=comexio.host, port=urlsplit(f"http://{comexio.host}").port)
@@ -1769,7 +1774,7 @@ async def test_unpinned_client_refuses_a_redirect_to_another_host(
     with pytest.raises(ComexioResponseError) as excinfo:
         await request
 
-    assert str(excinfo.value) == f"Moved refused: Comexio redirected to {location!r}, away from the Comexio host"
+    assert str(excinfo.value) == f"Moved refused: Comexio redirected to {location!r}, away from the Comexio server"
     assert comexio.requests == [("GET", _FROM_PATH)]
 
 

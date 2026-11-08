@@ -31,7 +31,7 @@ from aiocomexio import (
     normalize_fingerprint,
     session_kwargs,
 )
-from aiocomexio.client import _https_origin
+from aiocomexio.client import _origin, _same_origin_or_https
 from aiocomexio.tls import https_address
 from tests.fake_comexio import ADMIN_PATH, LOGIN_PATH, PASSWORD, USERNAME, FakeComexio
 
@@ -639,7 +639,29 @@ def test_pinned_client_never_warns_about_plain_http(caplog: pytest.LogCaptureFix
         ("https://comexio.local/a", "https://comexio.local:8443/a", False),
         ("https://comexio.local/a", "http://comexio.local:443/a", False),
         ("https://comexio.local/a", "https://comexio.local:0/a", False),
+        ("http://comexio.local/a", "http://comexio.local:80/b", True),
+        ("http://comexio.local/a", "http://comexio.local:8080/a", False),
+        ("http://comexio.local:443/a", "https://comexio.local/a", False),
     ],
 )
-def test_https_origin_fills_in_the_default_port(first: str, second: str, same: bool) -> None:
-    assert (_https_origin(first) == _https_origin(second)) is same
+def test_origin_fills_in_the_default_port(first: str, second: str, same: bool) -> None:
+    assert (_origin(first) == _origin(second)) is same
+
+
+@pytest.mark.parametrize(
+    ("current", "target", "follows"),
+    [
+        ("http://comexio.local/a", "http://comexio.local:80/b", True),
+        ("http://comexio.local/a", "https://comexio.local/a", True),
+        ("http://comexio.local/a", "https://comexio.local:443/a", True),
+        ("http://comexio.local:8080/a", "https://comexio.local/a", True),  # plain HTTP on any port, on to HTTPS
+        ("https://comexio.local/a", "http://comexio.local/a", False),  # no downgrade back to plain HTTP
+        ("http://comexio.local/a", "https://other.local/a", False),
+        ("http://comexio.local/a", "https://comexio.local:8443/a", False),
+        ("http://comexio.local:8080/a", "http://comexio.local/a", False),
+    ],
+)
+def test_an_unpinned_redirect_stays_on_its_origin_or_moves_on_to_https(
+    current: str, target: str, follows: bool
+) -> None:
+    assert _same_origin_or_https(current, target) is follows

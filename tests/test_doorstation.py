@@ -1,6 +1,7 @@
 """Doorstation: detection on the IO home page and the first frame of its camera stream (MJPEG)."""
 
 import asyncio
+import gzip
 import logging
 import re
 import tracemalloc
@@ -393,6 +394,50 @@ async def test_snapshot_is_the_first_frame_of_the_stream(logged_in: ComexioClien
     assert len(comexio.received_at("GET", STREAM_PATH)) == 1
 
 
+def _encoded_stream(encoding: str, body: bytes, asked_for: list[str | None]) -> Handler:
+    """A handler that sends body under the Content-Encoding given and notes the Accept-Encoding it was asked with."""
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        asked_for.append(request.headers.get("Accept-Encoding"))
+        return web.Response(body=body, headers={"Content-Encoding": encoding}, content_type="multipart/x-mixed-replace")
+
+    return handler
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", "br", "identity, gzip"])
+async def test_snapshot_asks_for_the_stream_unencoded_and_never_decompresses_it(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, encoding: str
+) -> None:
+    # Decompressed chunks would be allocated before the byte cap applies: a small gzip body can expand enormously.
+    # The body stays gzip under every label: the client must refuse it before reading it.
+    asked_for: list[str | None] = []
+    comexio.serve("GET", STREAM_PATH, _encoded_stream(encoding, gzip.compress(_part(FRAME)), asked_for))
+    options: list[dict[str, Any]] = []
+    request = logged_in._session.request
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        options.append(kwargs)
+        return request(*args, **kwargs)
+
+    monkeypatch.setattr(logged_in._session, "request", spy)
+
+    with pytest.raises(ComexioDataError) as info:
+        await logged_in.get_doorstation_snapshot(7)
+
+    assert str(info.value) == f"Doorstation camera 7 snapshot: the stream came {encoding!r}-encoded, not unencoded"
+    assert asked_for == ["identity"]
+    assert [kwargs.get("auto_decompress") for kwargs in options] == [False]
+
+
+@pytest.mark.parametrize("encoding", ["identity", " Identity "])
+async def test_snapshot_reads_a_stream_marked_unencoded(
+    logged_in: ComexioClient, comexio: FakeComexio, encoding: str
+) -> None:
+    comexio.serve("GET", STREAM_PATH, _encoded_stream(encoding, _part(FRAME), []))
+
+    assert await logged_in.get_doorstation_snapshot(7) == FRAME
+
+
 async def test_snapshot_of_a_stream_that_ends_without_a_frame_raises(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
@@ -615,6 +660,41 @@ def test_a_segment_of_length_zero_is_malformed() -> None:
     assert str(info.value) == "Camera frame has a JPEG segment of length 0"
 
 
+# SOS headers whose length does not fit their component count (T.81, B.2.3: 6 + 2 * Ns, Ns from 1 to 4).
+_MALFORMED_SOS_HEADERS = [
+    _segment(0xDA, b""),
+    _segment(0xDA, b"\x00\x00\x3f\x00"),
+    _segment(0xDA, b"\x05" + bytes(10) + b"\x00\x3f\x00"),
+    _segment(0xDA, b"\x01\x01\x00\x02\x00\x00\x3f\x00"),
+    _segment(0xDA, b"\x02\x01\x00\x00\x3f\x00"),
+    _segment(0xDA, b"\x04" + bytes(6) + b"\x00\x3f\x00"),
+]
+_MALFORMED_SOS_IDS = [
+    "length-2",
+    "no-component",
+    "five-components",
+    "longer-than-its-components",
+    "shorter-than-two-components",
+    "shorter-than-four-components",
+]
+
+
+@pytest.mark.parametrize("sos", _MALFORMED_SOS_HEADERS, ids=_MALFORMED_SOS_IDS)
+def test_an_sos_header_that_does_not_fit_its_components_is_malformed(sos: bytes) -> None:
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(SOI + sos + SCAN + EOI)
+
+    assert str(info.value) == f"Camera frame has a malformed SOS header (length {len(sos) - 2}) at offset 3"
+
+
+@pytest.mark.parametrize("components", [1, 4])
+def test_an_sos_header_with_one_to_four_components_is_read(components: int) -> None:
+    frame = SOI + _segment(0xDA, bytes((components,)) + bytes(2 * components) + b"\x00\x3f\x00") + SCAN + EOI
+
+    assert first_jpeg_frame(frame) == frame
+    assert _fed_byte_by_byte(frame) == frame
+
+
 @pytest.mark.parametrize(("code", "name"), [(0x00, "0x00"), (0xD8, "0xD8")], ids=["stuffed-byte", "second-soi"])
 def test_a_marker_that_cannot_start_a_segment_is_malformed(code: int, name: str) -> None:
     with pytest.raises(ComexioDataError) as info:
@@ -678,6 +758,7 @@ def test_a_reader_fed_byte_by_byte_resumes_a_scan_after_its_sos_header(frame: by
         SOI + b"\xff\xe0\x00\x00",
         SOI + APP0 + b"\xff\x00\x00\x10" + EOI,
         SOI + APP0 + _SOS_HEADERS_WITH_FF[0] + EOI,
+        *(SOI + APP0 + sos + SCAN + EOI for sos in _MALFORMED_SOS_HEADERS),
     ],
     ids=[
         "empty-scan",
@@ -687,6 +768,7 @@ def test_a_reader_fed_byte_by_byte_resumes_a_scan_after_its_sos_header(frame: by
         "length-0",
         "stuffed-byte",
         "empty-scan-after-ff-in-its-header",
+        *(f"sos-{name}" for name in _MALFORMED_SOS_IDS),
     ],
 )
 def test_a_reader_fed_byte_by_byte_raises_like_one_call(data: bytes) -> None:

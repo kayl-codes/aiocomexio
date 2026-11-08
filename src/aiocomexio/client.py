@@ -28,6 +28,7 @@ from http import HTTPStatus
 from io import StringIO
 from itertools import repeat
 from operator import attrgetter, is_
+from types import MappingProxyType
 from typing import Any, NamedTuple, Self, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
@@ -109,6 +110,9 @@ _IO_HOME_PAGE = "IO home page"
 # frame is about 90 KB at 1280x720, so a stream without a frame in its first MBs is no camera stream.
 _SNAPSHOT_TIMEOUT_SEC = 10.0
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+# The snapshot asks for the stream unencoded and does not let aiohttp decompress it: decompressed chunks would be
+# allocated before the byte cap could apply, so a compressed answer could exhaust memory.
+_IDENTITY_ENCODING = "identity"
 # Every extension block of the IO home page carries a device counter: a <div> with an id number_of_<ext> and a
 # class number_of_type_<n>, the markup parse_onewire_device_count reads. The Quickbus and KNX counters carry the
 # suffixes _30_2 / _30_3, so the type is a number with optional numeric suffixes.
@@ -391,7 +395,7 @@ _REDIRECT_STATUSES = frozenset({HTTPStatus.MOVED_PERMANENTLY, HTTPStatus.FOUND, 
 # without the pin, any client to another host). Like aiohttp, a POST turns into a GET on 301/302/303.
 _FOLLOWED_REDIRECT_STATUSES = _REDIRECT_STATUSES | {HTTPStatus.TEMPORARY_REDIRECT, HTTPStatus.PERMANENT_REDIRECT}
 _MAX_REDIRECTS = 10
-_WEB_SCHEMES = frozenset({"http", "https"})
+_DEFAULT_PORTS = MappingProxyType({"http": 80, "https": _HTTPS_DEFAULT_PORT})
 _PLAN_ADDED_CONFIRMATION = ("added", "1")
 _PLAN_SAVED_CONFIRMATION = ("saved", "1")
 _PLAN_DELETED_CONFIRMATION = ("delete", "ok")
@@ -1027,17 +1031,25 @@ class ComexioClient:
         Reads the stream with the admin session until the first frame is complete, then closes it. A stream that
         brings no frame within _SNAPSHOT_TIMEOUT_SEC seconds (the wait for the login gate included) raises
         ComexioConnectionError, as does a stream that breaks off; one that ends or passes _MAX_SNAPSHOT_BYTES
-        without a frame, or whose frame is malformed, raises ComexioDataError, the login form
+        without a frame, or whose frame is malformed, raises ComexioDataError, as does a stream sent compressed
+        (it is asked for unencoded, see _IDENTITY_ENCODING), the login form
         ComexioAuthenticationError. A malformed frame shows only once a JPEG end marker arrived: a stream without
         one runs into the byte cap or the timeout.
         """
         path = doorstation_stream_path(camera_id)
         what = f"Doorstation camera {camera_id} snapshot"
         deadline = asyncio.timeout(_SNAPSHOT_TIMEOUT_SEC)
+        unencoded = {"Accept-Encoding": _IDENTITY_ENCODING}
         try:
-            async with deadline, self._response("GET", path, what=what) as resp:
+            async with (
+                deadline,
+                self._response("GET", path, what=what, headers=unencoded, auto_decompress=False) as resp,
+            ):
                 if resp.status != HTTPStatus.OK:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
+                encoding = resp.headers.get("Content-Encoding", "").strip()
+                if encoding and encoding.lower() != _IDENTITY_ENCODING:
+                    raise ComexioDataError(f"{what}: the stream came {_excerpt(encoding)}-encoded, not unencoded")
                 return await _read_first_frame(resp, what)
         except (aiohttp.ClientError, TimeoutError) as err:
             # Only the snapshot's own deadline means no frame came; aiohttp's timeouts (the session's total one,
@@ -2182,8 +2194,8 @@ class ComexioClient:
 
         A redirect that leaves the pinned origin (plain http://, another host or port) raises
         ComexioResponseError before it is followed, so neither the session cookie nor credentials
-        go anywhere the pin does not cover. An unpinned client follows a redirect only on the same host (see
-        _unpinned_redirect_target). Every request goes through the login gate.
+        go anywhere the pin does not cover. An unpinned client follows a redirect only on its origin or on to
+        HTTPS on port 443 of the same host (see _unpinned_redirect_target). Every request goes through the login gate.
         """
         redirect_target = _unpinned_redirect_target if self._fingerprint is None else _pinned_redirect_target
         async with self._gate.request():
@@ -3554,22 +3566,32 @@ def _bulk_plan_entry(
 
 def _pinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
     """Where a redirect of a pinned client leads; ComexioResponseError unless it stays on the same HTTPS origin."""
-    return _redirect_target(resp, what, _https_origin, "outside the pinned HTTPS connection")
+    return _redirect_target(resp, what, _same_origin, "outside the pinned HTTPS connection")
 
 
 def _unpinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
-    """Where a redirect of an unpinned client leads; ComexioResponseError unless it stays on the same host.
+    """Where a redirect of an unpinned client leads; ComexioResponseError unless it stays on the Comexio server.
 
-    Scheme and port may change (plain HTTP sent on to HTTPS), the host may not: a peer that could redirect anywhere
-    could make the caller request any host its network reaches.
+    It may stay on the origin or move on to HTTPS on port 443 of the same host (plain HTTP sent on to HTTPS). Any
+    other port may be another service of that host, and the session cookie is not bound to a port; any other host
+    would let a peer make the caller request whatever its network reaches.
     """
-    return _redirect_target(resp, what, _web_host, "away from the Comexio host")
+    return _redirect_target(resp, what, _same_origin_or_https, "away from the Comexio server")
 
 
-def _redirect_target(
-    resp: aiohttp.ClientResponse, what: str, place: Callable[[str], tuple[object, ...]], outside: str
-) -> str:
-    """Where a redirect leads; ComexioResponseError unless place() gives the same key for it as for the current URL."""
+def _same_origin(current: str, target: str) -> bool:
+    """Whether target has the scheme, host and port of current; ValueError for a malformed port."""
+    return _origin(target) == _origin(current)
+
+
+def _same_origin_or_https(current: str, target: str) -> bool:
+    """Whether target is on current's origin or HTTPS on its host's default port; ValueError for a malformed port."""
+    here = _origin(current)
+    return _origin(target) in {here, ("https", here[1], _HTTPS_DEFAULT_PORT)}
+
+
+def _redirect_target(resp: aiohttp.ClientResponse, what: str, stays: Callable[[str, str], bool], outside: str) -> str:
+    """Where a redirect leads; ComexioResponseError unless stays(current URL, target) holds."""
     location = resp.headers.get("Location", "")
     if not location:
         raise ComexioResponseError(
@@ -3578,7 +3600,7 @@ def _redirect_target(
     current = str(resp.url)
     try:
         target = urljoin(current, location)
-        same_place = place(target) == place(current)
+        same_place = stays(current, target)
     except ValueError as err:
         raise ComexioResponseError(
             f"{what} failed: Comexio redirected to an unparsable location {_excerpt(location)}", status=resp.status
@@ -3590,21 +3612,12 @@ def _redirect_target(
     return target
 
 
-def _web_host(url: str) -> tuple[bool, str | None]:
-    """Whether url is http(s), and its host; ValueError for a malformed port (like _https_origin)."""
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    """Scheme, host and port of url, the port filled in for http and https; ValueError for a malformed port."""
     parts = urlsplit(url)
-    _ = parts.port  # parses the port, so a malformed one raises here and not inside aiohttp
-    return parts.scheme.lower() in _WEB_SCHEMES, parts.hostname
-
-
-def _https_origin(url: str) -> tuple[str, str | None, int | None]:
-    """Scheme, host and port of url, the port filled in for https; ValueError for a malformed port."""
-    parts = urlsplit(url)
-    return (
-        parts.scheme.lower(),
-        parts.hostname,
-        _HTTPS_DEFAULT_PORT if parts.port is None and parts.scheme.lower() == "https" else parts.port,
-    )
+    scheme = parts.scheme.lower()
+    port = parts.port  # parses the port, so a malformed one raises here and not inside aiohttp
+    return scheme, parts.hostname, _DEFAULT_PORTS.get(scheme) if port is None else port
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
