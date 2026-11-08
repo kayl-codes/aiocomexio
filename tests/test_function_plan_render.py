@@ -23,6 +23,7 @@ from aiocomexio.function_plan import (
 )
 from aiocomexio.function_plan.render_geometry import _build_geometries
 from aiocomexio.function_plan.render_labels import strip_xml_forbidden, with_block_values
+from aiocomexio.function_plan.render_values import _fmt_value
 from tests.common import FIXTURES_DIR, load_json_fixture
 
 
@@ -509,6 +510,57 @@ def test_a_onewire_sensor_is_hot_only_when_digital_and_reading_1(
     geo = _build_geometries(_ONEWIRE_ELEMENT, {}, {}, {}, {}, {}, None, sensors)["1"]
 
     assert (geo["value_raw"], geo["analog"], geo["hot"], geo["pins"]) == (1, analog, hot, analog is not None)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_reading_shows_as_no_value(value: float) -> None:
+    sensors = {"3": {"name": "OT3 Keller", "address": "OT3", "type": "analog", "value": value}}
+
+    svg = render_plan_svg(_ONEWIRE_ELEMENT, {}, {}, {}, {}, {}, title="T", onewire_by_id=sensors)
+
+    assert [t.text for t in _group_of(svg, "1").iter(f"{_SVG_NS}text")] == ["OT3", "Keller"]
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (float("nan"), ""),
+        (float("-inf"), ""),
+        ("nan", ""),
+        ("Infinity", ""),
+        (1.5, "1,5"),
+        (0, "0"),
+        (True, "1"),
+        ("an", "an"),
+    ],
+)
+def test_fmt_value_hides_only_non_finite_numbers(value: object, text: str) -> None:
+    """Shared by every pill (marker, KNX, IO, 1-Wire) and the t1/t2 block labels."""
+    assert _fmt_value(value) == text
+
+
+def test_flow_diagram_names_onewire_sensors_and_knx_objects_from_their_maps() -> None:
+    elements = {
+        "1": {"reference": {"type": 12, "ref_id": 3}, "name": "", "position_x": 0, "position_y": 0},
+        "2": {"reference": {"type": 11, "ref_id": 5}, "name": "", "position_x": 0, "position_y": 100},
+        "3": {"reference": {"type": 2, "ref_id": 9}, "name": "", "position_x": 300, "position_y": 0},
+    }
+    connections = {
+        str(src): {"input": {"FubElementId": src, "IOPos": 0}, "output": [{"FubElementId": 3, "IOPos": src}]}
+        for src in (1, 2)
+    }
+    markers = {"9": {"name": "M9 Ziel"}}
+
+    def flow(**maps: Any) -> str:
+        return render_flow_svg(elements, connections, {}, markers, {}, {}, title="T", **maps)[0]
+
+    named = flow(
+        onewire_by_id={"3": {"name": "OT3 Keller", "address": "OT3", "type": "analog"}},
+        knx_by_id={"5": {"name": "K5 Licht"}},
+    )
+    assert "OT3 Keller</text>" in named
+    assert "K5 Licht</text>" in named
+    assert "1-Wire ref=3</text>" in flow()
 
 
 @pytest.mark.parametrize("etype", [2, 11], ids=["marker", "knx"])

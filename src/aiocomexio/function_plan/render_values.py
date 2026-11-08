@@ -7,6 +7,7 @@ goes in its pill" — no SVG markup and no geometry/coordinate math (see
 render_geometry.py for that).
 """
 
+import math
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -146,11 +147,12 @@ def _is_high(value: Any) -> bool:
 
 
 def _fmt_value(value: Any) -> str:
-    """Live value display like Studio: compact number, German decimal comma."""
+    """Live value display like Studio: compact number, German decimal comma; nan/inf show as no value."""
     if value is None or value == "":
         return ""
     try:
-        return f"{float(value):g}".replace(".", ",")
+        number = float(value)
+        return f"{number:g}".replace(".", ",") if math.isfinite(number) else ""
     except OverflowError:
         return ""  # an int beyond the float range is no Comexio value, and str() of it can exceed the digit limit
     except (TypeError, ValueError):

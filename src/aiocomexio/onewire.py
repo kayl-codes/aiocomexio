@@ -252,7 +252,26 @@ def parse_onewire_config(fub_modules: Mapping[str, Any]) -> dict[str, OneWireSen
         _LOGGER.warning("Skipped %d active 1-Wire entries without a usable Prefix and Id", unusable)
     if active and not sensors:
         raise ComexioDataError(f"None of the {active} active 1-Wire entries has a usable Prefix and Id")
+    _warn_on_shared_ids(sensors)
     return sensors
+
+
+def _warn_on_shared_ids(sensors: Mapping[str, OneWireSensor]) -> None:
+    """Log sensors that share an Id under different prefixes.
+
+    A function plan element names its sensor by Id alone (ref_id = config_id), so a map keyed by
+    config_id can hold only one of them. Both stay in the result: each has its own address and command.
+    """
+    by_id: dict[int, list[str]] = {}
+    for sensor in sensors.values():
+        by_id.setdefault(sensor.config_id, []).append(sensor.address)
+    for config_id, addresses in by_id.items():
+        if len(addresses) > 1:
+            _LOGGER.warning(
+                "1-Wire sensors %s share the Id %d, a function plan element shows only one of them",
+                ", ".join(sorted(addresses)),
+                config_id,
+            )
 
 
 def _number_of(raw: Any) -> float | None:

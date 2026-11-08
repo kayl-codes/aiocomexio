@@ -370,6 +370,8 @@ def test_build_webio_commands_gives_every_command_the_path_of_its_own_item(
     commands = build_webio_commands(path_for, source, webio_class)
 
     assert commands
+    # A callable path builds every command a fixed path builds, not just the first ones it was asked for.
+    assert len(commands) == len(asked) == len(build_webio_commands(_HOOK, source, webio_class))
     # Exactly the paths the callback returned, one per command, and only for the wanted class.
     assert sorted(cmd["Parameter"] for cmd in commands) == sorted(path for _, path in asked)
     assert {cls for cls, _ in asked} == {webio_class}

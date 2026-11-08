@@ -116,8 +116,9 @@ The three 1-Wire calls all need the admin session (`login()` first):
 - `get_onewire_sensors()` returns the active configured sensors keyed by address (`OT1`, `OH3`, …);
   inactive entries are left out. An active entry without a usable `Prefix` or `Id` is skipped (and
   logged); if active entries exist but none is usable, the call raises `ComexioDataError`. Two
-  active entries with the same address collapse to one: the later one wins (logged). It costs one
-  config fetch.
+  active entries with the same address collapse to one: the later one wins (logged). Two entries
+  with the same `Id` but different prefixes both stay, and a warning is logged, because a function
+  plan names a sensor by its `Id` alone. It costs one config fetch.
 - `get_onewire_status()` returns the live state of the sensors Comexio reports, keyed by address.
   It is read from Comexio's 1-Wire monitor, which is not an official interface, so a changed answer
   raises `ComexioDataError`. An item without an address is skipped (and logged), so a sensor can be
@@ -175,6 +176,8 @@ In a function plan, a sensor is element type 12 with its `config_id` as `ref_id`
 command like a marker. To show the sensors by name in `function_plan.render_plan_svg`, pass
 `onewire_by_id`: the sensors keyed by `str(config_id)`, each `{"name": …, "address": …, "type":
 sensor.kind, "value": …}`. Without it a sensor renders as `1-Wire ref=<config_id>`.
+`render_flow_svg` takes the same map (and `knx_by_id`) for its box labels. A value that is not
+finite (`nan`, `inf`) shows as no value.
 
 ## Development
 

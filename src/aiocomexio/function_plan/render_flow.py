@@ -274,6 +274,8 @@ def _build_boxes(
     ios_by_id: ItemsById,
     cycle_ids: set[str],
     block_values: BlockValues | None = None,
+    knx_by_id: ItemsById | None = None,
+    onewire_by_id: ItemsById | None = None,
 ) -> dict[str, dict[str, Any]]:
     """One box per wired element — just enough shape info for _position_boxes/drawing. No pin/
     port/type detail (that's the whole point of this simplified diagram), but a per-role
@@ -281,7 +283,15 @@ def _build_boxes(
     fub_base = catalog.get("fub_base", {})
     boxes: dict[str, dict[str, Any]] = {}
     for eid in wired_ids:
-        label_text = resolve_element_label(elements[eid], catalog, markers_by_id, webio_by_id, ios_by_id)
+        label_text = resolve_element_label(
+            elements[eid],
+            catalog,
+            markers_by_id,
+            webio_by_id,
+            ios_by_id,
+            knx_by_id=knx_by_id,
+            onewire_by_id=onewire_by_id,
+        )
         full_label = label_text.splitlines()[0]
         label = full_label if len(full_label) <= _MAX_LABEL_LEN else f"{full_label[: _MAX_LABEL_LEN - 1]}…"
         if eid in cycle_ids:
@@ -658,6 +668,8 @@ def render_flow_svg(
     title: str,
     title_suffix: str = "",
     block_values: BlockValues | None = None,
+    knx_by_id: ItemsById | None = None,
+    onewire_by_id: ItemsById | None = None,
 ) -> tuple[str, int]:
     """Render a plain box-and-arrow flow chart of the plan's signal order.
 
@@ -669,6 +681,9 @@ def render_flow_svg(
     block_values: optional {element id: {setting name: value}} (see render_plan_svg); a block's
     hover text lists them as "Name: Value" lines. Like there, block_values must describe the same
     plan state as elements (a backup snapshot: its own stored settings, never the live ones).
+
+    knx_by_id / onewire_by_id: optional KNX object and 1-Wire sensor maps, as for render_plan_svg;
+    without them those elements are labelled by their ids only.
     """
     incoming, outgoing = build_wiring(connections)
     wired_ids = _wired_element_ids(elements, incoming, outgoing)
@@ -685,7 +700,18 @@ def render_flow_svg(
     layer_of = _assign_layers(wired_ids, _predecessors(wired_ids, incoming, back_edges))
     reset_groups = detect_self_reset_cycles(elements, connections, catalog)
     cycle_ids = {eid for group in reset_groups for eid in group if eid in wired_ids}
-    boxes = _build_boxes(wired_ids, elements, catalog, markers_by_id, webio_by_id, ios_by_id, cycle_ids, block_values)
+    boxes = _build_boxes(
+        wired_ids,
+        elements,
+        catalog,
+        markers_by_id,
+        webio_by_id,
+        ios_by_id,
+        cycle_ids,
+        block_values,
+        knx_by_id,
+        onewire_by_id,
+    )
     edges = _collect_edges(incoming, boxes)
     preds_of, succs_of = _neighbor_maps(edges)
     _push_sinks_to_bottom(layer_of, succs_of)
