@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -37,6 +38,21 @@ from tests.common import load_json_fixture
 
 _HOOK = "/api/webhook/comexio_srv"
 _GENERIC_RANGE: tuple[float, float] = (WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX)
+_BAD_ONEWIRE_DATA = 'parsed_data["onewire"] must map addresses to OneWireSensor'
+
+
+def _exactly(message: str) -> str:
+    """A pytest.raises match pattern that accepts message only, without extra or missing text."""
+    return f"^{re.escape(message)}$"
+
+
+def _webio_log(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
+    """Level and full message of every warning or error aiocomexio.webio logged."""
+    return [
+        (r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.name == "aiocomexio.webio" and r.levelno >= logging.WARNING
+    ]
 
 
 @pytest.fixture
@@ -450,7 +466,7 @@ def test_build_onewire_webio_command_digital() -> None:
 def test_build_onewire_webio_command_refuses_an_unknown_kind(kind: str | None) -> None:
     sensor = _sensor(4, "OT", kind)
 
-    with pytest.raises(ValueError, match="'OT4' has an unknown kind"):
+    with pytest.raises(ValueError, match=_exactly("1-Wire sensor 'OT4' has an unknown kind, no Web-IO command")):
         build_onewire_webio_command(sensor, _HOOK)
 
 
@@ -494,10 +510,12 @@ def test_build_webio_commands_skips_a_sensor_of_unknown_kind(
     assert "HA 1Wire OT4" not in names
     assert "HA 1Wire OT5" not in names
     assert all(getattr(item, "address", None) not in ("OT4", "OT5") for item in asked)
-    assert "2 1-Wire sensors are of unknown kind (neither analog nor digital) and get no Web-IO command: OT4, OT5" in (
-        caplog.text
-    )
-    assert [r.levelno for r in caplog.records if "unknown kind" in r.message] == [logging.WARNING]
+    assert _webio_log(caplog) == [
+        (
+            logging.WARNING,
+            "2 1-Wire sensors are of unknown kind (neither analog nor digital) and get no Web-IO command: OT4, OT5",
+        )
+    ]
 
 
 @pytest.mark.parametrize("onewire", [None, {}])
@@ -517,10 +535,46 @@ def test_build_webio_commands_without_the_onewire_key_builds_no_onewire_command(
     [[], "", ["OT1"], {"OT1": {"address": "OT1", "kind": "analog"}}],
     ids=["empty list", "empty str", "list", "dict value"],
 )
-def test_build_webio_commands_refuses_onewire_data_of_another_type(parsed: dict[str, Any], onewire: Any) -> None:
+@pytest.mark.parametrize("webio_class", [None, WebioClass.ONEWIRE])
+def test_build_webio_commands_refuses_onewire_data_of_another_type(
+    parsed: dict[str, Any], onewire: Any, webio_class: WebioClass | None
+) -> None:
     """A wrong value never passes as an installation without sensors."""
-    with pytest.raises(TypeError, match=r'parsed_data\["onewire"\] must map addresses to OneWireSensor'):
-        build_webio_commands(_HOOK, {**parsed, "onewire": onewire}, WebioClass.ONEWIRE)
+    source = {**parsed, "onewire": onewire}
+
+    with pytest.raises(TypeError, match=_exactly(_BAD_ONEWIRE_DATA)):
+        build_webio_commands(_HOOK, source, webio_class)
+
+
+@pytest.mark.parametrize(
+    "onewire",
+    [
+        [],
+        "",
+        ["OT1"],
+        {"OT1": {"address": "OT1", "kind": "analog"}},
+        {"OT2": _sensor(2, "OT", TYPE_ANALOG), "OT1": "x"},
+    ],
+    ids=["empty list", "empty str", "list", "dict value", "one value not a sensor"],
+)
+@pytest.mark.parametrize(
+    ("webio_class", "label"),
+    [(WebioClass.MARKER, "Marker"), (WebioClass.IO, "IO"), (WebioClass.KNX, "KNX"), (WebioClass.QUICKBUS, "Quickbus")],
+)
+def test_onewire_data_of_another_type_does_not_abort_another_class(
+    parsed: dict[str, Any], caplog: pytest.LogCaptureFixture, onewire: Any, webio_class: WebioClass, label: str
+) -> None:
+    """Like a malformed marker id, bad 1-Wire data must not abort the upload of an unrelated class."""
+    commands = build_webio_commands(_HOOK, {**parsed, "onewire": onewire}, webio_class)
+
+    assert commands == build_webio_commands(_HOOK, parsed, webio_class)
+    assert _webio_log(caplog) == [
+        (
+            logging.ERROR,
+            f"{_BAD_ONEWIRE_DATA}; the {label} commands are built without 1-Wire sensors "
+            "and not checked for name collisions with them",
+        )
+    ]
 
 
 @pytest.mark.parametrize("webio_class", [WebioClass.MARKER, WebioClass.IO, WebioClass.KNX])
@@ -547,7 +601,12 @@ def test_a_onewire_command_name_colliding_with_a_marker_drops_both(
 
     for webio_class in (WebioClass.ONEWIRE, WebioClass.MARKER):
         assert "HA 1Wire OT2" not in [cmd["Name"] for cmd in build_webio_commands(_HOOK, source, webio_class)]
-    assert "HA 1Wire OT2" in caplog.text
+    collision = (
+        logging.WARNING,
+        "1 Web-IO command names are generated more than once, those commands are left out "
+        "(rename the item in Comexio or change the naming schema): HA 1Wire OT2",
+    )
+    assert _webio_log(caplog) == [collision, collision]
 
 
 def test_generate_webio_json_for_the_onewire_class(parsed: dict[str, Any]) -> None:

@@ -13,6 +13,7 @@ from typing import Any
 
 from .config import TYPE_ANALOG, TYPE_DIGITAL, log_excerpt
 from .const import (
+    WEBIO_CLASS_LABEL,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_INT16_DANGER_ZONE,
     WEBIO_IO_DEFAULT_MAX_ANALOG,
@@ -308,6 +309,7 @@ def build_quickbus_webio_command(
 
 # The 1-Wire sensor kinds that get a Web-IO command.
 _ONEWIRE_KINDS = frozenset({TYPE_ANALOG, TYPE_DIGITAL})
+_ONEWIRE_DATA_ERROR = 'parsed_data["onewire"] must map addresses to OneWireSensor'
 
 
 def onewire_command_name(sensor: OneWireSensor) -> str:
@@ -451,8 +453,10 @@ def build_webio_commands(
 
     parse_config does not read 1-Wire sensors: their commands come from parsed_data["onewire"],
     the address -> OneWireSensor mapping of get_onewire_sensors / parse_onewire_config, which the
-    consumer adds itself (absent or None: no 1-Wire commands, any other value than such a mapping:
-    TypeError). A sensor of unknown kind gets no command and is logged (see build_onewire_webio_command).
+    consumer adds itself (absent or None: no 1-Wire commands; any other value than such a mapping
+    raises TypeError when webio_class is None or ONEWIRE, and is logged as an error by a build of
+    another class, which then goes on without the sensors). A sensor of unknown kind gets no command
+    and is logged (see build_onewire_webio_command).
     """
     _check_server(server)  # also when there is no command to build, so a bad value never goes unnoticed
     commands: list[tuple[WebioClass, dict[str, Any]]] = [
@@ -503,14 +507,25 @@ def _onewire_commands(
 ) -> list[tuple[WebioClass, dict[str, Any]]]:
     """The 1-Wire commands of parsed_data["onewire"] by config id; a sensor of unknown kind is skipped (logged).
 
-    Absent or None means no 1-Wire sensors; anything but a mapping of OneWireSensor raises TypeError,
-    so a wrong value never passes as an installation without sensors.
+    Absent or None means no 1-Wire sensors. Anything but a mapping of OneWireSensor raises TypeError
+    when the build includes the 1-Wire class, so a wrong value never passes as an installation without
+    sensors; a build of another class logs it as an error and goes on without them, like _is_ignored
+    keeps a malformed id from aborting the upload of an unrelated class. Until the data is fixed, a
+    command of that class whose name collides with a 1-Wire command is then kept; the 1-Wire build
+    itself still raises, so the colliding 1-Wire command is never uploaded.
     """
     sensors = parsed_data.get("onewire")
     if sensors is None:
         return []
     if not isinstance(sensors, Mapping) or not all(isinstance(s, OneWireSensor) for s in sensors.values()):
-        raise TypeError('parsed_data["onewire"] must map addresses to OneWireSensor')
+        if webio_class not in (None, WebioClass.ONEWIRE):
+            _LOGGER.error(
+                "%s; the %s commands are built without 1-Wire sensors and not checked for name collisions with them",
+                _ONEWIRE_DATA_ERROR,
+                WEBIO_CLASS_LABEL[webio_class],
+            )
+            return []
+        raise TypeError(_ONEWIRE_DATA_ERROR)
     known = sorted((s for s in sensors.values() if s.kind in _ONEWIRE_KINDS), key=lambda s: (s.config_id, s.address))
     if unknown := sorted(s.address for s in sensors.values() if s.kind not in _ONEWIRE_KINDS):
         # Like a name collision, logged on every build: the sensor stays without pushed values until fixed.
