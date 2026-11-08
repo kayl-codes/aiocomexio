@@ -35,6 +35,16 @@ import aiohttp
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from .config import iter_group
+from .doorstation import (
+    CAMERA_ID_ATTRIBUTE,
+    DOORSTATION_ATTRIBUTES,
+    EXT_ID_ATTRIBUTE,
+    JPEG_EOI,
+    Doorstation,
+    doorstation_stream_path,
+    doorstations_from_attributes,
+    first_jpeg_frame,
+)
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioCertificateMismatchError,
@@ -47,6 +57,7 @@ from .exceptions import (
 )
 from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_missing_collections
 from .onewire import (
+    _ANY_TYPE_COUNTER,
     OneWireSensor,
     OneWireStatus,
     parse_onewire_config,
@@ -94,6 +105,14 @@ _BUS_WORKLOAD_PATH = "/admin/in_output/inoutputinfo"
 _ONEWIRE_STATUS_PATH = "/admin/knx_one_wire/read1WireStati/"
 _ONEWIRE_MONITOR_PATH = "/admin/knx_one_wire/one_wire/"
 _BUS_WORKLOAD_REFERER_PATH = "/admin/in_output/home"
+_IO_HOME_PAGE = "IO home page"
+# How long get_doorstation_snapshot waits for the first frame, and how much of the stream it reads at most: a
+# frame is about 90 KB at 1280x720, so a stream without a frame in its first MBs is no camera stream.
+_SNAPSHOT_TIMEOUT_SEC = 10.0
+_MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+# Every extension block of the IO home page carries a device counter: a <div> with an id number_of_<ext> and a
+# class number_of_type_<n>, the markup parse_onewire_device_count reads.
+_EXTENSION_COUNTER_ID_PREFIX = "number_of_"
 _EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
 _SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
 _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
@@ -985,8 +1004,45 @@ class ComexioClient:
 
         One request for the whole IO home page (about 0.9 MB on a full installation).
         """
-        html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what="IO home page")
+        html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what=_IO_HOME_PAGE)
         return parse_onewire_device_count(html)
+
+    async def get_doorstations(self) -> dict[int, Doorstation]:
+        """The Doorstations of the IO-Server, keyed by extension id (empty: the page shows none).
+
+        One request for the whole IO home page (see get_onewire_device_count); see parse_doorstations.
+        """
+        html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what=_IO_HOME_PAGE)
+        return parse_doorstations(html)
+
+    def doorstation_stream_url(self, camera_id: int) -> str:
+        """URL of the MJPEG stream of a Doorstation camera on the IO-Server (Doorstation.camera_id)."""
+        return f"{self._base_url}{doorstation_stream_path(camera_id)}"
+
+    async def get_doorstation_snapshot(self, camera_id: int) -> bytes:
+        """The current image of a Doorstation camera: the first complete JPEG of its MJPEG stream.
+
+        Reads the stream with the admin session until the first frame is complete, then closes it. A stream that
+        brings no frame within _SNAPSHOT_TIMEOUT_SEC seconds (the wait for the login gate included) raises
+        ComexioConnectionError, as does a stream that breaks off; one that ends or passes _MAX_SNAPSHOT_BYTES
+        without a frame, or whose frame is malformed, raises ComexioDataError, the login form
+        ComexioAuthenticationError. A malformed frame shows only once a JPEG end marker arrived: a stream without
+        one runs into the byte cap or the timeout.
+        """
+        path = doorstation_stream_path(camera_id)
+        what = f"Doorstation camera {camera_id} snapshot"
+        deadline = asyncio.timeout(_SNAPSHOT_TIMEOUT_SEC)
+        try:
+            async with deadline, self._response("GET", path, what=what) as resp:
+                if resp.status != HTTPStatus.OK:
+                    raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
+                return await _read_first_frame(resp, what)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            # Only the snapshot's own deadline means no frame came; aiohttp's timeouts (the session's total one,
+            # connect, socket read) are transport errors like on every other request.
+            if deadline.expired():
+                raise ComexioConnectionError(f"{what}: no complete frame within {_SNAPSHOT_TIMEOUT_SEC} s") from err
+            raise self._transport_error(what, err) from err
 
     async def get_onewire_sensors(self) -> dict[str, OneWireSensor]:
         """The active 1-Wire sensors of the configuration, keyed by address (OT1, OH3, ...).
@@ -3061,6 +3117,83 @@ class _CommandRangeParser(_FormParser):
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag == "input" and (field := _WEBIO_RANGE_INPUT_IDS.get(attributes.get("id", ""))) is not None:
             self.fields.setdefault(field, attributes.get("value"))
+
+
+class _DoorstationParser(_FormParser):
+    """The Doorstation attributes of every element carrying data-camera_id, read as a browser reads them.
+
+    Only the distinct attribute sets are kept, in the order they first appear: a Doorstation tab repeats them on
+    many elements, so the parser's state grows with the Doorstations, not with the page.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.elements: dict[tuple[tuple[str, str], ...], None] = {}
+        self.saw_io_page = False  # an extension block's device counter or a Doorstation element was seen
+
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        if (
+            EXT_ID_ATTRIBUTE in attributes
+            or CAMERA_ID_ATTRIBUTE in attributes
+            or _is_extension_counter(tag, attributes)
+        ):
+            self.saw_io_page = True
+        if CAMERA_ID_ATTRIBUTE in attributes:
+            kept = tuple((name, attributes[name]) for name in DOORSTATION_ATTRIBUTES if name in attributes)
+            self.elements.setdefault(kept, None)
+
+
+def _is_extension_counter(tag: str, attributes: dict[str, str]) -> bool:
+    """Whether a tag is the device counter of an extension block (see _EXTENSION_COUNTER_ID_PREFIX)."""
+    return (
+        tag == "div"
+        and attributes.get("id", "").startswith(_EXTENSION_COUNTER_ID_PREFIX)
+        and any(name.startswith(_ANY_TYPE_COUNTER) for name in attributes.get("class", "").split())
+    )
+
+
+def parse_doorstations(io_home_html: str) -> dict[int, Doorstation]:
+    """The Doorstations of the IO home page, keyed by extension id (see doorstation.doorstations_from_attributes).
+
+    Every extension block of the page, BASE included, carries a device counter (see _EXTENSION_COUNTER_ID_PREFIX).
+    A page with such counters but no element with data-camera_id has no Doorstation and gives an empty result. A
+    page with neither counters nor Doorstation elements is a changed page, not an installation without Doorstations:
+    that raises ComexioDataError, so a caller never drops its cameras on a silent empty result. Limit: a firmware
+    that renames data-camera_id but keeps the counters looks like an installation without Doorstations.
+    """
+    parser = _DoorstationParser()
+    parser.feed(io_home_html)
+    parser.close()
+    if not parser.saw_io_page:
+        raise ComexioDataError("IO home page has no extension counters, the Doorstations are unknown")
+    return doorstations_from_attributes(dict(element) for element in parser.elements)
+
+
+async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
+    """The first complete JPEG of a stream response; see ComexioClient.get_doorstation_snapshot."""
+    received = bytearray()
+    async for chunk in resp.content.iter_any():
+        received += chunk
+        # A frame is complete only once its EOI arrived; looking for it only in the new bytes (and the byte before
+        # them, a marker may span two chunks) keeps the stream from being rescanned for every chunk.
+        new_bytes = received[-len(chunk) - 1 :]
+        if JPEG_EOI in new_bytes and (frame := _complete_frame(received, what)) is not None:
+            return frame
+        if len(received) > _MAX_SNAPSHOT_BYTES:
+            raise ComexioDataError(f"{what}: no complete JPEG in the first {_MAX_SNAPSHOT_BYTES} bytes of the stream")
+    if _LOGIN_FORM_SUBMIT_MARKER.encode() in received:
+        raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
+    raise ComexioDataError(
+        f"{what}: the stream ({resp.content_type!r}) ended after {len(received)} bytes without a complete JPEG"
+    )
+
+
+def _complete_frame(received: bytearray, what: str) -> bytes | None:
+    """first_jpeg_frame of the stream so far, its ComexioDataError naming the camera."""
+    try:
+        return first_jpeg_frame(received)
+    except ComexioDataError as err:
+        raise ComexioDataError(f"{what}: {err}") from err
 
 
 class _CommandTextParser(_FormParser):

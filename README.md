@@ -182,6 +182,30 @@ instead of showing one of the sensors.
 `render_flow_svg` takes the same map (and `knx_by_id`) for its box labels. A value that is not
 finite (`nan`, `inf`) shows as no value.
 
+### Doorstation
+
+A Comexio Doorstation is an extension of the IO-Server with a camera. Its IOs (`PIR1`, the bell
+buttons `DI1`–`DI3`, `NameLED1`, …) come through `config.parse_config` like those of any other
+extension. The camera calls need the admin session (`login()` first):
+
+- `get_doorstations()` reads the IO home page and returns the Doorstations keyed by extension id.
+  Each `Doorstation` has `ext_id`, `camera_id` and `name` (the extension name, `None` if the page
+  carries none). An empty map means the page lists extensions but no Doorstation; a page without the
+  device counters of its extension blocks (the ones `get_onewire_device_count()` reads) raises
+  `ComexioDataError`. Elements whose ids are not positive integers are skipped (and logged); if there are
+  such elements but none is usable, the call raises `ComexioDataError`. Detection follows the IO home page
+  of Comexio OS 11.0.2: the elements of a Doorstation tab carry `data-extid`, `data-extname` and
+  `data-camera_id`.
+- `doorstation_stream_url(camera_id)` is the URL of the camera's MJPEG stream on the IO-Server
+  (`/proxy/cam/<camera_id>/`, `multipart/x-mixed-replace`, one JPEG per part).
+- `get_doorstation_snapshot(camera_id)` returns the current image: the first complete JPEG of that
+  stream, read with the admin session. A stream without a frame within 10 seconds, or one that breaks
+  off, raises `ComexioConnectionError`; one that ends or passes 4 MB without a frame, or a malformed
+  frame, raises `ComexioDataError`; the login form raises `ComexioAuthenticationError`.
+
+The Doorstation serves the same stream under its own address, reportedly without a login. If you
+use it, keep the Doorstation in a network segment that only trusted hosts can reach.
+
 ## Development
 
 ```bash
