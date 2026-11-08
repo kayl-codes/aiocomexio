@@ -40,9 +40,9 @@ from .doorstation import (
     DOORSTATION_ATTRIBUTES,
     JPEG_EOI,
     Doorstation,
+    JpegFrameReader,
     doorstation_stream_path,
     doorstations_from_attributes,
-    first_jpeg_frame,
 )
 from .exceptions import (
     ComexioAuthenticationError,
@@ -387,10 +387,11 @@ _PLAN_DPI_RANGE = range(45, 121)
 # save_fub / delete answer with a redirect whose query carries the verdict as one (key, value)
 # parameter; the home page renders its message from exactly that parameter (verified live).
 _REDIRECT_STATUSES = frozenset({HTTPStatus.MOVED_PERMANENTLY, HTTPStatus.FOUND, HTTPStatus.SEE_OTHER})
-# Redirects a pinned client follows itself (aiohttp would also follow one to plain http://, without
-# the pin, and send the session cookie along). Like aiohttp, a POST turns into a GET on 301/302/303.
+# Redirects the client follows itself (aiohttp would follow one anywhere: a pinned client to plain http://,
+# without the pin, any client to another host). Like aiohttp, a POST turns into a GET on 301/302/303.
 _FOLLOWED_REDIRECT_STATUSES = _REDIRECT_STATUSES | {HTTPStatus.TEMPORARY_REDIRECT, HTTPStatus.PERMANENT_REDIRECT}
 _MAX_REDIRECTS = 10
+_WEB_SCHEMES = frozenset({"http", "https"})
 _PLAN_ADDED_CONFIRMATION = ("added", "1")
 _PLAN_SAVED_CONFIRMATION = ("saved", "1")
 _PLAN_DELETED_CONFIRMATION = ("delete", "ok")
@@ -2177,24 +2178,22 @@ class ComexioClient:
     async def _response(
         self, method: str, path: str, *, what: str, **kwargs: Any
     ) -> AsyncIterator[aiohttp.ClientResponse]:
-        """The response to one request; a pinned client follows redirects itself, only within its HTTPS origin.
+        """The response to one request; the client follows redirects itself, a pinned one only within its HTTPS origin.
 
         A redirect that leaves the pinned origin (plain http://, another host or port) raises
         ComexioResponseError before it is followed, so neither the session cookie nor credentials
-        go anywhere the pin does not cover. Every request goes through the login gate.
+        go anywhere the pin does not cover. An unpinned client follows a redirect only on the same host (see
+        _unpinned_redirect_target). Every request goes through the login gate.
         """
+        redirect_target = _unpinned_redirect_target if self._fingerprint is None else _pinned_redirect_target
         async with self._gate.request():
             url = f"{self._base_url}{path}"
-            if self._fingerprint is None:
-                async with self._session.request(method, url, ssl=self._ssl, **kwargs) as resp:
-                    yield resp
-                return
             for _ in range(_MAX_REDIRECTS + 1):
                 async with self._session.request(method, url, ssl=self._ssl, allow_redirects=False, **kwargs) as resp:
                     if resp.status not in _FOLLOWED_REDIRECT_STATUSES:
                         yield resp
                         return
-                    url = _pinned_redirect_target(resp, what)
+                    url = redirect_target(resp, what)
                     # The Location carries its own query; like aiohttp, a 303 (except on a HEAD) and a POST on
                     # 301/302 continue as a body-less GET.
                     kwargs.pop("params", None)
@@ -3171,6 +3170,7 @@ def parse_doorstations(io_home_html: str) -> dict[int, Doorstation]:
 async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
     """The first complete JPEG of a stream response; see ComexioClient.get_doorstation_snapshot."""
     received = bytearray()
+    reader = JpegFrameReader()
     async for chunk in resp.content.iter_any():
         # Bytes past the cap are not kept: a frame that ends beyond it is too large, like no frame at all.
         kept = chunk[: _MAX_SNAPSHOT_BYTES - len(received)]
@@ -3179,7 +3179,7 @@ async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
         # A frame is complete only once its EOI arrived; looking for it only in the new bytes (and the byte before
         # them, a marker may span two chunks) keeps the stream from being rescanned for every chunk.
         new_bytes = received[-len(kept) - 1 :]
-        if JPEG_EOI in new_bytes and (frame := _complete_frame(received, what)) is not None:
+        if JPEG_EOI in new_bytes and (frame := _complete_frame(reader, received, what)) is not None:
             return frame
         if over_cap:
             raise ComexioDataError(f"{what}: no complete JPEG in the first {_MAX_SNAPSHOT_BYTES} bytes of the stream")
@@ -3190,10 +3190,10 @@ async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
     )
 
 
-def _complete_frame(received: bytearray, what: str) -> bytes | None:
-    """first_jpeg_frame of the stream so far, its ComexioDataError naming the camera."""
+def _complete_frame(reader: JpegFrameReader, received: bytearray, what: str) -> bytes | None:
+    """The first complete JPEG of the stream so far (reader goes on where it stopped), its error naming the camera."""
     try:
-        return first_jpeg_frame(received)
+        return reader.frame(received)
     except ComexioDataError as err:
         raise ComexioDataError(f"{what}: {err}") from err
 
@@ -3554,6 +3554,22 @@ def _bulk_plan_entry(
 
 def _pinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
     """Where a redirect of a pinned client leads; ComexioResponseError unless it stays on the same HTTPS origin."""
+    return _redirect_target(resp, what, _https_origin, "outside the pinned HTTPS connection")
+
+
+def _unpinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
+    """Where a redirect of an unpinned client leads; ComexioResponseError unless it stays on the same host.
+
+    Scheme and port may change (plain HTTP sent on to HTTPS), the host may not: a peer that could redirect anywhere
+    could make the caller request any host its network reaches.
+    """
+    return _redirect_target(resp, what, _web_host, "away from the Comexio host")
+
+
+def _redirect_target(
+    resp: aiohttp.ClientResponse, what: str, place: Callable[[str], tuple[object, ...]], outside: str
+) -> str:
+    """Where a redirect leads; ComexioResponseError unless place() gives the same key for it as for the current URL."""
     location = resp.headers.get("Location", "")
     if not location:
         raise ComexioResponseError(
@@ -3562,17 +3578,23 @@ def _pinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
     current = str(resp.url)
     try:
         target = urljoin(current, location)
-        same_origin = _https_origin(target) == _https_origin(current)
+        same_place = place(target) == place(current)
     except ValueError as err:
         raise ComexioResponseError(
             f"{what} failed: Comexio redirected to an unparsable location {_excerpt(location)}", status=resp.status
         ) from err
-    if not same_origin:
+    if not same_place:
         raise ComexioResponseError(
-            f"{what} refused: Comexio redirected to {_excerpt(location)}, outside the pinned HTTPS connection",
-            status=resp.status,
+            f"{what} refused: Comexio redirected to {_excerpt(location)}, {outside}", status=resp.status
         )
     return target
+
+
+def _web_host(url: str) -> tuple[bool, str | None]:
+    """Whether url is http(s), and its host; ValueError for a malformed port (like _https_origin)."""
+    parts = urlsplit(url)
+    _ = parts.port  # parses the port, so a malformed one raises here and not inside aiohttp
+    return parts.scheme.lower() in _WEB_SCHEMES, parts.hostname
 
 
 def _https_origin(url: str) -> tuple[str, str | None, int | None]:

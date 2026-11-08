@@ -10,6 +10,7 @@ this module turns their attributes into Doorstation entries and finds a complete
 """
 
 import logging
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
@@ -40,6 +41,8 @@ _STANDALONE_CODES = frozenset({0x01, *range(0xD0, 0xD8)})
 _NO_SEGMENT_CODES = frozenset({0x00, _SOI[1]})
 # Inside entropy-coded data 0xFF 0x00 is a stuffed 0xFF byte and RST0-RST7 belong to the scan.
 _IN_SCAN_CODES = frozenset({0x00, *range(0xD0, 0xD8)})
+# Restart markers with their fill bytes and nothing else: a scan of only these has no entropy-coded data.
+_MARKERS_ONLY = re.compile(rb"(?:\xff+[\xd0-\xd7])*")
 # A segment's length field counts itself, so it is at least 2.
 _MIN_SEGMENT_LENGTH = 2
 
@@ -152,54 +155,90 @@ def first_jpeg_frame(data: bytes | bytearray) -> bytes | None:
     their length fields, so an EOI inside them (an embedded thumbnail) does not end the image early. Data before
     the first SOI (a multipart boundary and its headers) is skipped. A marker that is missing where the structure of
     a JPEG needs one, a segment shorter than its length field, a stuffed byte or second SOI between the segments, a
-    scan without entropy-coded data, or an EOI before the first scan (an image without picture data) raises
-    ComexioDataError.
+    scan without entropy-coded data (nothing but restart markers counts as none), or an EOI before the first scan (an
+    image without picture data) raises ComexioDataError.
     """
-    start = data.find(_SOI)
-    if start < 0:
-        return None
-    end = _image_end(data, start + len(_SOI))
-    return None if end is None else bytes(data[start:end])
+    return JpegFrameReader().frame(data)
 
 
-def _image_end(data: bytes | bytearray, pos: int) -> int | None:
-    """Offset after the EOI of the image whose segments start at pos, None if data ends before it.
+class JpegFrameReader:
+    """Finds the first complete JPEG image in a buffer that grows between calls, like first_jpeg_frame.
 
-    An EOI before the first scan ends an image without picture data, which raises ComexioDataError.
+    Each call goes on where the previous one stopped, so a stream read chunk by chunk is walked once rather than once
+    per chunk. Pass the same buffer to every call and only ever append to it; once a call returned a frame or raised,
+    the reader is done.
     """
-    scanned = False
-    while True:
-        code_at = _marker_code_at(data, pos)
-        if code_at is None:
+
+    __slots__ = ("_pos", "_scan_from", "_scan_pos", "_scanned", "_start")
+
+    def __init__(self) -> None:
+        self._start = -1  # offset of the SOI, -1 until it arrived
+        self._pos = 0  # where the walk goes on: the search for the SOI, then the next marker
+        self._scan_from: int | None = None  # inside a scan: where its entropy-coded data starts
+        self._scan_pos = 0  # inside a scan: where the search for its end goes on
+        self._scanned = False
+
+    def frame(self, data: bytes | bytearray) -> bytes | None:
+        """The first complete JPEG image in data, None if it is not complete yet; see first_jpeg_frame."""
+        if self._start < 0 and not self._found_start(data):
             return None
+        while True:
+            if (scan_from := self._scan_from) is not None and not self._left_scan(data, scan_from):
+                return None
+            code_at = _marker_code_at(data, self._pos)
+            if code_at is None:
+                return None
+            if data[code_at] == _EOI_CODE:
+                if not self._scanned:
+                    raise ComexioDataError(f"Camera frame ends at offset {code_at} before its first scan")
+                return bytes(data[self._start : code_at + 1])
+            if not self._passed_segment(data, code_at):
+                return None
+
+    def _found_start(self, data: bytes | bytearray) -> bool:
+        """Whether the SOI arrived; the search starts one byte before where the last one ended (a split marker)."""
+        start = data.find(_SOI, max(self._pos - 1, 0))
+        if start < 0:
+            self._pos = len(data)
+            return False
+        self._start = start
+        self._pos = start + len(_SOI)
+        return True
+
+    def _left_scan(self, data: bytes | bytearray, scan_from: int) -> bool:
+        """Whether data holds the marker that ends the current scan; a scan without entropy-coded data raises."""
+        end, self._scan_pos = _scan_end(data, self._scan_pos)
+        if end is None:
+            return False
+        if _MARKERS_ONLY.fullmatch(data, scan_from, end):
+            raise ComexioDataError(f"Camera frame has a scan without entropy-coded data at offset {scan_from}")
+        self._scan_from = None
+        self._pos = end
+        return True
+
+    def _passed_segment(self, data: bytes | bytearray, code_at: int) -> bool:
+        """Whether data holds the whole marker segment whose code is at code_at; the walk then goes on after it."""
         code = data[code_at]
-        if code == _EOI_CODE:
-            if not scanned:
-                raise ComexioDataError(f"Camera frame ends at offset {code_at} before its first scan")
-            return code_at + 1
         if code in _NO_SEGMENT_CODES:
             raise ComexioDataError(f"Camera frame has the unexpected JPEG marker 0x{code:02X} at offset {code_at}")
-        next_pos = code_at + 1 if code in _STANDALONE_CODES else _segment_end(data, code, code_at + 1)
-        if next_pos is None:
-            return None
-        scanned = scanned or code == _SOS_CODE
-        pos = next_pos
+        end = code_at + 1 if code in _STANDALONE_CODES else _segment_end(data, code_at + 1)
+        if end is None:
+            return False
+        if code == _SOS_CODE:
+            self._scanned = True
+            self._scan_from = self._scan_pos = end
+        self._pos = end
+        return True
 
 
-def _segment_end(data: bytes | bytearray, code: int, pos: int) -> int | None:
-    """Offset after the segment whose length field starts at pos (after its scan for an SOS), None if data ends."""
+def _segment_end(data: bytes | bytearray, pos: int) -> int | None:
+    """Offset after the segment whose length field starts at pos, None if data ends before it."""
     if pos + 2 > len(data):
         return None
     length = int.from_bytes(data[pos : pos + 2])
     if length < _MIN_SEGMENT_LENGTH:
         raise ComexioDataError(f"Camera frame has a JPEG segment of length {length}")
-    pos += length
-    if code != _SOS_CODE:
-        return pos
-    end = _scan_end(data, pos)
-    if end == pos:
-        raise ComexioDataError(f"Camera frame has a scan without entropy-coded data at offset {pos}")
-    return end
+    return pos + length
 
 
 def _marker_code_at(data: bytes | bytearray, pos: int) -> int | None:
@@ -213,18 +252,23 @@ def _marker_code_at(data: bytes | bytearray, pos: int) -> int | None:
     return pos if pos < len(data) else None
 
 
-def _scan_end(data: bytes | bytearray, pos: int) -> int | None:
-    """Offset of the marker that ends the entropy-coded data starting at pos, None if data ends before it."""
+def _scan_end(data: bytes | bytearray, pos: int) -> tuple[int | None, int]:
+    """Offset of the marker that ends the entropy-coded data from pos (None if data ends first), and where to go on.
+
+    A later search for the same end goes on at the second offset, so the scan is not searched again from its start.
+    It never lies before pos: pos may be past the end of data (an SOS segment that has not fully arrived yet).
+    """
     while True:
-        pos = data.find(_MARKER_PREFIX, pos)
-        if pos < 0:
-            return None
+        found = data.find(_MARKER_PREFIX, pos)
+        if found < 0:
+            return None, max(pos, len(data))
+        pos = found
         # Further 0xFF bytes are fill bytes before the code (T.81, B.1.1.2), also before an RST inside the scan.
         code_at = pos + 1
         while code_at < len(data) and data[code_at] == _MARKER_PREFIX:
             code_at += 1
         if code_at >= len(data):
-            return None
+            return None, pos
         if data[code_at] not in _IN_SCAN_CODES:
-            return pos
+            return pos, pos
         pos = code_at + 1

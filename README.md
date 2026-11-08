@@ -63,7 +63,11 @@ handshake — no HTTP request, no credentials. Pass it as `fingerprint=` and eve
 HTTPS; a server presenting any other certificate raises `ComexioCertificateMismatchError` (not a
 `ComexioConnectionError`: retrying cannot help, the certificate was replaced or something else
 answers) before the request that met it is sent — if that request was a redirect hop, the hops
-before it did reach the pinned server. Without `fingerprint` the client uses plain HTTP.
+before it did reach the pinned server. Without `fingerprint` the client uses plain HTTP and
+follows redirects only on the Comexio host (scheme and port may change); a redirect to any other
+host raises `ComexioResponseError` before anything is sent there. A redirect on to HTTPS checks
+the certificate against the system's CAs, so Comexio's self-signed one fails there with
+`ComexioConnectionError` — pin it instead.
 
 Fetching the fingerprint is trust on first use: whatever answers that one handshake gets pinned.
 So fetch it **once, at setup**, store it, and pass the stored value on every later start —

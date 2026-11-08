@@ -19,8 +19,14 @@ from aiocomexio import (
     Doorstation,
 )
 from aiocomexio import client as client_module
+from aiocomexio import doorstation as doorstation_module
 from aiocomexio.client import parse_doorstations
-from aiocomexio.doorstation import doorstation_stream_path, doorstations_from_attributes, first_jpeg_frame
+from aiocomexio.doorstation import (
+    JpegFrameReader,
+    doorstation_stream_path,
+    doorstations_from_attributes,
+    first_jpeg_frame,
+)
 from tests.fake_comexio import LOGIN_PAGE, SESSION_COOKIE, SESSION_VALUE, FakeComexio, Handler
 
 IO_HOME_PATH = "/admin/in_output/home"
@@ -572,8 +578,8 @@ def test_a_scan_that_ends_inside_fill_bytes_is_incomplete() -> None:
 
 @pytest.mark.parametrize(
     "after_sos",
-    [EOI, b"\xff\xff" + EOI, DQT + b"\x01" + EOI],
-    ids=["eoi", "fill-bytes-then-eoi", "next-segment"],
+    [EOI, b"\xff\xff" + EOI, DQT + b"\x01" + EOI, b"\xff\xd0" + EOI, b"\xff\xff\xd3\xff\xd4" + EOI],
+    ids=["eoi", "fill-bytes-then-eoi", "next-segment", "restart-marker-only", "restart-markers-and-fill-bytes"],
 )
 def test_a_scan_without_entropy_coded_data_is_malformed(after_sos: bytes) -> None:
     with pytest.raises(ComexioDataError) as info:
@@ -620,6 +626,141 @@ def test_a_marker_that_cannot_start_a_segment_is_malformed(code: int, name: str)
 def test_data_that_ends_inside_a_length_field_or_fill_bytes_is_incomplete() -> None:
     assert first_jpeg_frame(SOI + b"\xff\xe0\x00") is None
     assert first_jpeg_frame(SOI + b"\xff\xff\xff") is None
+
+
+def test_a_reader_fed_a_growing_buffer_returns_the_frame_once_its_eoi_arrived() -> None:
+    # Byte by byte: every marker, length field and the SOI itself is split across two calls once.
+    stream = _part(FRAME)
+    reader = JpegFrameReader()
+    buffer = bytearray()
+    frames: list[bytes | None] = [None]
+    while len(buffer) < len(stream) and frames[-1] is None:
+        buffer.append(stream[len(buffer)])
+        frames.append(reader.frame(buffer))
+
+    assert frames[-1] == FRAME
+    assert len(buffer) == _FRAME_END
+
+
+# SOS headers whose component selector is 0xFF: read while the header is still incomplete, the scan's resume
+# position must not fall back into it, or these bytes would end the scan (an EOI, or a marker outside a scan).
+_SOS_HEADERS_WITH_FF = [
+    b"\xff\xda\x00\x08\x01\xff\xd9\x00\x3f\x00",  # component selector 0xFF, then the bytes of an EOI
+    b"\xff\xda\x00\x08\x01\xff\x11\x00\x3f\x00",  # component selector 0xFF, then a marker outside a scan
+    b"\xff\xda\x00\x0c\x03\x01\x00\x02\x11\xff\xd9\x00\x3f\xff",  # 3 components, 0xFF in the last selector and Ah/Al
+]
+_SOS_HEADER_IDS = ["eoi-bytes", "marker-bytes", "three-components"]
+_FRAMES_WITH_FF_IN_THE_SOS_HEADER = [SOI + header + b"\x11\x22\x33" + EOI for header in _SOS_HEADERS_WITH_FF]
+
+
+def _fed_byte_by_byte(data: bytes) -> bytes | None:
+    """What one JpegFrameReader finds when data arrives one byte per call."""
+    reader = JpegFrameReader()
+    buffer = bytearray()
+    for byte in data:
+        buffer.append(byte)
+        if (frame := reader.frame(buffer)) is not None:
+            return frame
+    return None
+
+
+@pytest.mark.parametrize("frame", _FRAMES_WITH_FF_IN_THE_SOS_HEADER, ids=_SOS_HEADER_IDS)
+def test_a_reader_fed_byte_by_byte_resumes_a_scan_after_its_sos_header(frame: bytes) -> None:
+    assert first_jpeg_frame(frame) == frame
+    assert _fed_byte_by_byte(frame) == frame
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        *(SOI + APP0 + SOS + after_sos for after_sos in (EOI, b"\xff\xd0" + EOI, b"\xff\xff\xd3\xff\xd4" + EOI)),
+        b"--x\r\n\r\n" + SOI + APP0 + THUMBNAIL_APP1 + DQT + EOI + b"\r\n",
+        SOI + b"\xff\xe0\x00\x00",
+        SOI + APP0 + b"\xff\x00\x00\x10" + EOI,
+        SOI + APP0 + _SOS_HEADERS_WITH_FF[0] + EOI,
+    ],
+    ids=[
+        "empty-scan",
+        "restart-marker-scan",
+        "restart-markers-scan",
+        "eoi-before-scan",
+        "length-0",
+        "stuffed-byte",
+        "empty-scan-after-ff-in-its-header",
+    ],
+)
+def test_a_reader_fed_byte_by_byte_raises_like_one_call(data: bytes) -> None:
+    with pytest.raises(ComexioDataError) as one_call:
+        first_jpeg_frame(data)
+    with pytest.raises(ComexioDataError) as byte_by_byte:
+        _fed_byte_by_byte(data)
+
+    assert str(byte_by_byte.value) == str(one_call.value)
+
+
+def test_a_reader_searches_a_growing_scan_once() -> None:
+    reader = JpegFrameReader()
+    buffer = _SearchCountingBuffer(SOI + SOS)
+    assert reader.frame(buffer) is None
+    for _ in range(500):
+        buffer += bytes(range(1, 101))  # entropy-coded data without any 0xFF
+        assert reader.frame(buffer) is None
+    buffer += EOI
+
+    assert reader.frame(buffer) == bytes(buffer)
+    assert buffer.searched <= 2 * len(buffer)
+
+
+@pytest.mark.parametrize("frame", _FRAMES_WITH_FF_IN_THE_SOS_HEADER, ids=_SOS_HEADER_IDS)
+def test_a_reader_fed_two_parts_finds_the_frame_at_every_cut(frame: bytes) -> None:
+    for cut in range(1, len(frame)):
+        reader = JpegFrameReader()
+        buffer = bytearray(frame[:cut])
+        reader.frame(buffer)
+        buffer += frame[cut:]
+
+        assert reader.frame(buffer) == frame, f"cut at {cut}"
+
+
+class _SearchCountingBuffer(bytearray):
+    """A read buffer that adds up how many bytes its find calls search."""
+
+    searched = 0
+
+    def find(self, sub: Any, start: Any = 0, *rest: Any) -> int:
+        self.searched += len(self) - start
+        return super().find(sub, start, *rest)
+
+
+def test_a_reader_searches_the_bytes_before_the_soi_once() -> None:
+    # Every chunk before the frame holds an EOI, so the reader is asked for a frame after each of them.
+    junk = b"--x\r\n" + EOI
+    reader = JpegFrameReader()
+    buffer = _SearchCountingBuffer()
+    for _ in range(500):
+        buffer += junk
+        assert reader.frame(buffer) is None
+    buffer += _part(FRAME)
+
+    assert reader.frame(buffer) == FRAME
+    assert buffer.searched <= 2 * len(buffer)
+
+
+async def test_a_stream_of_segments_is_walked_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each segment carries an EOI and arrives in a chunk of its own: rereading from the start would walk n²/2 segments.
+    walked: list[int] = []
+    segment_end = doorstation_module._segment_end
+
+    def counting_segment_end(data: bytes | bytearray, pos: int) -> int | None:
+        walked.append(pos)
+        return segment_end(data, pos)
+
+    monkeypatch.setattr(doorstation_module, "_segment_end", counting_segment_end)
+    segments = [_segment(0xFE, EOI)] * 500
+    resp: Any = _ChunkedResponse([SOI, *segments, SOS + SCAN + EOI])
+
+    assert await client_module._read_first_frame(resp, "snapshot") == SOI + b"".join(segments) + SOS + SCAN + EOI
+    assert len(walked) == len(segments) + 1  # every segment once, then the SOS
 
 
 class _ChunkedContent:
