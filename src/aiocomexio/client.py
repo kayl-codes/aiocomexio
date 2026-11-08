@@ -3172,14 +3172,14 @@ async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
     """The first complete JPEG of a stream response; see ComexioClient.get_doorstation_snapshot."""
     received = bytearray()
     async for chunk in resp.content.iter_any():
-        received += chunk
+        # Bytes past the cap are not kept: a frame that ends beyond it is too large, like no frame at all.
+        kept = chunk[: _MAX_SNAPSHOT_BYTES - len(received)]
+        over_cap = len(kept) < len(chunk)
+        received += kept
         # A frame is complete only once its EOI arrived; looking for it only in the new bytes (and the byte before
         # them, a marker may span two chunks) keeps the stream from being rescanned for every chunk.
-        new_bytes = received[-len(chunk) - 1 :]
-        over_cap = len(received) > _MAX_SNAPSHOT_BYTES
-        # Bytes past the cap do not count: a frame that ends beyond it is too large, like no frame at all.
-        within_cap = received[:_MAX_SNAPSHOT_BYTES] if over_cap else received
-        if JPEG_EOI in new_bytes and (frame := _complete_frame(within_cap, what)) is not None:
+        new_bytes = received[-len(kept) - 1 :]
+        if JPEG_EOI in new_bytes and (frame := _complete_frame(received, what)) is not None:
             return frame
         if over_cap:
             raise ComexioDataError(f"{what}: no complete JPEG in the first {_MAX_SNAPSHOT_BYTES} bytes of the stream")

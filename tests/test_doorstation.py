@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import tracemalloc
 from typing import Any, cast
 
 import aiohttp
@@ -559,6 +560,28 @@ def test_every_restart_marker_inside_a_scan_belongs_to_it() -> None:
     assert first_jpeg_frame(frame) == frame
 
 
+def test_fill_bytes_before_a_restart_marker_inside_a_scan_are_skipped() -> None:
+    frame = SOI + SOS + b"\x11\xff\xff\xff\xd0\x22\xff\xff\x00\x33" + EOI
+
+    assert first_jpeg_frame(frame) == frame
+
+
+def test_a_scan_that_ends_inside_fill_bytes_is_incomplete() -> None:
+    assert first_jpeg_frame(SOI + SOS + b"\x11\xff\xff") is None
+
+
+@pytest.mark.parametrize(
+    "after_sos",
+    [EOI, b"\xff\xff" + EOI, DQT + b"\x01" + EOI],
+    ids=["eoi", "fill-bytes-then-eoi", "next-segment"],
+)
+def test_a_scan_without_entropy_coded_data_is_malformed(after_sos: bytes) -> None:
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(SOI + APP0 + SOS + after_sos)
+
+    assert str(info.value) == f"Camera frame has a scan without entropy-coded data at offset {len(SOI + APP0 + SOS)}"
+
+
 @pytest.mark.parametrize(
     ("frame", "eoi_code_at"),
     [(SOI + EOI, 3), (SOI + APP0 + THUMBNAIL_APP1 + DQT + EOI, 3 + len(APP0 + THUMBNAIL_APP1 + DQT))],
@@ -706,6 +729,31 @@ async def test_a_frame_that_ends_past_the_cap_is_too_large(monkeypatch: pytest.M
         await client_module._read_first_frame(resp, "snapshot")
 
     assert str(info.value) == f"snapshot: no complete JPEG in the first {2 * len(FRAME)} bytes of the stream"
+
+
+async def test_an_eoi_split_by_the_chunk_that_crosses_the_cap_completes_the_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Only the last byte of the frame fits under the cap; the EOI search must still see the 0xFF before it.
+    monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", len(FRAME))
+    resp: Any = _ChunkedResponse([FRAME[:-1], FRAME[-1:] + b"\x00" * 8])
+
+    assert await client_module._read_first_frame(resp, "snapshot") == FRAME
+
+
+async def test_bytes_past_the_cap_are_not_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 64)
+    # One chunk far larger than the cap: only the cap's worth of it may be copied into the read buffer.
+    resp: Any = _ChunkedResponse([SOI + b"\xff\xe1\xff\xff" + bytes(8 * 1024 * 1024)])
+    tracemalloc.start()
+    try:
+        with pytest.raises(ComexioDataError):
+            await client_module._read_first_frame(resp, "snapshot")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 1024 * 1024
 
 
 async def test_snapshot_of_a_malformed_frame_names_the_camera(logged_in: ComexioClient, comexio: FakeComexio) -> None:

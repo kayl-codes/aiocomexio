@@ -151,8 +151,9 @@ def first_jpeg_frame(data: bytes | bytearray) -> bytes | None:
     The image runs from its SOI marker to the EOI marker that ends it: the segments before a scan are skipped by
     their length fields, so an EOI inside them (an embedded thumbnail) does not end the image early. Data before
     the first SOI (a multipart boundary and its headers) is skipped. A marker that is missing where the structure of
-    a JPEG needs one, a segment shorter than its length field, a stuffed byte or second SOI between the segments, or
-    an EOI before the first scan (an image without picture data) raises ComexioDataError.
+    a JPEG needs one, a segment shorter than its length field, a stuffed byte or second SOI between the segments, a
+    scan without entropy-coded data, or an EOI before the first scan (an image without picture data) raises
+    ComexioDataError.
     """
     start = data.find(_SOI)
     if start < 0:
@@ -193,7 +194,12 @@ def _segment_end(data: bytes | bytearray, code: int, pos: int) -> int | None:
     if length < _MIN_SEGMENT_LENGTH:
         raise ComexioDataError(f"Camera frame has a JPEG segment of length {length}")
     pos += length
-    return _scan_end(data, pos) if code == _SOS_CODE else pos
+    if code != _SOS_CODE:
+        return pos
+    end = _scan_end(data, pos)
+    if end == pos:
+        raise ComexioDataError(f"Camera frame has a scan without entropy-coded data at offset {pos}")
+    return end
 
 
 def _marker_code_at(data: bytes | bytearray, pos: int) -> int | None:
@@ -211,9 +217,14 @@ def _scan_end(data: bytes | bytearray, pos: int) -> int | None:
     """Offset of the marker that ends the entropy-coded data starting at pos, None if data ends before it."""
     while True:
         pos = data.find(_MARKER_PREFIX, pos)
-        if pos < 0 or pos + 1 >= len(data):
+        if pos < 0:
             return None
-        # A second 0xFF is a fill byte before a marker; _marker_code_at skips it.
-        if data[pos + 1] not in _IN_SCAN_CODES:
+        # Further 0xFF bytes are fill bytes before the code (T.81, B.1.1.2), also before an RST inside the scan.
+        code_at = pos + 1
+        while code_at < len(data) and data[code_at] == _MARKER_PREFIX:
+            code_at += 1
+        if code_at >= len(data):
+            return None
+        if data[code_at] not in _IN_SCAN_CODES:
             return pos
-        pos += 2
+        pos = code_at + 1

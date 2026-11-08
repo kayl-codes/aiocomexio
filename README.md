@@ -201,7 +201,8 @@ extension. The camera calls need the admin session (`login()` first):
 - `get_doorstation_snapshot(camera_id)` returns the current image: the first complete JPEG of that
   stream, read with the admin session. A stream without a frame within 10 seconds, or one that breaks
   off, raises `ComexioConnectionError`; one that ends or passes 4 MB without a frame (a frame must end
-  within the first 4 MB), or a malformed frame (one that ends before its first scan included), raises
+  within the first 4 MB; bytes past it are not kept), or a malformed frame (also one with an empty scan
+  or one that ends before its first scan), raises
   `ComexioDataError`; the login form raises `ComexioAuthenticationError`.
 
 The Doorstation serves the same stream under its own address, reportedly without a login. If you
