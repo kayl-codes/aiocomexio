@@ -1034,19 +1034,33 @@ async def test_error_page_in_a_codec_that_fails_still_reports_the_status(
 
 
 async def test_request_text_character_split_over_two_chunks_is_decoded_whole(
-    logged_in: ComexioClient, comexio: FakeComexio
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    first_chunk_read = asyncio.Event()  # the second half is only sent once the client holds the first, on any machine
+    real_read = StreamReader.read
+
+    async def noting_read(self: StreamReader, *args: Any) -> bytes:
+        chunk = await real_read(self, *args)
+        if chunk.endswith(b"\xc3"):  # the client took "K" and the first byte of "ü" alone
+            first_chunk_read.set()
+        return chunk
+
+    monkeypatch.setattr(StreamReader, "read", noting_read)
+
     async def split_umlaut(request: web.Request) -> web.StreamResponse:
         resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
         await resp.prepare(request)
         await resp.write(b"K\xc3")  # the first byte of the two of "ü"
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(first_chunk_read.wait(), timeout=30)
         await resp.write(b"\xbcche")
         return resp
 
     comexio.serve("GET", FUNCTION_MODULE_PATH, split_umlaut)
 
-    assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == "Küche"
+    try:
+        assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == "Küche"
+    finally:
+        first_chunk_read.set()  # releases the handler when the client never read the first half, so it ends at once
 
 
 async def test_request_redirect_undecodable_answer_is_not_a_confirmation(
