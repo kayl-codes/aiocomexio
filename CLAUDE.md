@@ -40,6 +40,12 @@ Pre-alpha. Planned order of the move:
      bus workload and extension firmware, value writes (`set_*_value`), the Web-IO lifecycle
      (class upload, device, commands), marker / KNX object management and function plan editing
      (plans, elements, wires, block settings, scenes, Quantum modules, run / stop).
+   - Done: 1-Wire sensors (`get_onewire_sensors`, live status, device count) with their Web-IO push
+     commands, and Doorstation detection (`get_doorstations`) with a camera snapshot
+     (`get_doorstation_snapshot`, `doorstation_stream_url`). Not built yet: the Doorstation's own IP
+     (`extension_location` of `/admin/extension/edit/`).
+   - Every admin answer is read through a byte cap (`_RESPONSE_MAX_BYTES`, 16 MiB) with
+     `Accept-Encoding: identity` and `auto_decompress=False`; see the README for the failure modes.
 
 ## Commands
 
