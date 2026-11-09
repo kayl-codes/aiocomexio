@@ -423,7 +423,8 @@ _ERROR_BODY_MAX_CHARS = 500
 # huge error page cannot fill memory.
 _ERROR_BODY_MAX_BYTES = 64 * 1024
 # Bytes of a successful answer that are read at most. A real answer is far smaller (the largest pages of an
-# installation with 30 function plans are under 1 MB), so a device or proxy that sends more cannot fill memory.
+# installation with 30 function plans are under 1 MB), so a device or proxy that sends more cannot fill memory:
+# 16 MiB of payload, which reading and decoding hold about three times at once.
 _RESPONSE_MAX_BYTES = 16 * 1024 * 1024
 # Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.
 _EMPTY_CONNECTION_VALUES: tuple[Any, ...] = (None, "", [], {})
@@ -2250,7 +2251,8 @@ class ComexioClient:
 
         Any other answer is not the confirmation: the login form or a redirect to it raises
         ComexioAuthenticationError, an error status ComexioResponseError, anything else
-        ComexioRequestRejectedError.
+        ComexioRequestRejectedError. A 200 answer longer than _RESPONSE_MAX_BYTES is no confirmation either, but
+        is not read: ComexioDataError.
         """
         try:
             async with (
@@ -3660,10 +3662,19 @@ def _unencoded(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _text_encoding(resp: aiohttp.ClientResponse) -> str:
-    """The codec resp's body is decoded with: its declared charset if Python knows it, else UTF-8."""
+    """The codec resp's body is decoded with: its declared charset if it is a text codec Python knows, else UTF-8.
+
+    UTF-8 is also the fallback of aiohttp's default; a fallback_charset_resolver of the caller's session does not
+    apply, since the body is read here and not through ClientResponse.text().
+    """
     if resp.charset:
         with suppress(LookupError, ValueError):
-            return codecs.lookup(resp.charset).name
+            name = codecs.lookup(resp.charset).name
+            # A codec that is no text encoding (hex, zlib, ...) raises LookupError on any non-empty input; a text
+            # codec may reject this byte (UTF-16 wants two), which says nothing about the codec.
+            with suppress(UnicodeDecodeError):
+                b"\x00".decode(name)
+            return name
     return "utf-8"
 
 

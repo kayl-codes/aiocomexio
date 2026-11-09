@@ -18,6 +18,7 @@ from aiocomexio import (
     ComexioClient,
     ComexioConnectionError,
     ComexioDataError,
+    ComexioRequestRejectedError,
     ComexioResponseError,
     IoAddress,
     LiveStates,
@@ -756,6 +757,7 @@ async def test_request_redirect_answer_over_the_cap_raises_data_error(
         ("text/html; charset=iso-8859-1", "Küche".encode("iso-8859-1"), "Küche"),
         ("text/html", "Küche".encode(), "Küche"),  # no charset: UTF-8, like aiohttp's default fallback
         ("text/html; charset=no-such-codec", "Küche".encode(), "Küche"),
+        ("text/html; charset=hex", "Küche".encode(), "Küche"),  # a codec that is no text encoding
         ("application/json", "Küche".encode(), "Küche"),
     ],
 )
@@ -765,6 +767,88 @@ async def test_request_text_decodes_with_the_declared_charset_or_utf8(
     _serve_bytes(comexio, body, content_type)
 
     assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == expected
+
+
+async def test_request_text_undecodable_answer_names_the_declared_codec(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    _serve_bytes(comexio, b"\xff", "text/html; charset=ascii")
+
+    with pytest.raises(ComexioDataError, match="page: response is not valid ascii"):
+        await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+async def test_request_text_character_split_over_two_chunks_is_decoded_whole(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    async def split_umlaut(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
+        await resp.prepare(request)
+        await resp.write(b"K\xc3")  # the first byte of the two of "ü"
+        await asyncio.sleep(0.05)
+        await resp.write(b"\xbcche")
+        return resp
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, split_umlaut)
+
+    assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == "Küche"
+
+
+async def test_request_redirect_undecodable_answer_is_not_a_confirmation(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    _serve_bytes(comexio, b"\xff\xfeNope")
+
+    with pytest.raises(ComexioRequestRejectedError, match="not confirmed"):
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
+
+
+async def test_request_redirect_login_form_with_a_foreign_byte_is_an_expired_session(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    _serve_bytes(comexio, LOGIN_PAGE.encode() + b"\xff")
+
+    with pytest.raises(ComexioAuthenticationError, match="login form"):
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
+
+
+@pytest.mark.parametrize("method", ["_request_text", "_request_redirect"])
+async def test_success_answer_that_breaks_off_is_a_connection_error(
+    logged_in: ComexioClient, comexio: FakeComexio, method: str
+) -> None:
+    async def broken_page(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
+        resp.content_length = 1000
+        await resp.prepare(request)
+        await resp.write(b"partial")
+        assert request.transport is not None
+        request.transport.close()
+        return resp
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, broken_page)
+
+    with pytest.raises(ComexioConnectionError):
+        await getattr(logged_in, method)("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+async def test_request_text_session_still_works_after_an_answer_over_the_cap(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+
+    async def announces_far_more(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
+        resp.content_length = 10_000_000  # the client must not wait for what the header promises
+        await resp.prepare(request)
+        await resp.write(b"x" * (_SMALL_CAP + 1))
+        await asyncio.sleep(0.2)
+        return resp
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, announces_far_more)
+
+    with pytest.raises(ComexioDataError, match="longer than"):
+        await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+    assert "ioTypes" in await logged_in._request_text("GET", ADMIN_PATH, what="admin")  # not stuck on the unread rest
 
 
 async def test_fetch_marker_titles(logged_in: ComexioClient) -> None:
