@@ -1128,7 +1128,7 @@ async def test_a_stream_that_stalls_at_the_byte_cap_does_not_wait_for_more(monke
         await client_module._read_first_frame(resp, "snapshot")
 
     assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
-    assert resp.content.reads == 1
+    assert resp.content.asked == [64]  # one read, no second one for a stream that stalls at the cap
 
 
 async def test_one_byte_over_the_cap_stops_the_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1140,7 +1140,9 @@ async def test_one_byte_over_the_cap_stops_the_read(monkeypatch: pytest.MonkeyPa
         await client_module._read_first_frame(resp, "snapshot")
 
     assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
-    assert resp.content.reads == 2  # the read that reaches the cap is the last one
+    # The second read asks for the one byte left under the cap, not for the whole two-byte chunk, and the read
+    # that reaches the cap is the last one: the other byte of that chunk stays in the stream.
+    assert resp.content.asked == [64, 1]
 
 
 async def test_a_login_form_that_runs_past_the_cap_is_an_expired_session(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1152,7 +1154,7 @@ async def test_a_login_form_that_runs_past_the_cap_is_an_expired_session(monkeyp
         await client_module._read_first_frame(resp, "snapshot")
 
     assert str(info.value) == "Comexio served the login form, the session is not logged in (snapshot)"
-    assert resp.content.reads == 2  # the read still stops with the one that reaches the cap
+    assert resp.content.asked == [len(page) + 8, 8]  # the second read takes 8 of the 16 bytes, the rest stays
 
 
 async def test_a_login_form_past_the_cap_is_not_seen(monkeypatch: pytest.MonkeyPatch) -> None:
