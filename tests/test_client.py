@@ -918,6 +918,7 @@ async def test_request_redirect_answer_over_the_cap_raises_data_error(
         ("text/html; charset=hex", "Küche".encode(), "Küche"),  # a codec that is no text encoding
         ("text/html; charset=undefined", "Küche".encode(), "Küche"),  # a codec that refuses every input
         ("text/html; charset=zlib", "Küche".encode(), "Küche"),  # a bytes-to-bytes codec: LookupError, not TypeError
+        ("text/html; charset=base64_codec", "Küche".encode(), "Küche"),  # the long names of those codecs too
         ("application/json", "Küche".encode(), "Küche"),
     ],
 )

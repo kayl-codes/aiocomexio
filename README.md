@@ -56,10 +56,12 @@ plain `ValueError`, which is not a `ComexioError`, for a non-finite float (`nan`
 sending anything — catch it separately if your values can be non-finite.
 
 An answer is read up to 16 MiB (the largest one measured on an installation with 30 function plans is
-865 KiB); a longer one, or one the device sends compressed although every request asks for
-`Accept-Encoding: identity`, is refused with `ComexioDataError`, never cut. The request was sent by then, so
-for a write that error does not prove it failed — as with `ComexioConnectionError`, look at the object
-before repeating a create. An answer is decoded with its declared charset, else UTF-8: a
+865 KiB); a successful answer that is longer, or that the device sends compressed although every request
+asks for `Accept-Encoding: identity`, is refused with `ComexioDataError`, never cut. An error-status answer
+sent compressed keeps its status (`ComexioResponseError`); its
+`body` is then not the page but the note `('gzip'-encoded body not read)`, naming the coding. The request was
+sent by then, so for a write a `ComexioDataError` does not prove it failed — as with `ComexioConnectionError`,
+look at the object before repeating a create. An answer is decoded with its declared charset, else UTF-8: a
 `fallback_charset_resolver` of an injected `aiohttp.ClientSession` is not consulted.
 
 ### HTTPS with a pinned certificate
