@@ -428,8 +428,10 @@ _ERROR_BODY_MAX_BYTES = 64 * 1024
 _RESPONSE_MAX_BYTES = 16 * 1024 * 1024
 # Codecs that Python lists as text encodings but that transform a page instead of reading it (an escape sequence
 # such as a backslash-n becomes a line feed); a declared charset naming one of them is treated as undeclared.
-# The names are the normalized ones of codecs.lookup (hyphens).
-_NOT_A_CHARSET = frozenset({"unicode-escape", "raw-unicode-escape", "punycode"})
+# The names are the normalized ones of codecs.lookup (hyphens). idna is one of them: it reads ASCII text such as
+# `xn--kche-0ra` as an internationalized label and returns another string.
+_NOT_A_CHARSET = frozenset({"unicode-escape", "raw-unicode-escape", "punycode", "idna"})
+_UTF8 = "utf-8"  # what a body without a usable charset is decoded as, like aiohttp's default fallback
 # Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.
 _EMPTY_CONNECTION_VALUES: tuple[Any, ...] = (None, "", [], {})
 
@@ -3697,7 +3699,7 @@ def _text_encoding(resp: aiohttp.ClientResponse) -> str:
             "".encode(name)  # raises for a codec that is no text encoding (hex, zlib, ...) and for "undefined"
             if name not in _NOT_A_CHARSET:
                 return name
-    return "utf-8"
+    return _UTF8
 
 
 async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str = "strict") -> str:
@@ -3718,7 +3720,7 @@ async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str
     encoding = _text_encoding(resp)
     try:
         return body.decode(encoding, errors=errors)
-    except UnicodeError as err:  # not only UnicodeDecodeError: the idna codec raises a plain UnicodeError
+    except UnicodeError as err:  # not only UnicodeDecodeError: a codec may raise a plain UnicodeError
         raise ComexioDataError(f"{what}: response is not valid {encoding}") from err
 
 
@@ -3740,8 +3742,8 @@ async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
         return ""
     try:
         return body.decode(_text_encoding(resp), errors="replace")
-    except UnicodeError:  # a codec that fails whatever errors says (idna): the status is reported without its text
-        return body.decode("utf-8", errors="replace")
+    except UnicodeError:  # a codec that fails whatever errors says: the status is reported without its text
+        return body.decode(_UTF8, errors="replace")
 
 
 def _collapse_error_body(text: str) -> str | None:

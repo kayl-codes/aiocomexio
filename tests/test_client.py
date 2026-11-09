@@ -1,9 +1,11 @@
 """ComexioClient against the in-process fake Comexio server."""
 
 import asyncio
+import codecs
 import gzip
 import json
 import logging
+from collections.abc import Buffer, Iterator
 from datetime import timedelta
 from http import HTTPStatus
 from types import SimpleNamespace
@@ -713,10 +715,34 @@ def _serve_bytes_with_encoding(comexio: FakeComexio, body: bytes, *encodings: st
     comexio.serve("GET", FUNCTION_MODULE_PATH, handler)
 
 
-async def _error_page_in_idna(_request: web.Request) -> web.Response:
+_FAILING_CODEC = "failing-codec"
+
+
+def _failing_codec_search(name: str) -> codecs.CodecInfo | None:
+    """A codec that passes the charset probe but whose decoder raises a plain UnicodeError, whatever errors says."""
+    if name != "failing_codec":  # codecs.lookup hands the search functions the name with underscores
+        return None
+
+    def decode(_data: Buffer, _errors: str = "strict", /) -> tuple[str, int]:
+        raise UnicodeError("this codec decodes nothing")
+
+    def encode(_text: str, _errors: str = "strict", /) -> tuple[bytes, int]:
+        return b"", 0
+
+    return codecs.CodecInfo(encode, decode, name=_FAILING_CODEC)
+
+
+@pytest.fixture
+def failing_codec() -> Iterator[str]:
+    codecs.register(_failing_codec_search)
+    yield _FAILING_CODEC
+    codecs.unregister(_failing_codec_search)
+
+
+async def _error_page_in_a_failing_codec(_request: web.Request) -> web.Response:
     return web.Response(
-        body="Küche".encode(), status=500, headers={"Content-Type": "text/html; charset=idna"}
-    )  # idna cannot decode it, whatever errors says
+        body="Küche".encode(), status=500, headers={"Content-Type": f"text/html; charset={_FAILING_CODEC}"}
+    )
 
 
 async def test_request_text_answer_of_exactly_the_cap_is_read(
@@ -769,17 +795,33 @@ async def test_endless_answer_raises_instead_of_filling_memory(
 
 
 @pytest.fixture
-def body_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """The size of every read of a response body from now on, to show that a refused answer is not read at all."""
-    reads: list[int] = []
-    real_read = StreamReader.read
+def body_reads(monkeypatch: pytest.MonkeyPatch) -> list[StreamReader]:
+    """Every response body the client reads from now on, once each, to show a refused answer is not read at all."""
+    streams: list[StreamReader] = []  # the objects, not their ids: a freed stream's id can come back
+    client_streams: list[StreamReader] = []  # the fake server in this process reads its request bodies the same way
+    real_start = aiohttp.ClientResponse.start
 
-    async def counting_read(self: StreamReader, n: int = -1) -> bytes:
-        reads.append(n)
-        return await real_read(self, n)
+    async def start(self: aiohttp.ClientResponse, connection: Any) -> aiohttp.ClientResponse:
+        response = await real_start(self, connection)
+        client_streams.append(response.content)
+        return response
 
-    monkeypatch.setattr(StreamReader, "read", counting_read)
-    return reads
+    monkeypatch.setattr(aiohttp.ClientResponse, "start", start)
+
+    def counting(name: str) -> None:
+        real = getattr(StreamReader, name)
+
+        async def counted(self: StreamReader, *args: Any) -> Any:
+            is_client_stream = any(self is stream for stream in client_streams)
+            if is_client_stream and all(self is not seen for seen in streams):
+                streams.append(self)
+            return await real(self, *args)
+
+        monkeypatch.setattr(StreamReader, name, counted)
+
+    for method in ("read", "readany", "readchunk", "readline", "readexactly"):  # every way to take body bytes
+        counting(method)
+    return streams
 
 
 _COMPRESSED = [
@@ -801,7 +843,7 @@ _COMPRESSED = [
 async def test_compressed_answer_is_refused_unread(
     logged_in: ComexioClient,
     comexio: FakeComexio,
-    body_reads: list[int],
+    body_reads: list[StreamReader],
     method_name: str,
     encodings: tuple[str, ...],
     coding: str,
@@ -849,7 +891,7 @@ async def test_compressed_login_form_with_an_error_status_is_a_status_error(
 
 
 async def test_login_does_not_read_the_answer_of_its_own_post(
-    client: ComexioClient, comexio: FakeComexio, body_reads: list[int]
+    client: ComexioClient, comexio: FakeComexio, body_reads: list[StreamReader]
 ) -> None:
     await client._request_json("POST", LOGIN_PATH, what="keys", data={"login_keys": "true"})
     await client._request_text("GET", ADMIN_PATH, what="admin page")
@@ -884,7 +926,7 @@ async def test_login_does_not_read_the_answer_of_its_own_post(
 
 @pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
 async def test_compressed_error_page_still_reports_its_status_and_names_the_coding(
-    logged_in: ComexioClient, comexio: FakeComexio, body_reads: list[int], method_name: str
+    logged_in: ComexioClient, comexio: FakeComexio, body_reads: list[StreamReader], method_name: str
 ) -> None:
     _serve_bytes_with_encoding(comexio, gzip.compress(b"Kueche"), "gzip", status=500)
     request = getattr(logged_in, method_name)
@@ -927,6 +969,7 @@ _ESCAPED = rb"K\u00fcche \n"  # what unicode_escape would turn into "Küche" and
         ("text/html; charset=unicode_escape", _ESCAPED, _ESCAPED.decode()),
         ("text/html; charset=raw_unicode_escape", _ESCAPED, _ESCAPED.decode()),
         ("text/html; charset=punycode", "Küche".encode(), "Küche"),
+        ("text/html; charset=idna", b"xn--kche-0ra", "xn--kche-0ra"),  # would read as the label "küche"
         ("application/json", "Küche".encode(), "Küche"),
     ],
 )
@@ -949,19 +992,20 @@ async def test_request_text_undecodable_answer_names_the_declared_codec(
 
 @pytest.mark.parametrize("method", ["_request_text", "_request_redirect"])
 async def test_codec_that_fails_even_with_replace_is_a_data_error(
-    logged_in: ComexioClient, comexio: FakeComexio, method: str
+    logged_in: ComexioClient, comexio: FakeComexio, failing_codec: str, method: str
 ) -> None:
-    _serve_bytes(comexio, "Küche".encode(), "text/html; charset=idna")  # idna raises UnicodeError, whatever errors
+    _serve_bytes(comexio, "Küche".encode(), f"text/html; charset={failing_codec}")
     request = getattr(logged_in, method)
 
-    with pytest.raises(ComexioDataError, match="page: response is not valid idna"):
+    with pytest.raises(ComexioDataError, match=f"page: response is not valid {failing_codec}"):
         await request("GET", FUNCTION_MODULE_PATH, what="page")
 
 
 async def test_error_page_in_a_codec_that_fails_still_reports_the_status(
-    logged_in: ComexioClient, comexio: FakeComexio
+    logged_in: ComexioClient, comexio: FakeComexio, failing_codec: str
 ) -> None:
-    comexio.serve("GET", FUNCTION_MODULE_PATH, _error_page_in_idna)
+    assert failing_codec  # the codec is registered for this test
+    comexio.serve("GET", FUNCTION_MODULE_PATH, _error_page_in_a_failing_codec)
 
     with pytest.raises(ComexioResponseError) as excinfo:
         await logged_in.get_raw_config()
