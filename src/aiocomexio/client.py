@@ -3670,10 +3670,7 @@ def _text_encoding(resp: aiohttp.ClientResponse) -> str:
     if resp.charset:
         with suppress(LookupError, ValueError):
             name = codecs.lookup(resp.charset).name
-            # A codec that is no text encoding (hex, zlib, ...) raises LookupError on any non-empty input; a text
-            # codec may reject this byte (UTF-16 wants two), which says nothing about the codec.
-            with suppress(UnicodeDecodeError):
-                b"\x00".decode(name)
+            "".encode(name)  # raises for a codec that is no text encoding (hex, zlib, ...) and for "undefined"
             return name
     return "utf-8"
 
@@ -3692,14 +3689,15 @@ async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str
     encoding = _text_encoding(resp)
     try:
         return body.decode(encoding, errors=errors)
-    except UnicodeDecodeError as err:
+    except UnicodeError as err:  # not only UnicodeDecodeError: the idna codec raises a plain UnicodeError
         raise ComexioDataError(f"{what}: response is not valid {encoding}") from err
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
     """The first _ERROR_BODY_MAX_BYTES of the body of an error-status answer as text; "" if it breaks off mid-read.
 
-    The rest is not read, and the status must be reported even when the body cannot be.
+    The rest is not read, and the status must be reported even when the body cannot be. Undecodable bytes are
+    replaced.
     """
     body = bytearray()
     try:
@@ -3708,14 +3706,9 @@ async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
     except (aiohttp.ClientError, TimeoutError) as err:
         _LOGGER.debug("%s: body of the HTTP %s answer could not be read: %r", what, resp.status, err)
         return ""
-    return _decoded(body, resp.charset)
-
-
-def _decoded(body: bytes | bytearray, charset: str | None) -> str:
-    """body as text in charset (UTF-8 if there is none or Python does not know it), undecodable bytes replaced."""
     try:
-        return body.decode(charset or "utf-8", errors="replace")
-    except LookupError:
+        return body.decode(_text_encoding(resp), errors="replace")
+    except UnicodeError:  # a codec that fails whatever errors says (idna): the status is reported without its text
         return body.decode("utf-8", errors="replace")
 
 

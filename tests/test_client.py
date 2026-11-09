@@ -696,6 +696,12 @@ def _serve_bytes(comexio: FakeComexio, body: bytes, content_type: str = "text/ht
     comexio.serve("GET", FUNCTION_MODULE_PATH, handler)
 
 
+async def _error_page_in_idna(_request: web.Request) -> web.Response:
+    return web.Response(
+        body="Küche".encode(), status=500, headers={"Content-Type": "text/html; charset=idna"}
+    )  # idna cannot decode it, whatever errors says
+
+
 async def test_request_text_answer_of_exactly_the_cap_is_read(
     logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -757,7 +763,9 @@ async def test_request_redirect_answer_over_the_cap_raises_data_error(
         ("text/html; charset=iso-8859-1", "Küche".encode("iso-8859-1"), "Küche"),
         ("text/html", "Küche".encode(), "Küche"),  # no charset: UTF-8, like aiohttp's default fallback
         ("text/html; charset=no-such-codec", "Küche".encode(), "Küche"),
+        ("text/html; charset=utf-16", "Küche".encode("utf-16"), "Küche"),  # a text codec that rejects a lone byte
         ("text/html; charset=hex", "Küche".encode(), "Küche"),  # a codec that is no text encoding
+        ("text/html; charset=undefined", "Küche".encode(), "Küche"),  # a codec that refuses every input
         ("application/json", "Küche".encode(), "Küche"),
     ],
 )
@@ -776,6 +784,28 @@ async def test_request_text_undecodable_answer_names_the_declared_codec(
 
     with pytest.raises(ComexioDataError, match="page: response is not valid ascii"):
         await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+@pytest.mark.parametrize("method", ["_request_text", "_request_redirect"])
+async def test_codec_that_fails_even_with_replace_is_a_data_error(
+    logged_in: ComexioClient, comexio: FakeComexio, method: str
+) -> None:
+    _serve_bytes(comexio, "Küche".encode(), "text/html; charset=idna")  # idna raises UnicodeError, whatever errors
+    request = getattr(logged_in, method)
+
+    with pytest.raises(ComexioDataError, match="page: response is not valid idna"):
+        await request("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+async def test_error_page_in_a_codec_that_fails_still_reports_the_status(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("GET", FUNCTION_MODULE_PATH, _error_page_in_idna)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await logged_in.get_raw_config()
+    assert excinfo.value.status == 500
+    assert excinfo.value.body == "Küche"
 
 
 async def test_request_text_character_split_over_two_chunks_is_decoded_whole(
@@ -826,9 +856,10 @@ async def test_success_answer_that_breaks_off_is_a_connection_error(
         return resp
 
     comexio.serve("GET", FUNCTION_MODULE_PATH, broken_page)
+    request = getattr(logged_in, method)
 
     with pytest.raises(ComexioConnectionError):
-        await getattr(logged_in, method)("GET", FUNCTION_MODULE_PATH, what="page")
+        await request("GET", FUNCTION_MODULE_PATH, what="page")
 
 
 async def test_request_text_session_still_works_after_an_answer_over_the_cap(
