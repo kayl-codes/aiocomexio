@@ -121,10 +121,12 @@ published on PyPI and consumed by the Home Assistant integration
   be as large as any other, and a character cap on the excerpt (`_ERROR_BODY_MAX_CHARS`) does not limit what was
   read to build it. Read in chunks up to the cap and leave the rest unread. A cap on the *received* bytes is no cap
   on the *decompressed* ones: a read that must stay bounded sends `Accept-Encoding: identity` (every client request
-  does, `_unencoded`). One that must hold even against a device that compresses anyway also turns `auto_decompress`
-  off *for that request* (`session.request(..., auto_decompress=False)`; the session default and the other reads
-  stay as they are) and refuses a `Content-Encoding` other than identity as `ComexioDataError` instead of
-  decoding the compressed bytes as text (`get_doorstation_snapshot`). Decode the capped bytes yourself, with the
+  does, `_unencoded`, unless the caller sets an `Accept-Encoding` header of its own, which wins). One that must hold
+  even against a device that compresses anyway, or a caller's own encoding, also turns `auto_decompress` off *for
+  that request* (`session.request(..., auto_decompress=False)`; the session default and the other reads stay as
+  they are) and refuses a `Content-Encoding` other than identity on a successful answer as `ComexioDataError`
+  instead of decoding the compressed bytes as text (`get_doorstation_snapshot`); a compressed error page keeps its
+  HTTP status, and its excerpt is best effort. Decode the capped bytes yourself, with the
   declared charset and a UTF-8 fallback for a missing or unknown one: strictly for a successful answer (undecodable
   bytes are a `ComexioDataError`, as in `_request_text`), with `errors="replace"` only for the excerpt of an error
   page. A successful answer that does not fit under the cap raises `ComexioDataError`: the capped prefix is never
