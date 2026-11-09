@@ -5,9 +5,10 @@ import gzip
 import itertools
 import logging
 import re
-import tracemalloc
 from collections.abc import Iterable, Iterator
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
@@ -1035,16 +1036,27 @@ async def test_a_stream_of_segments_is_walked_once(monkeypatch: pytest.MonkeyPat
 
 
 class _ChunkedContent:
-    """resp.content of a response that hands out exactly the given chunks (aiohttp may merge real ones)."""
+    """resp.content of a response that hands out the given chunks (aiohttp may merge real ones).
+
+    Like aiohttp's StreamReader.read(n), a read returns at most n bytes of what is buffered; the rest of a chunk
+    stays for the next read, and an empty answer is the end of the stream.
+    """
 
     def __init__(self, chunks: list[bytes]) -> None:
-        self._chunks = chunks
-        self.read = 0
+        self._chunks = list(chunks)
+        self.reads = 0
+        self.asked: list[int] = []
 
-    async def iter_any(self) -> Any:
-        for chunk in self._chunks:
-            self.read += 1
-            yield chunk
+    async def read(self, n: int = -1) -> bytes:
+        self.reads += 1
+        self.asked.append(n)
+        if not self._chunks:
+            return b""
+        chunk = self._chunks.pop(0)
+        if 0 <= n < len(chunk):
+            self._chunks.insert(0, chunk[n:])
+            return chunk[:n]
+        return chunk
 
 
 class _ChunkedResponse:
@@ -1082,7 +1094,7 @@ async def test_first_frame_across_exact_chunk_boundaries(cuts: tuple[int, ...]) 
 
     assert await client_module._read_first_frame(cast(Any, resp), "snapshot") == FRAME
     # The read stops with the chunk that brings the frame's EOI, not later.
-    assert resp.content.read == 1 + sum(cut < _FRAME_END for cut in cuts)
+    assert resp.content.reads == 1 + sum(cut < _FRAME_END for cut in cuts)
 
 
 async def test_a_stream_page_that_is_no_stream_names_its_content_type() -> None:
@@ -1103,7 +1115,7 @@ async def test_a_stream_of_exactly_the_byte_cap_is_read_whole(monkeypatch: pytes
         await client_module._read_first_frame(resp, "snapshot")
 
     assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
-    assert resp.content.read == 2
+    assert resp.content.reads == 2
 
 
 async def test_a_stream_that_stalls_at_the_byte_cap_does_not_wait_for_more(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1116,7 +1128,7 @@ async def test_a_stream_that_stalls_at_the_byte_cap_does_not_wait_for_more(monke
         await client_module._read_first_frame(resp, "snapshot")
 
     assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
-    assert resp.content.read == 1
+    assert resp.content.asked == [64]  # one read, no second one for a stream that stalls at the cap
 
 
 async def test_one_byte_over_the_cap_stops_the_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1128,7 +1140,9 @@ async def test_one_byte_over_the_cap_stops_the_read(monkeypatch: pytest.MonkeyPa
         await client_module._read_first_frame(resp, "snapshot")
 
     assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
-    assert resp.content.read == 2  # the chunk that crosses the cap is the last one read
+    # The second read asks for the one byte left under the cap, not for the whole two-byte chunk, and the read
+    # that reaches the cap is the last one: the other byte of that chunk stays in the stream.
+    assert resp.content.asked == [64, 1]
 
 
 async def test_a_login_form_that_runs_past_the_cap_is_an_expired_session(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1140,7 +1154,7 @@ async def test_a_login_form_that_runs_past_the_cap_is_an_expired_session(monkeyp
         await client_module._read_first_frame(resp, "snapshot")
 
     assert str(info.value) == "Comexio served the login form, the session is not logged in (snapshot)"
-    assert resp.content.read == 2  # the read still stops at the chunk that crosses the cap
+    assert resp.content.asked == [len(page) + 8, 8]  # the second read takes 8 of the 16 bytes, the rest stays
 
 
 async def test_a_login_form_past_the_cap_is_not_seen(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1154,22 +1168,22 @@ async def test_a_login_form_past_the_cap_is_not_seen(monkeypatch: pytest.MonkeyP
     assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
 
 
-def _frame_crossing_the_cap(padding: int) -> Any:
-    """A stream whose second chunk crosses a cap of 2 * len(FRAME) and brings a whole frame, padding bytes late."""
+def _frame_ending_at_the_cap(padding: int) -> Any:
+    """A stream whose second chunk brings a whole frame to a cap of 2 * len(FRAME), padding bytes late."""
     return _ChunkedResponse([bytes(len(FRAME) + padding), FRAME + b"\x00" * 8])
 
 
 async def test_a_frame_that_ends_at_the_cap_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 2 * len(FRAME))
-    resp = _frame_crossing_the_cap(padding=0)
+    resp = _frame_ending_at_the_cap(padding=0)
 
     assert await client_module._read_first_frame(resp, "snapshot") == FRAME
 
 
 async def test_a_frame_that_ends_past_the_cap_is_too_large(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The chunk that crosses the cap brings the frame's EOI, but one byte past the cap: that byte does not count.
+    # The frame's EOI lies one byte past the cap: that byte is never read, so the frame does not complete.
     monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 2 * len(FRAME))
-    resp = _frame_crossing_the_cap(padding=1)
+    resp = _frame_ending_at_the_cap(padding=1)
 
     with pytest.raises(ComexioDataError) as info:
         await client_module._read_first_frame(resp, "snapshot")
@@ -1177,7 +1191,7 @@ async def test_a_frame_that_ends_past_the_cap_is_too_large(monkeypatch: pytest.M
     assert str(info.value) == f"snapshot: no complete JPEG in the first {2 * len(FRAME)} bytes of the stream"
 
 
-async def test_an_eoi_split_by_the_chunk_that_crosses_the_cap_completes_the_frame(
+async def test_an_eoi_split_by_the_read_that_reaches_the_cap_completes_the_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Only the last byte of the frame fits under the cap; the EOI search must still see the 0xFF before it.
@@ -1187,19 +1201,53 @@ async def test_an_eoi_split_by_the_chunk_that_crosses_the_cap_completes_the_fram
     assert await client_module._read_first_frame(resp, "snapshot") == FRAME
 
 
-async def test_bytes_past_the_cap_are_not_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_no_read_asks_for_more_than_the_bytes_left_under_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 64)
-    # One chunk far larger than the cap: only the cap's worth of it may be copied into the read buffer.
+    # One chunk far larger than the cap: the stream is asked for the bytes left under the cap and never for more, so
+    # nothing past the cap is taken from it (aiohttp's reader would otherwise hand over a whole buffered chunk).
     resp: Any = _ChunkedResponse([SOI + b"\xff\xe1\xff\xff" + bytes(8 * 1024 * 1024)])
-    tracemalloc.start()
-    try:
-        with pytest.raises(ComexioDataError):
-            await client_module._read_first_frame(resp, "snapshot")
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
 
-    assert peak < 1024 * 1024
+    with pytest.raises(ComexioDataError):
+        await client_module._read_first_frame(resp, "snapshot")
+
+    assert resp.content.asked == [64]
+
+
+async def test_each_read_asks_for_what_is_left_under_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 64)
+    resp: Any = _ChunkedResponse([SOI + b"\xff\xe1\xff\xff" + bytes(10), bytes(20), bytes(100)])
+
+    with pytest.raises(ComexioDataError):
+        await client_module._read_first_frame(resp, "snapshot")
+
+    assert resp.content.asked == [64, 64 - 16, 64 - 36]
+
+
+async def test_the_real_stream_reader_keeps_what_lies_past_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # aiohttp's reader hands over what is buffered, so a read for the whole buffer would take every byte past the cap
+    # out of the stream: with the real reader, the bytes the cap does not need must stay in it.
+    monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 64)
+    content = aiohttp.StreamReader(MagicMock(), 2**16, loop=asyncio.get_running_loop())
+    content.feed_data(SOI + b"\xff\xe1\xff\xff" + bytes(1024 * 1024))
+    content.feed_eof()
+    resp: Any = SimpleNamespace(content=content, content_type="multipart/x-mixed-replace")
+
+    with pytest.raises(ComexioDataError) as info:
+        await client_module._read_first_frame(resp, "snapshot")
+
+    assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
+    assert len(await content.read()) == 6 + 1024 * 1024 - 64
+
+
+async def test_a_stream_that_is_empty_from_the_start_names_the_content_type() -> None:
+    resp: Any = _ChunkedResponse([])
+
+    with pytest.raises(ComexioDataError) as info:
+        await client_module._read_first_frame(resp, "snapshot")
+
+    assert str(info.value) == (
+        "snapshot: the stream ('multipart/x-mixed-replace') ended after 0 bytes without a complete JPEG"
+    )
 
 
 async def test_snapshot_of_a_malformed_frame_names_the_camera(logged_in: ComexioClient, comexio: FakeComexio) -> None:
