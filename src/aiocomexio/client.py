@@ -111,7 +111,9 @@ _IO_HOME_PAGE = "IO home page"
 _SNAPSHOT_TIMEOUT_SEC = 10.0
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 # The snapshot asks for the stream unencoded and does not let aiohttp decompress it: decompressed chunks would be
-# allocated before the byte cap could apply, so a compressed answer could exhaust memory.
+# allocated before the byte cap could apply, so a compressed answer could exhaust memory. Every other request asks
+# for an unencoded answer too (_unencoded), so the cap on an error page counts bytes of the page itself.
+_ACCEPT_ENCODING = "Accept-Encoding"
 _IDENTITY_ENCODING = "identity"
 # Every extension block of the IO home page carries a device counter: a <div> with an id number_of_<ext> and a
 # class number_of_type_<n>, the markup parse_onewire_device_count reads. The Quickbus and KNX counters carry the
@@ -1042,11 +1044,10 @@ class ComexioClient:
         path = doorstation_stream_path(camera_id)
         what = f"Doorstation camera {camera_id} snapshot"
         deadline = asyncio.timeout(_SNAPSHOT_TIMEOUT_SEC)
-        unencoded = {"Accept-Encoding": _IDENTITY_ENCODING}
         try:
             async with (
                 deadline,
-                self._response("GET", path, what=what, headers=unencoded, auto_decompress=False) as resp,
+                self._response("GET", path, what=what, auto_decompress=False) as resp,
             ):
                 if resp.status != HTTPStatus.OK:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
@@ -2201,6 +2202,7 @@ class ComexioClient:
         HTTPS on port 443 of the same host (see _unpinned_redirect_target). Every request goes through the login gate.
         """
         redirect_target = _unpinned_redirect_target if self._fingerprint is None else _pinned_redirect_target
+        kwargs = _unencoded(kwargs)
         async with self._gate.request():
             url = f"{self._base_url}{path}"
             for _ in range(_MAX_REDIRECTS + 1):
@@ -2251,7 +2253,7 @@ class ComexioClient:
             async with (
                 self._gate.request(),
                 self._session.request(
-                    method, f"{self._base_url}{path}", allow_redirects=False, ssl=self._ssl, **kwargs
+                    method, f"{self._base_url}{path}", allow_redirects=False, ssl=self._ssl, **_unencoded(kwargs)
                 ) as resp,
             ):
                 if resp.status in _REDIRECT_STATUSES:
@@ -3626,6 +3628,19 @@ def _origin(url: str) -> tuple[str, str | None, int | None]:
     scheme = parts.scheme.lower()
     port = parts.port  # parses the port, so a malformed one raises here and not inside aiohttp
     return scheme, parts.hostname, _DEFAULT_PORTS.get(scheme) if port is None else port
+
+
+def _unencoded(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The request arguments with an Accept-Encoding: identity header, so a device sends no compressed answer.
+
+    aiohttp decompresses an answer before the reader sees it, so a byte cap on what is read (_ERROR_BODY_MAX_BYTES)
+    limits the plain bytes only when nothing was compressed. A header the caller sets itself wins, whatever the case
+    of its name (HTTP header names are case-insensitive).
+    """
+    headers = dict(kwargs.get("headers") or {})
+    if all(name.lower() != _ACCEPT_ENCODING.lower() for name in headers):
+        headers[_ACCEPT_ENCODING] = _IDENTITY_ENCODING
+    return {**kwargs, "headers": headers}
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:

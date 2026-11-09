@@ -431,6 +431,63 @@ async def test_snapshot_asks_for_the_stream_unencoded_and_never_decompresses_it(
     assert [kwargs.get("auto_decompress") for kwargs in options] == [False]
 
 
+@pytest.mark.parametrize(
+    ("call", "headers", "expected"),
+    [
+        pytest.param("text", None, "identity", id="text-request"),
+        pytest.param("redirect", None, "identity", id="redirect-request"),
+        pytest.param("text", {}, "identity", id="empty-headers"),
+        pytest.param("text", {"Accept-Encoding": "gzip"}, "gzip", id="a-header-of-the-caller-wins"),
+        pytest.param("text", {"accept-encoding": "gzip"}, "gzip", id="a-lowercase-header-of-the-caller-wins"),
+        pytest.param("text", {"Referer": "http://x/"}, "identity", id="other-headers-stay"),
+    ],
+)
+async def test_every_request_asks_for_an_unencoded_answer(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    call: str,
+    headers: dict[str, str] | None,
+    expected: str,
+) -> None:
+    # An error page is read up to a byte cap, and aiohttp decompresses before the reader sees the bytes: the cap
+    # holds for the page itself only if the device is asked not to compress it.
+    asked_for: list[tuple[str | None, str | None]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        asked_for.append((request.headers.get("Accept-Encoding"), request.headers.get("Referer")))
+        return web.Response(status=302, headers={"Location": "/elsewhere"}) if call == "redirect" else web.Response()
+
+    comexio.serve("POST", "/probe", handler)
+    options: dict[str, Any] = {"headers": headers} if headers is not None else {}
+
+    if call == "redirect":
+        await logged_in._request_redirect("POST", "/probe", what="Probe", **options)
+    else:
+        await logged_in._request_text("POST", "/probe", what="Probe", **options)
+
+    assert asked_for == [(expected, (headers or {}).get("Referer"))]
+
+
+async def test_a_followed_redirect_asks_for_an_unencoded_answer_too(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    asked_for: list[str | None] = []
+
+    async def hop(request: web.Request) -> web.StreamResponse:
+        asked_for.append(request.headers.get("Accept-Encoding"))
+        return web.Response(status=302, headers={"Location": "/elsewhere"})
+
+    async def target(request: web.Request) -> web.StreamResponse:
+        asked_for.append(request.headers.get("Accept-Encoding"))
+        return web.Response(text="done")
+
+    comexio.serve("GET", "/probe", hop)
+    comexio.serve("GET", "/elsewhere", target)
+
+    assert await logged_in._request_text("GET", "/probe", what="Probe") == "done"
+    assert asked_for == ["identity", "identity"]
+
+
 @pytest.mark.parametrize("encoding", ["identity", " Identity "])
 async def test_snapshot_reads_a_stream_marked_unencoded(
     logged_in: ComexioClient, comexio: FakeComexio, encoding: str
@@ -679,6 +736,16 @@ def test_two_names_for_the_same_camera_keep_the_first_and_log(caplog: pytest.Log
 @pytest.mark.parametrize("code", [0x01, *range(0xD0, 0xD8)], ids=lambda code: f"0x{code:02X}")
 def test_a_standalone_marker_outside_a_scan_has_no_length_field(code: int) -> None:
     frame = SOI + bytes((0xFF, code)) + APP0 + SOS + SCAN + EOI
+
+    assert first_jpeg_frame(frame) == frame
+
+
+@pytest.mark.parametrize("second_scan", [False, True], ids=["then-eoi", "then-a-second-scan"])
+def test_a_dnl_segment_after_the_first_scan_is_walked_like_any_other_segment(second_scan: bool) -> None:
+    # T.81 (B.2.5) puts DNL right after the first scan, between two scans, never inside entropy-coded data, where a
+    # marker code other than a stuffed byte or a restart marker ends the scan.
+    dnl = _segment(0xDC, b"\x00\x10")
+    frame = SOI + SOS + SCAN + dnl + (SOS + SCAN if second_scan else b"") + EOI
 
     assert first_jpeg_frame(frame) == frame
 
