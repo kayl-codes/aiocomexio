@@ -416,6 +416,9 @@ _CONNECTION_VALUE_TYPES = frozenset({"binary", "analog"})
 _ID_KEY = "id"
 # Cap of the error-page excerpt ComexioResponseError carries.
 _ERROR_BODY_MAX_CHARS = 500
+# Bytes of an error-status answer that are read at most: enough for the excerpt after collapsing whitespace, so a
+# huge error page cannot fill memory.
+_ERROR_BODY_MAX_BYTES = 64 * 1024
 # Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.
 _EMPTY_CONNECTION_VALUES: tuple[Any, ...] = (None, "", [], {})
 
@@ -3626,12 +3629,26 @@ def _origin(url: str) -> tuple[str, str | None, int | None]:
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
-    """Body of an error-status answer; "" if it breaks off mid-read — the status must still be reported."""
+    """The first _ERROR_BODY_MAX_BYTES of the body of an error-status answer as text; "" if it breaks off mid-read.
+
+    The rest is not read, and the status must be reported even when the body cannot be.
+    """
+    body = bytearray()
     try:
-        return await resp.text(errors="replace")
+        while (left := _ERROR_BODY_MAX_BYTES - len(body)) > 0 and (chunk := await resp.content.read(left)):
+            body += chunk
     except (aiohttp.ClientError, TimeoutError) as err:
         _LOGGER.debug("%s: body of the HTTP %s answer could not be read: %r", what, resp.status, err)
         return ""
+    return _decoded(body, resp.charset)
+
+
+def _decoded(body: bytes | bytearray, charset: str | None) -> str:
+    """body as text in charset (UTF-8 if there is none or Python does not know it), undecodable bytes replaced."""
+    try:
+        return body.decode(charset or "utf-8", errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
 
 
 def _collapse_error_body(text: str) -> str | None:

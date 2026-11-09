@@ -195,6 +195,8 @@ class JpegFrameReader:
                 return None
             code_at = _marker_code_at(data, self._pos)
             if code_at is None:
+                # data ends in 0xFF fill bytes (or before the marker): the next call goes on at the last of them.
+                self._pos = max(self._pos, len(data) - 1)
                 return None
             if data[code_at] == _EOI_CODE:
                 if not self._scanned:
@@ -218,6 +220,9 @@ class JpegFrameReader:
         end, self._scan_pos = _scan_end(data, self._scan_pos)
         if end is None:
             return False
+        # A search resumed inside fill bytes finds the last of them; the marker starts at the first one.
+        while end > scan_from and data[end - 1] == _MARKER_PREFIX:
+            end -= 1
         if _MARKERS_ONLY.fullmatch(data, scan_from, end):
             raise ComexioDataError(f"Camera frame has a scan without entropy-coded data at offset {scan_from}")
         self._scan_from = None
@@ -290,7 +295,7 @@ def _scan_end(data: bytes | bytearray, pos: int) -> tuple[int | None, int]:
         while code_at < len(data) and data[code_at] == _MARKER_PREFIX:
             code_at += 1
         if code_at >= len(data):
-            return None, pos
+            return None, len(data) - 1  # data ends in fill bytes: go on at the last of them, not the first
         if data[code_at] not in _IN_SCAN_CODES:
             return pos, pos
         pos = code_at + 1

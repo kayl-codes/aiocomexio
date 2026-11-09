@@ -2,9 +2,11 @@
 
 import asyncio
 import gzip
+import itertools
 import logging
 import re
 import tracemalloc
+from collections.abc import Iterable, Iterator
 from typing import Any, cast
 
 import aiohttp
@@ -501,6 +503,64 @@ async def test_snapshot_of_an_unknown_camera_raises_response_error(
     assert str(info.value) == "Doorstation camera 7 snapshot failed: HTTP 404: no such camera"
 
 
+class _ErrorBody:
+    """resp.content of an error answer that hands out the given chunks, then b""; counts the bytes handed out."""
+
+    def __init__(self, chunks: Iterable[bytes]) -> None:
+        self._chunks = iter(chunks)
+        self.handed_out = 0
+
+    async def read(self, n: int = -1) -> bytes:
+        chunk = next(self._chunks, b"")
+        part = chunk if n < 0 else chunk[:n]
+        self.handed_out += len(part)
+        return part
+
+
+class _ErrorResponse:
+    status = 500
+
+    def __init__(self, chunks: Iterable[bytes], charset: str | None = None) -> None:
+        self.content = _ErrorBody(chunks)
+        self.charset = charset
+
+
+async def test_an_error_page_is_read_up_to_its_byte_cap_only() -> None:
+    resp: Any = _ErrorResponse(itertools.repeat(b"x" * 1000))  # a body that never ends
+
+    text = await client_module._error_page_text(resp, "snapshot")
+
+    assert text == "x" * client_module._ERROR_BODY_MAX_BYTES
+    assert resp.content.handed_out == client_module._ERROR_BODY_MAX_BYTES
+
+
+def _breaks_off_after(first: bytes) -> Iterator[bytes]:
+    yield first
+    raise aiohttp.ClientPayloadError("connection closed mid-body")
+
+
+async def test_an_error_page_that_breaks_off_mid_read_gives_no_excerpt() -> None:
+    resp: Any = _ErrorResponse(_breaks_off_after(b"half an error page"))
+
+    assert await client_module._error_page_text(resp, "snapshot") == ""
+
+
+@pytest.mark.parametrize(
+    ("chunks", "charset", "text"),
+    [
+        ([b"Fehler: T\xfcr"], "latin-1", "Fehler: Tür"),
+        ([b"Fehler: T\xc3", b"\xbcr"], None, "Fehler: Tür"),  # a character split between two chunks
+        ([b"T\xc3\xbcr"], "no-such-charset", "Tür"),
+        ([b"T\xfcr"], "utf-8", "T�r"),
+    ],
+    ids=["declared-charset", "utf-8-by-default", "unknown-charset", "undecodable-byte"],
+)
+async def test_an_error_page_is_decoded_in_its_charset(chunks: list[bytes], charset: str | None, text: str) -> None:
+    resp: Any = _ErrorResponse(chunks, charset)
+
+    assert await client_module._error_page_text(resp, "snapshot") == text
+
+
 async def test_snapshot_refuses_an_invalid_camera_id_before_any_request(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
@@ -770,9 +830,21 @@ def test_a_reader_fed_byte_by_byte_resumes_a_scan_after_its_sos_header(frame: by
 
 
 @pytest.mark.parametrize(
+    "frame",
+    [SOI + SOS + SCAN + b"\xff\xff\xff" + EOI, SOI + SOS + SCAN + b"\xff\xff" + b"\xff\xd1\x42" + EOI],
+    ids=["fill-bytes-before-eoi", "fill-bytes-before-a-restart-marker"],
+)
+def test_a_reader_fed_byte_by_byte_ends_a_scan_after_its_fill_bytes(frame: bytes) -> None:
+    assert first_jpeg_frame(frame) == frame
+    assert _fed_byte_by_byte(frame) == frame
+
+
+@pytest.mark.parametrize(
     "data",
     [
         *(SOI + APP0 + SOS + after_sos for after_sos in (EOI, b"\xff\xd0" + EOI, b"\xff\xff\xd3\xff\xd4" + EOI)),
+        SOI + APP0 + SOS + b"\xff\xff" + EOI,
+        SOI + APP0 + _SOS_HEADERS_WITH_FF[2] + b"\xff" + EOI,
         b"--x\r\n\r\n" + SOI + APP0 + THUMBNAIL_APP1 + DQT + EOI + b"\r\n",
         SOI + b"\xff\xe0\x00\x00",
         SOI + APP0 + b"\xff\x00\x00\x10" + EOI,
@@ -783,6 +855,8 @@ def test_a_reader_fed_byte_by_byte_resumes_a_scan_after_its_sos_header(frame: by
         "empty-scan",
         "restart-marker-scan",
         "restart-markers-scan",
+        "fill-bytes-scan",
+        "fill-bytes-after-ff-in-the-sos-header",
         "eoi-before-scan",
         "length-0",
         "stuffed-byte",
@@ -810,6 +884,35 @@ def test_a_reader_searches_a_growing_scan_once() -> None:
 
     assert reader.frame(buffer) == bytes(buffer)
     assert buffer.searched <= 2 * len(buffer)
+
+
+class _LookupCountingBuffer(bytearray):
+    """A read buffer that counts how many single bytes are looked up in it."""
+
+    looked_up = 0
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, int):
+            self.looked_up += 1
+        return super().__getitem__(key)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(SOI, APP0 + SOS + SCAN + EOI), (SOI + SOS + b"\x11", b"\xd0\x22" + EOI)],
+    ids=["between-segments", "inside-a-scan"],
+)
+def test_a_reader_reads_a_growing_run_of_fill_bytes_once(before: bytes, after: bytes) -> None:
+    # Each call brings one more 0xFF fill byte: going back to the start of the run would read it n²/2 times.
+    reader = JpegFrameReader()
+    buffer = _LookupCountingBuffer(before)
+    for _ in range(500):
+        buffer.append(0xFF)
+        assert reader.frame(buffer) is None
+    buffer += after
+
+    assert reader.frame(buffer) == bytes(buffer)
+    assert buffer.looked_up <= 4 * len(buffer)
 
 
 @pytest.mark.parametrize("frame", _FRAMES_WITH_FF_IN_THE_SOS_HEADER, ids=_SOS_HEADER_IDS)
