@@ -3670,7 +3670,8 @@ def _unencoded(kwargs: dict[str, Any]) -> dict[str, Any]:
     _ERROR_BODY_MAX_BYTES) would limit the plain bytes only when nothing was compressed. A device that ignores the
     header and sends a compressed answer anyway is caught by _content_encoding, since the bytes are not decompressed.
     A header the caller sets itself wins, whatever the case of its name (HTTP header names are case-insensitive);
-    a caller that asks for a coding gets every answer refused. auto_decompress is always False.
+    a caller that asks for a coding gets every answer the device really sends in a coding refused (one sent
+    unencoded is still read). auto_decompress is always False.
     """
     headers = dict(kwargs.get("headers") or {})
     if all(name.lower() != _ACCEPT_ENCODING.lower() for name in headers):

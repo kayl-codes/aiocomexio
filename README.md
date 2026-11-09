@@ -62,6 +62,8 @@ sent compressed keeps its status (`ComexioResponseError`); its
 `body` is then not the page but the note `('gzip'-encoded body not read)`, naming the coding. The request was
 sent by then, so for a write a `ComexioDataError` does not prove it failed — as with `ComexioConnectionError`,
 look at the object before repeating a create. An answer is decoded with its declared charset, else UTF-8: a
+declared charset that is no text encoding (`hex`, `zlib`, ...) or that transforms the page instead of reading it
+(`unicode_escape`, `raw_unicode_escape`, `punycode`, `idna`) counts as undeclared, and a
 `fallback_charset_resolver` of an injected `aiohttp.ClientSession` is not consulted.
 
 ### HTTPS with a pinned certificate
