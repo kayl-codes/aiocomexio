@@ -1091,19 +1091,23 @@ async def test_request_text_session_still_works_after_an_answer_over_the_cap(
     logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    refused = asyncio.Event()  # the answer stays open until the client has refused it, however slow the machine is
 
     async def announces_far_more(request: web.Request) -> web.StreamResponse:
         resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
         resp.content_length = 10_000_000  # the client must not wait for what the header promises
         await resp.prepare(request)
         await resp.write(b"x" * (_SMALL_CAP + 1))
-        await asyncio.sleep(0.2)
+        await asyncio.wait_for(refused.wait(), timeout=30)
         return resp
 
     comexio.serve("GET", FUNCTION_MODULE_PATH, announces_far_more)
 
-    with pytest.raises(ComexioDataError, match="longer than"):
-        await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+    try:
+        with pytest.raises(ComexioDataError, match="longer than"):
+            await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+    finally:
+        refused.set()  # also when the client did not refuse: the handler must not hold the teardown
     assert "ioTypes" in await logged_in._request_text("GET", ADMIN_PATH, what="admin")  # not stuck on the unread rest
 
 
