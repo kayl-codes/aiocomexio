@@ -2218,6 +2218,8 @@ class ComexioClient:
                     if see_other or (resp.status in _REDIRECT_STATUSES and method == "POST"):
                         method = "GET"
                         kwargs.pop("data", None)
+                    else:
+                        _require_replayable_body(kwargs, what, resp.status)
             raise ComexioResponseError(f"{what} failed: more than {_MAX_REDIRECTS} redirects", status=resp.status)
 
     def _transport_error(self, what: str, err: aiohttp.ClientError | TimeoutError) -> ComexioError:
@@ -3598,6 +3600,17 @@ def _same_origin_or_https(current: str, target: str) -> bool:
     """Whether target is on current's origin or HTTPS on its host's default port; ValueError for a malformed port."""
     here = _origin(current)
     return _origin(target) in {here, ("https", here[1], _HTTPS_DEFAULT_PORT)}
+
+
+def _require_replayable_body(kwargs: dict[str, Any], what: str, status: int) -> None:
+    """ComexioResponseError if a redirect that keeps the method would send a multipart body a second time.
+
+    aiohttp.FormData can be sent once; a second use raises a RuntimeError of aiohttp's own, which no caller expects.
+    """
+    if isinstance(kwargs.get("data"), aiohttp.FormData):
+        raise ComexioResponseError(
+            f"{what} failed: Comexio answered {status} to a multipart upload, which cannot be sent again", status=status
+        )
 
 
 def _redirect_target(resp: aiohttp.ClientResponse, what: str, stays: Callable[[str, str], bool], outside: str) -> str:

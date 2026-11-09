@@ -1810,6 +1810,65 @@ async def test_unpinned_client_follows_a_redirect_like_aiohttp(
     ]
 
 
+@pytest.mark.parametrize("status", [307, 308])
+async def test_a_multipart_upload_is_not_sent_again_on_a_redirect_that_keeps_the_method(
+    client: ComexioClient, comexio: FakeComexio, status: int
+) -> None:
+    async def moved(_request: web.Request) -> web.Response:
+        return web.Response(status=status, headers={"Location": _TO_PATH})
+
+    comexio.serve("POST", _FROM_PATH, moved)
+    comexio.serve_text("POST", _TO_PATH, "moved")
+    form = aiohttp.FormData()
+    form.add_field("file", b"{}", filename="a.json", content_type="application/json")
+    request = client._request_text("POST", _FROM_PATH, what="Uploading", data=form)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert (
+        str(excinfo.value)
+        == f"Uploading failed: Comexio answered {status} to a multipart upload, which cannot be sent again"
+    )
+    assert excinfo.value.status == status
+    assert comexio.requests == [("POST", _FROM_PATH)]
+
+
+async def test_a_multipart_put_is_not_sent_again_on_a_302(client: ComexioClient, comexio: FakeComexio) -> None:
+    # A 302 turns only a POST into a GET; a PUT keeps its method and so its body.
+    async def moved(_request: web.Request) -> web.Response:
+        return web.Response(status=302, headers={"Location": _TO_PATH})
+
+    comexio.serve("PUT", _FROM_PATH, moved)
+    form = aiohttp.FormData()
+    form.add_field("file", b"{}", filename="a.json", content_type="application/json")
+    request = client._request_text("PUT", _FROM_PATH, what="Uploading", data=form)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert excinfo.value.status == 302
+    assert comexio.requests == [("PUT", _FROM_PATH)]
+
+
+@pytest.mark.parametrize("status", [302, 303])
+async def test_a_multipart_upload_follows_a_redirect_that_turns_it_into_a_get(
+    client: ComexioClient, comexio: FakeComexio, status: int
+) -> None:
+    async def moved(_request: web.Request) -> web.Response:
+        return web.Response(status=status, headers={"Location": _TO_PATH})
+
+    comexio.serve("POST", _FROM_PATH, moved)
+    comexio.serve_text("GET", _TO_PATH, "moved")
+    form = aiohttp.FormData()
+    form.add_field("file", b"{}", filename="a.json", content_type="application/json")
+
+    body = await client._request_text("POST", _FROM_PATH, what="Uploading", data=form)
+
+    assert body == "moved"
+    assert comexio.requests == [("POST", _FROM_PATH), ("GET", _TO_PATH)]
+
+
 async def test_unpinned_client_stops_an_endless_redirect_loop(client: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve("GET", _FROM_PATH, _redirect_to(_FROM_PATH))
     request = client._request_text("GET", _FROM_PATH, what="Moved")
