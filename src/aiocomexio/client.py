@@ -426,6 +426,10 @@ _ERROR_BODY_MAX_BYTES = 64 * 1024
 # installation with 30 function plans are under 1 MB), so a device or proxy that sends more cannot fill memory:
 # 16 MiB of payload, which reading and decoding hold about three times at once.
 _RESPONSE_MAX_BYTES = 16 * 1024 * 1024
+# Codecs that Python lists as text encodings but that transform a page instead of reading it (an escape sequence
+# such as a backslash-n becomes a line feed); a declared charset naming one of them is treated as undeclared.
+# The names are the normalized ones of codecs.lookup (hyphens).
+_NOT_A_CHARSET = frozenset({"unicode-escape", "raw-unicode-escape", "punycode"})
 # Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.
 _EMPTY_CONNECTION_VALUES: tuple[Any, ...] = (None, "", [], {})
 
@@ -3682,7 +3686,7 @@ def _content_encoding(resp: aiohttp.ClientResponse) -> str:
 
 
 def _text_encoding(resp: aiohttp.ClientResponse) -> str:
-    """The codec resp's body is decoded with: its declared charset if it is a text codec Python knows, else UTF-8.
+    """The codec resp's body is decoded with: its declared charset if it is a text charset Python knows, else UTF-8.
 
     UTF-8 is also the fallback of aiohttp's default; a fallback_charset_resolver of the caller's session does not
     apply, since the body is read here and not through ClientResponse.text().
@@ -3691,7 +3695,8 @@ def _text_encoding(resp: aiohttp.ClientResponse) -> str:
         with suppress(LookupError, ValueError):
             name = codecs.lookup(resp.charset).name
             "".encode(name)  # raises for a codec that is no text encoding (hex, zlib, ...) and for "undefined"
-            return name
+            if name not in _NOT_A_CHARSET:
+                return name
     return "utf-8"
 
 

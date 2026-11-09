@@ -908,6 +908,9 @@ async def test_request_redirect_answer_over_the_cap_raises_data_error(
         await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
 
 
+_ESCAPED = rb"K\u00fcche \n"  # what unicode_escape would turn into "Küche" and a line feed
+
+
 @pytest.mark.parametrize(
     ("content_type", "body", "expected"),
     [
@@ -919,6 +922,10 @@ async def test_request_redirect_answer_over_the_cap_raises_data_error(
         ("text/html; charset=undefined", "Küche".encode(), "Küche"),  # a codec that refuses every input
         ("text/html; charset=zlib", "Küche".encode(), "Küche"),  # a bytes-to-bytes codec: LookupError, not TypeError
         ("text/html; charset=base64_codec", "Küche".encode(), "Küche"),  # the long names of those codecs too
+        # codecs that transform the page instead of reading it: a declared one counts as undeclared
+        ("text/html; charset=unicode_escape", _ESCAPED, _ESCAPED.decode()),
+        ("text/html; charset=raw_unicode_escape", _ESCAPED, _ESCAPED.decode()),
+        ("text/html; charset=punycode", "Küche".encode(), "Küche"),
         ("application/json", "Küche".encode(), "Küche"),
     ],
 )
