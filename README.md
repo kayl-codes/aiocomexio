@@ -55,6 +55,19 @@ back — the object exists, do not create it again). One exception: the value se
 plain `ValueError`, which is not a `ComexioError`, for a non-finite float (`nan`, `inf`) before
 sending anything — catch it separately if your values can be non-finite.
 
+An answer is read up to 16 MiB (the largest one measured on an installation with 30 function plans is
+865 KiB); a successful answer that is longer, or that the device sends compressed although every request
+asks for `Accept-Encoding: identity`, is refused with `ComexioDataError`, never cut. An error-status answer
+sent compressed keeps its status (`ComexioResponseError`); its
+`body` is then not the page but the note `('gzip'-encoded body not read)`, naming the coding. The one exception is
+the credentials POST of `login()`: its answer is not read at all (the admin page that follows decides whether
+the login worked), so neither its size nor its coding can fail the login. The request was
+sent by then, so for a write a `ComexioDataError` does not prove it failed — as with `ComexioConnectionError`,
+look at the object before repeating a create. An answer is decoded with its declared charset, else UTF-8: a
+declared charset that is no text encoding (`hex`, `zlib`, ...) or that transforms the page instead of reading it
+(`unicode_escape`, `raw_unicode_escape`, `punycode`, `idna`) counts as undeclared, and a
+`fallback_charset_resolver` of an injected `aiohttp.ClientSession` is not consulted.
+
 ### HTTPS with a pinned certificate
 
 Comexio serves HTTPS with a self-signed certificate, so the client pins its SHA-256 fingerprint

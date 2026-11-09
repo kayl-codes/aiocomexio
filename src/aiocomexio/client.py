@@ -10,6 +10,7 @@ raises ValueError or TypeError before anything is sent, as the method's docstrin
 
 import asyncio
 import base64
+import codecs
 import inspect
 import json
 import logging
@@ -18,7 +19,7 @@ import re
 import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -110,9 +111,9 @@ _IO_HOME_PAGE = "IO home page"
 # frame is about 90 KB at 1280x720, so a stream without a frame in its first MBs is no camera stream.
 _SNAPSHOT_TIMEOUT_SEC = 10.0
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
-# The snapshot asks for the stream unencoded and does not let aiohttp decompress it: decompressed chunks would be
-# allocated before the byte cap could apply, so a compressed answer could exhaust memory. Every other request asks
-# for an unencoded answer too (_unencoded), so the cap on an error page counts bytes of the page itself.
+# Every request asks for its answer unencoded and does not let aiohttp decompress it (_unencoded): decompressed
+# chunks would be allocated before a byte cap could apply, so a compressed answer could exhaust memory. A cap thus
+# counts bytes of the page itself, and a compressed answer is refused (_content_encoding).
 _ACCEPT_ENCODING = "Accept-Encoding"
 _IDENTITY_ENCODING = "identity"
 # Every extension block of the IO home page carries a device counter: a <div> with an id number_of_<ext> and a
@@ -421,6 +422,16 @@ _ERROR_BODY_MAX_CHARS = 500
 # Bytes of an error-status answer that are read at most: enough for the excerpt after collapsing whitespace, so a
 # huge error page cannot fill memory.
 _ERROR_BODY_MAX_BYTES = 64 * 1024
+# Bytes of a successful answer that are read at most. A real answer is far smaller (the largest pages of an
+# installation with 30 function plans are under 1 MB), so a device or proxy that sends more cannot fill memory:
+# 16 MiB of payload, which reading and decoding hold about three times at once.
+_RESPONSE_MAX_BYTES = 16 * 1024 * 1024
+# Codecs that Python lists as text encodings but that transform a page instead of reading it (an escape sequence
+# such as a backslash-n becomes a line feed); a declared charset naming one of them is treated as undeclared.
+# The names are the CodecInfo.name values that codecs.lookup returns (hyphenated). idna is one of them: it reads
+# ASCII text such as `xn--kche-0ra` as an internationalized label and returns another string.
+_NOT_A_CHARSET = frozenset({"unicode-escape", "raw-unicode-escape", "punycode", "idna"})
+_UTF8 = "utf-8"  # what a body without a usable charset is decoded as, like aiohttp's default fallback
 # Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.
 _EMPTY_CONNECTION_VALUES: tuple[Any, ...] = (None, "", [], {})
 
@@ -724,10 +735,9 @@ class ComexioClient:
             "loginsubmit": "Anmelden",
             "encryption": "rsa",
         }
-        # The login POST's own status is not meaningful; the admin page below is the verdict.
-        await self._request_text(
-            "POST", _LOGIN_PATH, what="Login", check_status=False, data=form, headers={"Referer": login_url}
-        )
+        # The login POST's own status and body are not meaningful (they are not read, so even a compressed or
+        # endless answer cannot fail the login); the admin page below is the verdict.
+        await self._request_unread("POST", _LOGIN_PATH, what="Login", data=form, headers={"Referer": login_url})
         html = await self._request_text("GET", _ADMIN_PATH, what="Login check")
         if not html or _LOGIN_PAGE_MARKER in html:
             raise ComexioAuthenticationError(f"Comexio at {self._host} rejected the admin login")
@@ -1047,12 +1057,11 @@ class ComexioClient:
         try:
             async with (
                 deadline,
-                self._response("GET", path, what=what, auto_decompress=False) as resp,
+                self._response("GET", path, what=what) as resp,
             ):
                 if resp.status != HTTPStatus.OK:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
-                encoding = resp.headers.get("Content-Encoding", "").strip()
-                if encoding and encoding.lower() != _IDENTITY_ENCODING:
+                if encoding := _content_encoding(resp):
                     raise ComexioDataError(f"{what}: the stream came {_excerpt(encoding)}-encoded, not unencoded")
                 return await _read_first_frame(resp, what)
         except (aiohttp.ClientError, TimeoutError) as err:
@@ -1634,7 +1643,8 @@ class ComexioClient:
         confirm the plan, ComexioCreatedWithoutIdError if it confirmed the plan but the scrape
         failed or $Fubs does not list it exactly once — the plan exists, do not create it again.
         A ComexioConnectionError from the create request itself leaves open whether the plan
-        was created; look it up by name before creating it again.
+        was created, and so does a ComexioDataError (an answer longer than _RESPONSE_MAX_BYTES or sent
+        compressed); look it up by name before creating it again.
         """
         what = f"Creating function plan {name!r}"
         form = _plan_form(name, comment, paper_format, orientation, dpi)
@@ -1667,7 +1677,8 @@ class ComexioClient:
         Comexio's save takes the whole settings form, so pass the current value of every setting
         that should stay. $Fubs does not reveal "reset outputs on stop", so it is sent as given
         (default off, Comexio's own default for new plans). Values as for create_function_plan.
-        Raises ComexioRequestRejectedError if Comexio does not confirm the save.
+        Raises ComexioRequestRejectedError if Comexio does not confirm the save. A ComexioDataError (an answer
+        longer than _RESPONSE_MAX_BYTES or sent compressed) leaves open whether the save took effect.
         """
         _require_ints(fub_id=fub_id, position=position)
         _require_bools(active=active, reset_outputs_on_stop=reset_outputs_on_stop)
@@ -1687,7 +1698,8 @@ class ComexioClient:
     async def delete_function_plan(self, fub_id: int) -> None:
         """Delete a whole function plan with everything on it.
 
-        Raises ComexioRequestRejectedError if Comexio does not confirm the deletion.
+        Raises ComexioRequestRejectedError if Comexio does not confirm the deletion. A ComexioDataError (an answer
+        longer than _RESPONSE_MAX_BYTES or sent compressed) leaves open whether the plan is gone.
         """
         _require_ints(fub_id=fub_id)
         what = f"Deleting function plan {fub_id}"
@@ -2175,18 +2187,22 @@ class ComexioClient:
         path: str,
         *,
         what: str,
-        check_status: bool = True,
         **kwargs: Any,
     ) -> str:
         """Body of one request as text, with transport errors and error statuses mapped to ComexioError."""
         try:
             async with self._response(method, path, what=what, **kwargs) as resp:
-                if check_status and resp.status != HTTPStatus.OK:
+                if resp.status != HTTPStatus.OK:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
-                try:
-                    return await resp.text()
-                except UnicodeDecodeError as err:
-                    raise ComexioDataError(f"{what}: response is not valid {resp.get_encoding()}") from err
+                return await _response_text(resp, what)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise self._transport_error(what, err) from err
+
+    async def _request_unread(self, method: str, path: str, *, what: str, **kwargs: Any) -> None:
+        """Send one request whose answer, whatever its status or body, is not looked at; only transport errors count."""
+        try:
+            async with self._response(method, path, what=what, **kwargs):
+                return
         except (aiohttp.ClientError, TimeoutError) as err:
             raise self._transport_error(what, err) from err
 
@@ -2249,7 +2265,9 @@ class ComexioClient:
 
         Any other answer is not the confirmation: the login form or a redirect to it raises
         ComexioAuthenticationError, an error status ComexioResponseError, anything else
-        ComexioRequestRejectedError.
+        ComexioRequestRejectedError. A compressed 200 answer is no confirmation either and is not read; one
+        longer than _RESPONSE_MAX_BYTES is read up to that size plus one byte, then refused. Both are a
+        ComexioDataError.
         """
         try:
             async with (
@@ -2273,7 +2291,11 @@ class ComexioClient:
                         )
                     return location
                 status = resp.status
-                body = await (resp.text(errors="replace") if status == HTTPStatus.OK else _error_page_text(resp, what))
+                body = await (
+                    _response_text(resp, what, errors="replace")
+                    if status == HTTPStatus.OK
+                    else _error_page_text(resp, what)
+                )
         except (aiohttp.ClientError, TimeoutError) as err:
             raise self._transport_error(what, err) from err
         if _LOGIN_FORM_SUBMIT_MARKER in body:
@@ -3642,23 +3664,77 @@ def _origin(url: str) -> tuple[str, str | None, int | None]:
 
 
 def _unencoded(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """The request arguments with an Accept-Encoding: identity header, so a device sends no compressed answer.
+    """The request arguments with an Accept-Encoding: identity header, and aiohttp not decompressing the answer.
 
-    aiohttp decompresses an answer before the reader sees it, so a byte cap on what is read (_ERROR_BODY_MAX_BYTES)
-    limits the plain bytes only when nothing was compressed. A header the caller sets itself wins, whatever the case
-    of its name (HTTP header names are case-insensitive).
+    aiohttp decompresses an answer before the reader sees it, so a byte cap on what is read (_RESPONSE_MAX_BYTES,
+    _ERROR_BODY_MAX_BYTES) would limit the plain bytes only when nothing was compressed. A device that ignores the
+    header and sends a compressed answer anyway is caught by _content_encoding, since the bytes are not decompressed.
+    A header the caller sets itself wins, whatever the case of its name (HTTP header names are case-insensitive);
+    a caller that asks for a coding gets every answer the device really sends in a coding refused (one sent
+    unencoded is still read). auto_decompress is always False.
     """
     headers = dict(kwargs.get("headers") or {})
     if all(name.lower() != _ACCEPT_ENCODING.lower() for name in headers):
         headers[_ACCEPT_ENCODING] = _IDENTITY_ENCODING
-    return {**kwargs, "headers": headers}
+    return {**kwargs, "headers": headers, "auto_decompress": False}
+
+
+def _content_encoding(resp: aiohttp.ClientResponse) -> str:
+    """The first coding other than identity that resp's Content-Encoding lines declare, "" if there is none.
+
+    An empty result means the bytes are the plain page. Every header line counts and each may list codings
+    (`identity, gzip`).
+    """
+    codings = (token.strip() for line in resp.headers.getall("Content-Encoding", []) for token in line.split(","))
+    return next((coding for coding in codings if coding and coding.lower() != _IDENTITY_ENCODING), "")
+
+
+def _text_encoding(resp: aiohttp.ClientResponse) -> str:
+    """The codec resp's body is decoded with: its declared charset if it is a text charset Python knows, else UTF-8.
+
+    UTF-8 is also the fallback of aiohttp's default; a fallback_charset_resolver of the caller's session does not
+    apply, since the body is read here and not through ClientResponse.text().
+    """
+    if resp.charset:
+        with suppress(LookupError, ValueError):
+            name = codecs.lookup(resp.charset).name
+            "".encode(name)  # raises for a codec that is no text encoding (hex, zlib, ...) and for "undefined"
+            if name not in _NOT_A_CHARSET:
+                return name
+    return _UTF8
+
+
+async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str = "strict") -> str:
+    """The body of a successful answer as text; ComexioDataError if it passes _RESPONSE_MAX_BYTES or cannot be decoded.
+
+    Reads at most one byte more than the cap, so an answer of any size costs at most the cap in memory, and
+    refuses the answer instead of cutting it: a cut page or plan would read as complete. A compressed answer
+    (see _unencoded) is refused the same way, before its text could show the login form: a device that ignores
+    the identity request fails with ComexioDataError, not ComexioAuthenticationError.
+    """
+    if encoding := _content_encoding(resp):
+        raise ComexioDataError(f"{what}: the answer came {_excerpt(encoding)}-encoded, not unencoded")
+    body = bytearray()
+    while (left := _RESPONSE_MAX_BYTES + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
+        body += chunk
+    if len(body) > _RESPONSE_MAX_BYTES:
+        raise ComexioDataError(f"{what}: response is longer than {_RESPONSE_MAX_BYTES} bytes")
+    encoding = _text_encoding(resp)
+    try:
+        return body.decode(encoding, errors=errors)
+    except UnicodeError as err:  # not only UnicodeDecodeError: a codec may raise a plain UnicodeError
+        raise ComexioDataError(f"{what}: response is not valid {encoding}") from err
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
     """The first _ERROR_BODY_MAX_BYTES of the body of an error-status answer as text; "" if it breaks off mid-read.
 
-    The rest is not read, and the status must be reported even when the body cannot be.
+    The rest is not read, and the status must be reported even when the body cannot be. Undecodable bytes are
+    replaced; a compressed page (see _unencoded) is not read, its text names the coding so the status is not
+    reported without a cause.
     """
+    if encoding := _content_encoding(resp):
+        return f"({_excerpt(encoding)}-encoded body not read)"
     body = bytearray()
     try:
         while (left := _ERROR_BODY_MAX_BYTES - len(body)) > 0 and (chunk := await resp.content.read(left)):
@@ -3666,15 +3742,10 @@ async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
     except (aiohttp.ClientError, TimeoutError) as err:
         _LOGGER.debug("%s: body of the HTTP %s answer could not be read: %r", what, resp.status, err)
         return ""
-    return _decoded(body, resp.charset)
-
-
-def _decoded(body: bytes | bytearray, charset: str | None) -> str:
-    """body as text in charset (UTF-8 if there is none or Python does not know it), undecodable bytes replaced."""
     try:
-        return body.decode(charset or "utf-8", errors="replace")
-    except LookupError:
-        return body.decode("utf-8", errors="replace")
+        return body.decode(_text_encoding(resp), errors="replace")
+    except UnicodeError:  # a codec that fails whatever errors says: the status is reported without its text
+        return body.decode(_UTF8, errors="replace")
 
 
 def _collapse_error_body(text: str) -> str | None:

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import aiohttp
 import pytest
 from aiohttp import web
+from multidict import CIMultiDict
 
 from aiocomexio import (
     ComexioAuthenticationError,
@@ -427,7 +428,8 @@ async def test_snapshot_asks_for_the_stream_unencoded_and_never_decompresses_it(
     with pytest.raises(ComexioDataError) as info:
         await logged_in.get_doorstation_snapshot(7)
 
-    assert str(info.value) == f"Doorstation camera 7 snapshot: the stream came {encoding!r}-encoded, not unencoded"
+    coding = encoding.split(", ")[-1]  # the first coding that is not identity
+    assert str(info.value) == f"Doorstation camera 7 snapshot: the stream came {coding!r}-encoded, not unencoded"
     assert asked_for == ["identity"]
     assert [kwargs.get("auto_decompress") for kwargs in options] == [False]
 
@@ -469,10 +471,45 @@ async def test_every_request_asks_for_an_unencoded_answer(
     assert asked_for == [(expected, (headers or {}).get("Referer"))]
 
 
+@pytest.mark.parametrize(
+    ("method_name", "status"),
+    [pytest.param("_request_text", 200, id="text-request"), pytest.param("_request_redirect", 302, id="redirect")],
+)
+async def test_every_request_leaves_the_answer_undecompressed(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, method_name: str, status: int
+) -> None:
+    # The compressed-answer tests pass either way (the Content-Encoding header stays): only the option pins it.
+    async def handler(_request: web.Request) -> web.StreamResponse:
+        return web.Response(status=status, headers={"Location": "/elsewhere"} if status == 302 else {})
+
+    comexio.serve("POST", "/probe", handler)
+    options: list[dict[str, Any]] = []
+    request = logged_in._session.request
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        options.append(kwargs)
+        return request(*args, **kwargs)
+
+    monkeypatch.setattr(logged_in._session, "request", spy)
+    send = getattr(logged_in, method_name)
+
+    await send("POST", "/probe", what="Probe")
+
+    assert [kwargs.get("auto_decompress") for kwargs in options] == [False]
+
+
 async def test_a_followed_redirect_asks_for_an_unencoded_answer_too(
-    logged_in: ComexioClient, comexio: FakeComexio
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     asked_for: list[str | None] = []
+    options: list[dict[str, Any]] = []
+    real_request = logged_in._session.request
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        options.append(kwargs)
+        return real_request(*args, **kwargs)
+
+    monkeypatch.setattr(logged_in._session, "request", spy)
 
     async def hop(request: web.Request) -> web.StreamResponse:
         asked_for.append(request.headers.get("Accept-Encoding"))
@@ -487,6 +524,7 @@ async def test_a_followed_redirect_asks_for_an_unencoded_answer_too(
 
     assert await logged_in._request_text("GET", "/probe", what="Probe") == "done"
     assert asked_for == ["identity", "identity"]
+    assert [kwargs.get("auto_decompress") for kwargs in options] == [False, False]  # every hop, not only the first
 
 
 @pytest.mark.parametrize("encoding", ["identity", " Identity "])
@@ -581,6 +619,7 @@ class _ErrorResponse:
     def __init__(self, chunks: Iterable[bytes], charset: str | None = None) -> None:
         self.content = _ErrorBody(chunks)
         self.charset = charset
+        self.headers: CIMultiDict[str] = CIMultiDict()
 
 
 async def test_an_error_page_is_read_up_to_its_byte_cap_only() -> None:

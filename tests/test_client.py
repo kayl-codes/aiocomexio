@@ -1,9 +1,13 @@
 """ComexioClient against the in-process fake Comexio server."""
 
 import asyncio
+import codecs
+import gzip
 import json
 import logging
+from collections.abc import Buffer, Iterator
 from datetime import timedelta
+from http import HTTPStatus
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
@@ -11,13 +15,16 @@ from urllib.parse import urlsplit
 import aiohttp
 import pytest
 from aiohttp import web
+from aiohttp.streams import StreamReader
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from multidict import CIMultiDict
 
 from aiocomexio import (
     ComexioAuthenticationError,
     ComexioClient,
     ComexioConnectionError,
     ComexioDataError,
+    ComexioRequestRejectedError,
     ComexioResponseError,
     IoAddress,
     LiveStates,
@@ -683,6 +690,439 @@ async def test_get_raw_config_undecodable_page_raises_data_error(
 
     with pytest.raises(ComexioDataError, match="not valid utf-8"):
         await logged_in.get_raw_config()
+
+
+_SMALL_CAP = 4096
+_ENDLESS_LIMIT = 64 * 1024 * 1024  # an "endless" answer ends here, so a client without a cap fails instead of hanging
+
+
+def _serve_bytes(comexio: FakeComexio, body: bytes, content_type: str = "text/html; charset=utf-8") -> None:
+    async def handler(_request: web.Request) -> web.Response:
+        return web.Response(body=body, headers={"Content-Type": content_type})
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, handler)
+
+
+def _serve_bytes_with_encoding(comexio: FakeComexio, body: bytes, *encodings: str, status: int = 200) -> None:
+    """Serve body with one Content-Encoding header line per entry of encodings."""
+
+    async def handler(_request: web.Request) -> web.Response:
+        headers = CIMultiDict([("Content-Type", "text/html; charset=utf-8")])
+        for encoding in encodings:
+            headers.add("Content-Encoding", encoding)
+        return web.Response(body=body, status=status, headers=headers)
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, handler)
+
+
+_FAILING_CODEC = "failing-codec"
+
+
+def _failing_codec_search(name: str) -> codecs.CodecInfo | None:
+    """A codec that passes the charset probe but whose decoder raises a plain UnicodeError, whatever errors says."""
+    if name != "failing_codec":  # codecs.lookup hands the search functions the name with underscores
+        return None
+
+    def decode(_data: Buffer, _errors: str = "strict", /) -> tuple[str, int]:
+        raise UnicodeError("this codec decodes nothing")
+
+    def encode(_text: str, _errors: str = "strict", /) -> tuple[bytes, int]:
+        return b"", 0
+
+    return codecs.CodecInfo(encode, decode, name=_FAILING_CODEC)
+
+
+@pytest.fixture
+def failing_codec() -> Iterator[str]:
+    codecs.register(_failing_codec_search)
+    yield _FAILING_CODEC
+    codecs.unregister(_failing_codec_search)
+
+
+async def _error_page_in_a_failing_codec(_request: web.Request) -> web.Response:
+    return web.Response(
+        body="Küche".encode(), status=500, headers={"Content-Type": f"text/html; charset={_FAILING_CODEC}"}
+    )
+
+
+async def test_request_text_answer_of_exactly_the_cap_is_read(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    _serve_bytes(comexio, b"x" * _SMALL_CAP)
+
+    text = await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+    assert text == "x" * _SMALL_CAP
+
+
+async def test_request_text_answer_one_byte_over_the_cap_raises_data_error(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    _serve_bytes(comexio, b"x" * (_SMALL_CAP + 1))
+
+    with pytest.raises(ComexioDataError, match=f"page: response is longer than {_SMALL_CAP} bytes"):
+        await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+@pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
+async def test_endless_answer_raises_instead_of_filling_memory(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, method_name: str
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    sent = 0
+
+    async def endless(request: web.Request) -> web.StreamResponse:
+        nonlocal sent
+        resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
+        await resp.prepare(request)  # no Content-Length: only the byte cap can end this
+        try:
+            while sent < _ENDLESS_LIMIT:
+                await resp.write(b"x" * 1024)
+                sent += 1024
+        except ConnectionError:  # reset or aborted: the client closed the connection
+            pass
+        return resp
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, endless)
+    request = getattr(logged_in, method_name)
+
+    with pytest.raises(ComexioDataError, match="longer than"):
+        await request("GET", FUNCTION_MODULE_PATH, what="page")
+    assert sent > _SMALL_CAP  # the server did offer more than the cap
+    assert sent < _ENDLESS_LIMIT  # and the client stopped on its own, back-pressure kept the server from finishing
+
+
+@pytest.fixture
+def body_reads(monkeypatch: pytest.MonkeyPatch) -> list[StreamReader]:
+    """Every response body the client reads from now on, once each, to show a refused answer is not read at all."""
+    streams: list[StreamReader] = []  # the objects, not their ids: a freed stream's id can come back
+    client_streams: list[
+        StreamReader
+    ] = []  # only these count: the fake server in this process reads request bodies with the same class
+    real_start = aiohttp.ClientResponse.start
+
+    async def start(self: aiohttp.ClientResponse, connection: Any) -> aiohttp.ClientResponse:
+        response = await real_start(self, connection)
+        client_streams.append(response.content)
+        return response
+
+    monkeypatch.setattr(aiohttp.ClientResponse, "start", start)
+
+    def note(stream: StreamReader) -> None:
+        if any(stream is client for client in client_streams) and all(stream is not seen for seen in streams):
+            streams.append(stream)
+
+    def counting(name: str) -> None:
+        real = getattr(StreamReader, name)
+
+        async def counted(self: StreamReader, *args: Any) -> Any:
+            note(self)
+            return await real(self, *args)
+
+        monkeypatch.setattr(StreamReader, name, counted)
+
+    def counting_nowait(self: StreamReader, *args: Any) -> Any:  # the one way to take bytes that is no coroutine
+        note(self)
+        return real_read_nowait(self, *args)
+
+    real_read_nowait = StreamReader.read_nowait
+    monkeypatch.setattr(StreamReader, "read_nowait", counting_nowait)
+    for method in ("read", "readany", "readchunk", "readline", "readuntil", "readexactly"):  # every coroutine
+        counting(method)
+    return streams
+
+
+async def test_body_reads_spy_sees_the_read_of_an_ordinary_answer(
+    logged_in: ComexioClient, comexio: FakeComexio, body_reads: list[StreamReader]
+) -> None:
+    _serve_bytes(comexio, b"x" * 10)
+
+    await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+    assert len(body_reads) == 1  # the positive control of every `assert not body_reads` below
+
+
+_COMPRESSED = [
+    pytest.param(("gzip",), "gzip", id="gzip"),
+    pytest.param(("deflate",), "deflate", id="deflate"),
+    pytest.param(("br",), "br", id="brotli"),
+    pytest.param(("GZIP",), "GZIP", id="upper-case"),
+    pytest.param(("identity, gzip",), "gzip", id="identity-then-gzip-in-one-line"),
+    pytest.param(("identity", "gzip"), "gzip", id="identity-then-gzip-in-two-lines"),
+    pytest.param(("gzip", "identity"), "gzip", id="gzip-then-identity-in-two-lines"),
+    pytest.param(("identity, gzip, br",), "gzip", id="the-first-coding-is-named"),
+    pytest.param(("zstd",), "zstd", id="zstd"),
+    pytest.param(("compress",), "compress", id="any-other-coding"),
+]
+
+
+@pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
+@pytest.mark.parametrize(("encodings", "coding"), _COMPRESSED)
+async def test_compressed_answer_is_refused_unread(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    body_reads: list[StreamReader],
+    method_name: str,
+    encodings: tuple[str, ...],
+    coding: str,
+) -> None:
+    _serve_bytes_with_encoding(comexio, gzip.compress(b"x" * 1024), *encodings)
+    request = getattr(logged_in, method_name)
+    body_reads.clear()
+
+    with pytest.raises(ComexioDataError, match=f"page: the answer came '{coding}'-encoded, not unencoded"):
+        await request("GET", FUNCTION_MODULE_PATH, what="page")
+    assert not body_reads  # refused before any byte of the body was taken from the stream
+
+
+async def test_compressed_login_form_is_a_data_error_not_an_expired_session(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    login_form = f"<form>{client_module._LOGIN_FORM_SUBMIT_MARKER}</form>".encode()
+    _serve_bytes_with_encoding(comexio, gzip.compress(login_form), "gzip")
+
+    with pytest.raises(ComexioDataError, match="'gzip'-encoded"):
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
+
+
+@pytest.mark.parametrize("encodings", [("identity",), ("Identity",), (" identity ",), ("identity,",), ("identity", "")])
+async def test_answer_declared_identity_encoded_is_read(
+    logged_in: ComexioClient, comexio: FakeComexio, encodings: tuple[str, ...]
+) -> None:
+    _serve_bytes_with_encoding(comexio, b"plain", *encodings)
+
+    assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == "plain"
+    with pytest.raises(ComexioRequestRejectedError, match="was not confirmed: 'plain'"):
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")  # read, not refused
+
+
+async def test_compressed_login_form_with_an_error_status_is_a_status_error(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    login_form = f"<form>{client_module._LOGIN_FORM_SUBMIT_MARKER}</form>".encode()
+    _serve_bytes_with_encoding(comexio, gzip.compress(login_form), "gzip", status=401)
+
+    with pytest.raises(ComexioResponseError) as raised:  # not ComexioAuthenticationError: it is not read
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
+
+    assert raised.value.status == HTTPStatus.UNAUTHORIZED
+
+
+async def test_login_does_not_read_the_answer_of_its_own_post(
+    client: ComexioClient, comexio: FakeComexio, body_reads: list[StreamReader]
+) -> None:
+    await client._request_json("POST", LOGIN_PATH, what="keys", data={"login_keys": "true"})
+    await client._request_text("GET", ADMIN_PATH, what="admin page")
+    reads_of_a_login = len(body_reads)  # the two answers login() reads, nothing of the credentials POST
+    assert reads_of_a_login  # the spy sees reads at all
+    real_login = comexio._login
+    served: list[bool] = []
+
+    async def endless_compressed_login_answer(request: web.Request) -> web.StreamResponse:
+        response = await real_login(request)
+        if (await request.post()).get("login_keys") == "true":
+            return response
+        served.append(True)
+        answer = web.StreamResponse(headers={"Content-Encoding": "gzip"})
+        answer.set_cookie(SESSION_COOKIE, SESSION_VALUE)
+        await answer.prepare(request)
+        try:
+            for _ in range(_ENDLESS_LIMIT // 1024):  # compressed and (up to the limit) endless
+                await answer.write(b"x" * 1024)
+        except ConnectionError:  # the client closed the connection without reading the answer
+            pass
+        return answer
+
+    comexio.serve("POST", LOGIN_PATH, endless_compressed_login_answer)
+    body_reads.clear()
+
+    await client.login()  # the admin page is the verdict, the answer of the POST is not read
+
+    assert served == [True]  # the credentials POST got the compressed, endless answer
+    assert len(body_reads) == reads_of_a_login
+
+
+@pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
+async def test_compressed_error_page_still_reports_its_status_and_names_the_coding(
+    logged_in: ComexioClient, comexio: FakeComexio, body_reads: list[StreamReader], method_name: str
+) -> None:
+    _serve_bytes_with_encoding(comexio, gzip.compress(b"Kueche"), "gzip", status=500)
+    request = getattr(logged_in, method_name)
+    body_reads.clear()
+
+    with pytest.raises(ComexioResponseError) as raised:
+        await request("GET", FUNCTION_MODULE_PATH, what="page")
+
+    assert raised.value.status == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert raised.value.body == "('gzip'-encoded body not read)"  # the compressed bytes are not read as text
+    assert not body_reads  # and not read at all
+
+
+async def test_request_redirect_answer_over_the_cap_raises_data_error(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    _serve_bytes(comexio, b"x" * (_SMALL_CAP + 1))
+
+    with pytest.raises(ComexioDataError, match="longer than"):
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
+
+
+_ESCAPED = rb"K\u00fcche \n"  # what unicode_escape would turn into "Küche" and a line feed
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body", "expected"),
+    [
+        ("text/html; charset=iso-8859-1", "Küche".encode("iso-8859-1"), "Küche"),
+        ("text/html", "Küche".encode(), "Küche"),  # no charset: UTF-8, like aiohttp's default fallback
+        ("text/html; charset=no-such-codec", "Küche".encode(), "Küche"),
+        ("text/html; charset=utf-16", "Küche".encode("utf-16"), "Küche"),  # a text codec that rejects a lone byte
+        ("text/html; charset=hex", "Küche".encode(), "Küche"),  # a codec that is no text encoding
+        ("text/html; charset=undefined", "Küche".encode(), "Küche"),  # a codec that refuses every input
+        ("text/html; charset=zlib", "Küche".encode(), "Küche"),  # a bytes-to-bytes codec: LookupError, not TypeError
+        ("text/html; charset=base64_codec", "Küche".encode(), "Küche"),  # the long names of those codecs too
+        ("text/html; charset=rot_13", "Küche".encode(), "Küche"),  # a str-to-str codec: LookupError too
+        # codecs that transform the page instead of reading it: a declared one counts as undeclared
+        ("text/html; charset=unicode_escape", _ESCAPED, _ESCAPED.decode()),
+        ("text/html; charset=raw_unicode_escape", _ESCAPED, _ESCAPED.decode()),
+        ("text/html; charset=punycode", "Küche".encode(), "Küche"),
+        ("text/html; charset=idna", b"xn--kche-0ra", "xn--kche-0ra"),  # would read as the label "küche"
+        ("application/json", "Küche".encode(), "Küche"),
+    ],
+)
+async def test_request_text_decodes_with_the_declared_charset_or_utf8(
+    logged_in: ComexioClient, comexio: FakeComexio, content_type: str, body: bytes, expected: str
+) -> None:
+    _serve_bytes(comexio, body, content_type)
+
+    assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == expected
+
+
+async def test_request_text_undecodable_answer_names_the_declared_codec(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    _serve_bytes(comexio, b"\xff", "text/html; charset=ascii")
+
+    with pytest.raises(ComexioDataError, match="page: response is not valid ascii"):
+        await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+@pytest.mark.parametrize("method", ["_request_text", "_request_redirect"])
+async def test_codec_that_fails_even_with_replace_is_a_data_error(
+    logged_in: ComexioClient, comexio: FakeComexio, failing_codec: str, method: str
+) -> None:
+    _serve_bytes(comexio, "Küche".encode(), f"text/html; charset={failing_codec}")
+    request = getattr(logged_in, method)
+
+    with pytest.raises(ComexioDataError, match=f"page: response is not valid {failing_codec}"):
+        await request("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+@pytest.mark.usefixtures("failing_codec")
+async def test_error_page_in_a_codec_that_fails_still_reports_the_status(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("GET", FUNCTION_MODULE_PATH, _error_page_in_a_failing_codec)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await logged_in.get_raw_config()
+    assert excinfo.value.status == 500
+    assert excinfo.value.body == "Küche"
+
+
+async def test_request_text_character_split_over_two_chunks_is_decoded_whole(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_chunk_read = asyncio.Event()  # the second half is only sent once the client holds the first, on any machine
+    real_read = StreamReader.read
+
+    async def noting_read(self: StreamReader, *args: Any) -> bytes:
+        chunk = await real_read(self, *args)
+        if chunk.endswith(b"\xc3"):  # the client took "K" and the first byte of "ü" alone
+            first_chunk_read.set()
+        return chunk
+
+    monkeypatch.setattr(StreamReader, "read", noting_read)
+
+    async def split_umlaut(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
+        await resp.prepare(request)
+        await resp.write(b"K\xc3")  # the first byte of the two of "ü"
+        await asyncio.wait_for(first_chunk_read.wait(), timeout=30)
+        await resp.write(b"\xbcche")
+        return resp
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, split_umlaut)
+
+    try:
+        assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == "Küche"
+    finally:
+        first_chunk_read.set()  # releases the handler when the client never read the first half, so it ends at once
+
+
+async def test_request_redirect_undecodable_answer_is_not_a_confirmation(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    _serve_bytes(comexio, b"\xff\xfeNope")
+
+    with pytest.raises(ComexioRequestRejectedError, match="not confirmed"):
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
+
+
+async def test_request_redirect_login_form_with_a_foreign_byte_is_an_expired_session(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    _serve_bytes(comexio, LOGIN_PAGE.encode() + b"\xff")
+
+    with pytest.raises(ComexioAuthenticationError, match="login form"):
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
+
+
+@pytest.mark.parametrize("method", ["_request_text", "_request_redirect"])
+async def test_success_answer_that_breaks_off_is_a_connection_error(
+    logged_in: ComexioClient, comexio: FakeComexio, method: str
+) -> None:
+    async def broken_page(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
+        resp.content_length = 1000
+        await resp.prepare(request)
+        await resp.write(b"partial")
+        assert request.transport is not None
+        request.transport.close()
+        return resp
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, broken_page)
+    request = getattr(logged_in, method)
+
+    with pytest.raises(ComexioConnectionError):
+        await request("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+async def test_request_text_session_still_works_after_an_answer_over_the_cap(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    refused = asyncio.Event()  # the answer stays open until the client has refused it, however slow the machine is
+
+    async def announces_far_more(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
+        resp.content_length = 10_000_000  # the client must not wait for what the header promises
+        await resp.prepare(request)
+        await resp.write(b"x" * (_SMALL_CAP + 1))
+        await asyncio.wait_for(refused.wait(), timeout=30)
+        return resp
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, announces_far_more)
+
+    try:
+        with pytest.raises(ComexioDataError, match="longer than"):
+            await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+    finally:
+        refused.set()  # also when the client did not refuse: the handler must not hold the teardown
+    assert "ioTypes" in await logged_in._request_text("GET", ADMIN_PATH, what="admin")  # not stuck on the unread rest
 
 
 async def test_fetch_marker_titles(logged_in: ComexioClient) -> None:

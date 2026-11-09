@@ -44,7 +44,9 @@ class ComexioResponseError(ComexioError):
     """The server answered with an HTTP error status.
 
     body is a whitespace-collapsed, length-capped excerpt of the error page (Comexio's error pages
-    name the failing check), also appended to the message; None when there was none to read.
+    name the failing check), also appended to the message; None when there was none to read. For a page the
+    device sent compressed it is a note naming the coding instead (`('gzip'-encoded body not read)`): the page
+    itself is not read.
     """
 
     def __init__(self, message: str, *, status: int, body: str | None = None) -> None:
@@ -54,7 +56,11 @@ class ComexioResponseError(ComexioError):
 
 
 class ComexioDataError(ComexioError):
-    """The server answered, but the payload was not in the expected shape."""
+    """The server answered, but the payload was not in the expected shape.
+
+    Also an answer longer than the client reads or sent compressed: the request was sent, so for a write it does
+    not prove that nothing changed.
+    """
 
 
 class ComexioRequestRejectedError(ComexioError):
