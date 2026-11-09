@@ -2265,8 +2265,9 @@ class ComexioClient:
 
         Any other answer is not the confirmation: the login form or a redirect to it raises
         ComexioAuthenticationError, an error status ComexioResponseError, anything else
-        ComexioRequestRejectedError. A 200 answer longer than _RESPONSE_MAX_BYTES or sent compressed is no
-        confirmation either, but is not read: ComexioDataError.
+        ComexioRequestRejectedError. A compressed 200 answer is no confirmation either and is not read; one
+        longer than _RESPONSE_MAX_BYTES is read up to that size plus one byte, then refused. Both are a
+        ComexioDataError.
         """
         try:
             async with (
