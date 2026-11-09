@@ -44,7 +44,9 @@ Beta. The move out of the integration, in order:
      commands, and Doorstation detection (`get_doorstations`) with a camera snapshot
      (`get_doorstation_snapshot`, `doorstation_stream_url`). Not built yet: the Doorstation's own IP
      (`extension_location` of `/admin/extension/edit/`).
-   - Every admin answer is read through a byte cap (`_RESPONSE_MAX_BYTES`, 16 MiB) with
+   - A successful admin answer is read through a byte cap (`_RESPONSE_MAX_BYTES`, 16 MiB); an error
+     page has its own 64 KiB cap and the Doorstation snapshot its own 4 MiB cap. The credentials POST
+     of `login()` is sent without reading its answer (`_request_unread`). Every request sends
      `Accept-Encoding: identity` and `auto_decompress=False`; see the README for the failure modes.
 
 ## Commands
