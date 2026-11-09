@@ -115,6 +115,15 @@ published on PyPI and consumed by the Home Assistant integration
   still decide its result (the protocol select keeps its last selected and first enabled option, not every option);
   a page with thousands of elements must not grow the parser's state with each one
   (`test_protocol_select_parser_keeps_only_the_options_that_can_be_chosen` measures it).
+- **Byte caps before decoding, error paths included:** a *new or touched* read of an answer from the device has an
+  upper bound in bytes *before* the bytes are buffered, decompressed or decoded. `resp.text()` and `resp.read()` on a
+  body without a cap are findings in such code, and so is a body read for an error status: an HTTP 4xx/5xx page can
+  be as large as any other, and a character cap on the excerpt (`_ERROR_BODY_MAX_CHARS`) does not limit what was
+  read to build it. Read in chunks up to the cap and leave the rest unread. A cap on the *received* bytes is no cap
+  on the *decompressed* ones: a read that must stay bounded sends `Accept-Encoding: identity` or turns
+  `auto_decompress` off. Decode the capped bytes yourself, with the declared charset and a UTF-8 fallback for a
+  missing or unknown one (`errors="replace"`). A read that breaks off must not hide the status: report the HTTP
+  status without the body. Older uncapped reads are not a finding unless the diff touches them.
 - **Live readings stay at DEBUG:** a WARNING or higher about an unexpected answer to a *value* request (live states,
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
   answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes
