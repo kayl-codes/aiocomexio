@@ -59,7 +59,9 @@ An answer is read up to 16 MiB (the largest one measured on an installation with
 865 KiB); a successful answer that is longer, or that the device sends compressed although every request
 asks for `Accept-Encoding: identity`, is refused with `ComexioDataError`, never cut. An error-status answer
 sent compressed keeps its status (`ComexioResponseError`); its
-`body` is then not the page but the note `('gzip'-encoded body not read)`, naming the coding. The request was
+`body` is then not the page but the note `('gzip'-encoded body not read)`, naming the coding. The one exception is
+the credentials POST of `login()`: its answer is not read at all (the admin page that follows decides whether
+the login worked), so neither its size nor its coding can fail the login. The request was
 sent by then, so for a write a `ComexioDataError` does not prove it failed — as with `ComexioConnectionError`,
 look at the object before repeating a create. An answer is decoded with its declared charset, else UTF-8: a
 declared charset that is no text encoding (`hex`, `zlib`, ...) or that transforms the page instead of reading it
