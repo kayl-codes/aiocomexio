@@ -63,7 +63,12 @@ handshake — no HTTP request, no credentials. Pass it as `fingerprint=` and eve
 HTTPS; a server presenting any other certificate raises `ComexioCertificateMismatchError` (not a
 `ComexioConnectionError`: retrying cannot help, the certificate was replaced or something else
 answers) before the request that met it is sent — if that request was a redirect hop, the hops
-before it did reach the pinned server. Without `fingerprint` the client uses plain HTTP.
+before it did reach the pinned server. Without `fingerprint` the client uses plain HTTP and
+follows redirects only on the Comexio server: on the same scheme, host and port, or on to HTTPS on
+port 443 of the same host. A redirect anywhere else (another host, or another port of the same
+host) raises `ComexioResponseError` before anything is sent there. A redirect on to HTTPS checks
+the certificate against the system's CAs, so Comexio's self-signed one fails there with
+`ComexioConnectionError` — pin it instead.
 
 Fetching the fingerprint is trust on first use: whatever answers that one handshake gets pinned.
 So fetch it **once, at setup**, store it, and pass the stored value on every later start —
@@ -181,6 +186,33 @@ them): leave such an Id out of the map, and its elements render as `1-Wire ref=<
 instead of showing one of the sensors.
 `render_flow_svg` takes the same map (and `knx_by_id`) for its box labels. A value that is not
 finite (`nan`, `inf`) shows as no value.
+
+### Doorstation
+
+A Comexio Doorstation is an extension of the IO-Server with a camera. Its IOs (`PIR1`, the bell
+buttons `DI1`–`DI3`, `NameLED1`, …) come through `config.parse_config` like those of any other
+extension. The camera calls need the admin session (`login()` first):
+
+- `get_doorstations()` reads the IO home page and returns the Doorstations keyed by extension id.
+  Each `Doorstation` has `ext_id`, `camera_id` and `name` (the extension name, `None` if the page
+  carries none). An empty map means the page lists extensions but no Doorstation; a page with neither
+  the device counters of its extension blocks (the ones `get_onewire_device_count()` reads) nor an
+  element with a non-empty `data-camera_id` raises `ComexioDataError`. Elements whose ids are not positive integers are skipped (and logged); if there are
+  such elements but none is usable, the call raises `ComexioDataError`. Detection follows the IO home page
+  of Comexio OS 11.0.2: the elements of a Doorstation tab carry `data-extid`, `data-extname` and
+  `data-camera_id`.
+- `doorstation_stream_url(camera_id)` is the URL of the camera's MJPEG stream on the IO-Server
+  (`/proxy/cam/<camera_id>/`, `multipart/x-mixed-replace`, one JPEG per part).
+- `get_doorstation_snapshot(camera_id)` returns the current image: the first complete JPEG of that
+  stream, read with the admin session. A stream without a frame within 10 seconds, or one that breaks
+  off, raises `ComexioConnectionError`; one that ends or passes 4 MB without a frame (a frame must end
+  within the first 4 MB; bytes past it are not kept), a malformed frame (also one with an empty scan
+  or one that ends before its first scan), or a stream sent compressed (it is asked for unencoded and
+  never decompressed, so the 4 MB cap holds) raises `ComexioDataError`; the login form raises
+  `ComexioAuthenticationError`.
+
+The Doorstation serves the same stream under its own address, reportedly without a login. If you
+use it, keep the Doorstation in a network segment that only trusted hosts can reach.
 
 ## Development
 

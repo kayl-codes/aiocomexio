@@ -14,6 +14,7 @@ from .client import (
     WebioCommandForm,
     io_written_over_admin_session,
 )
+from .doorstation import Doorstation
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioCertificateMismatchError,
@@ -42,6 +43,7 @@ __all__ = [
     "ComexioRequestRejectedError",
     "ComexioResponseError",
     "CreatedFunctionPlan",
+    "Doorstation",
     "IoAddress",
     "LiveStates",
     "OneWireSensor",

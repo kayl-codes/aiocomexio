@@ -28,6 +28,7 @@ from http import HTTPStatus
 from io import StringIO
 from itertools import repeat
 from operator import attrgetter, is_
+from types import MappingProxyType
 from typing import Any, NamedTuple, Self, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
@@ -35,6 +36,15 @@ import aiohttp
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from .config import iter_group
+from .doorstation import (
+    CAMERA_ID_ATTRIBUTE,
+    DOORSTATION_ATTRIBUTES,
+    JPEG_EOI,
+    Doorstation,
+    JpegFrameReader,
+    doorstation_stream_path,
+    doorstations_from_attributes,
+)
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioCertificateMismatchError,
@@ -47,6 +57,7 @@ from .exceptions import (
 )
 from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_missing_collections
 from .onewire import (
+    _ANY_TYPE_COUNTER,
     OneWireSensor,
     OneWireStatus,
     parse_onewire_config,
@@ -94,6 +105,21 @@ _BUS_WORKLOAD_PATH = "/admin/in_output/inoutputinfo"
 _ONEWIRE_STATUS_PATH = "/admin/knx_one_wire/read1WireStati/"
 _ONEWIRE_MONITOR_PATH = "/admin/knx_one_wire/one_wire/"
 _BUS_WORKLOAD_REFERER_PATH = "/admin/in_output/home"
+_IO_HOME_PAGE = "IO home page"
+# How long get_doorstation_snapshot waits for the first frame, and how much of the stream it reads at most: a
+# frame is about 90 KB at 1280x720, so a stream without a frame in its first MBs is no camera stream.
+_SNAPSHOT_TIMEOUT_SEC = 10.0
+_MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+# The snapshot asks for the stream unencoded and does not let aiohttp decompress it: decompressed chunks would be
+# allocated before the byte cap could apply, so a compressed answer could exhaust memory. Every other request asks
+# for an unencoded answer too (_unencoded), so the cap on an error page counts bytes of the page itself.
+_ACCEPT_ENCODING = "Accept-Encoding"
+_IDENTITY_ENCODING = "identity"
+# Every extension block of the IO home page carries a device counter: a <div> with an id number_of_<ext> and a
+# class number_of_type_<n>, the markup parse_onewire_device_count reads. The Quickbus and KNX counters carry the
+# suffixes _30_2 / _30_3, so the type is a number with optional numeric suffixes.
+_EXTENSION_COUNTER_ID_PREFIX = "number_of_"
+_EXTENSION_COUNTER_CLASS_RE = re.compile(rf"{_ANY_TYPE_COUNTER}\d+(?:_\d+)*", re.ASCII)
 _EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
 _SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
 _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
@@ -367,10 +393,11 @@ _PLAN_DPI_RANGE = range(45, 121)
 # save_fub / delete answer with a redirect whose query carries the verdict as one (key, value)
 # parameter; the home page renders its message from exactly that parameter (verified live).
 _REDIRECT_STATUSES = frozenset({HTTPStatus.MOVED_PERMANENTLY, HTTPStatus.FOUND, HTTPStatus.SEE_OTHER})
-# Redirects a pinned client follows itself (aiohttp would also follow one to plain http://, without
-# the pin, and send the session cookie along). Like aiohttp, a POST turns into a GET on 301/302/303.
+# Redirects the client follows itself (aiohttp would follow one anywhere: a pinned client to plain http://,
+# without the pin, any client to another host). Like aiohttp, a POST turns into a GET on 301/302/303.
 _FOLLOWED_REDIRECT_STATUSES = _REDIRECT_STATUSES | {HTTPStatus.TEMPORARY_REDIRECT, HTTPStatus.PERMANENT_REDIRECT}
 _MAX_REDIRECTS = 10
+_DEFAULT_PORTS = MappingProxyType({"http": 80, "https": _HTTPS_DEFAULT_PORT})
 _PLAN_ADDED_CONFIRMATION = ("added", "1")
 _PLAN_SAVED_CONFIRMATION = ("saved", "1")
 _PLAN_DELETED_CONFIRMATION = ("delete", "ok")
@@ -391,6 +418,9 @@ _CONNECTION_VALUE_TYPES = frozenset({"binary", "analog"})
 _ID_KEY = "id"
 # Cap of the error-page excerpt ComexioResponseError carries.
 _ERROR_BODY_MAX_CHARS = 500
+# Bytes of an error-status answer that are read at most: enough for the excerpt after collapsing whitespace, so a
+# huge error page cannot fill memory.
+_ERROR_BODY_MAX_BYTES = 64 * 1024
 # Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.
 _EMPTY_CONNECTION_VALUES: tuple[Any, ...] = (None, "", [], {})
 
@@ -985,8 +1015,52 @@ class ComexioClient:
 
         One request for the whole IO home page (about 0.9 MB on a full installation).
         """
-        html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what="IO home page")
+        html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what=_IO_HOME_PAGE)
         return parse_onewire_device_count(html)
+
+    async def get_doorstations(self) -> dict[int, Doorstation]:
+        """The Doorstations of the IO-Server, keyed by extension id (empty: the page shows none).
+
+        One request for the whole IO home page (see get_onewire_device_count); see parse_doorstations.
+        """
+        html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what=_IO_HOME_PAGE)
+        return parse_doorstations(html)
+
+    def doorstation_stream_url(self, camera_id: int) -> str:
+        """URL of the MJPEG stream of a Doorstation camera on the IO-Server (Doorstation.camera_id)."""
+        return f"{self._base_url}{doorstation_stream_path(camera_id)}"
+
+    async def get_doorstation_snapshot(self, camera_id: int) -> bytes:
+        """The current image of a Doorstation camera: the first complete JPEG of its MJPEG stream.
+
+        Reads the stream with the admin session until the first frame is complete, then closes it. A stream that
+        brings no frame within _SNAPSHOT_TIMEOUT_SEC seconds (the wait for the login gate included) raises
+        ComexioConnectionError, as does a stream that breaks off; one that ends or passes _MAX_SNAPSHOT_BYTES
+        without a frame, or whose frame is malformed, raises ComexioDataError, as does a stream sent compressed
+        (it is asked for unencoded, see _IDENTITY_ENCODING), the login form
+        ComexioAuthenticationError. A malformed frame shows only once a JPEG end marker arrived: a stream without
+        one runs into the byte cap or the timeout.
+        """
+        path = doorstation_stream_path(camera_id)
+        what = f"Doorstation camera {camera_id} snapshot"
+        deadline = asyncio.timeout(_SNAPSHOT_TIMEOUT_SEC)
+        try:
+            async with (
+                deadline,
+                self._response("GET", path, what=what, auto_decompress=False) as resp,
+            ):
+                if resp.status != HTTPStatus.OK:
+                    raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
+                encoding = resp.headers.get("Content-Encoding", "").strip()
+                if encoding and encoding.lower() != _IDENTITY_ENCODING:
+                    raise ComexioDataError(f"{what}: the stream came {_excerpt(encoding)}-encoded, not unencoded")
+                return await _read_first_frame(resp, what)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            # Only the snapshot's own deadline means no frame came; aiohttp's timeouts (the session's total one,
+            # connect, socket read) are transport errors like on every other request.
+            if deadline.expired():
+                raise ComexioConnectionError(f"{what}: no complete frame within {_SNAPSHOT_TIMEOUT_SEC} s") from err
+            raise self._transport_error(what, err) from err
 
     async def get_onewire_sensors(self) -> dict[str, OneWireSensor]:
         """The active 1-Wire sensors of the configuration, keyed by address (OT1, OH3, ...).
@@ -2120,24 +2194,23 @@ class ComexioClient:
     async def _response(
         self, method: str, path: str, *, what: str, **kwargs: Any
     ) -> AsyncIterator[aiohttp.ClientResponse]:
-        """The response to one request; a pinned client follows redirects itself, only within its HTTPS origin.
+        """The response to one request; the client follows redirects itself, a pinned one only within its HTTPS origin.
 
         A redirect that leaves the pinned origin (plain http://, another host or port) raises
         ComexioResponseError before it is followed, so neither the session cookie nor credentials
-        go anywhere the pin does not cover. Every request goes through the login gate.
+        go anywhere the pin does not cover. An unpinned client follows a redirect only on its origin or on to
+        HTTPS on port 443 of the same host (see _unpinned_redirect_target). Every request goes through the login gate.
         """
+        redirect_target = _unpinned_redirect_target if self._fingerprint is None else _pinned_redirect_target
+        kwargs = _unencoded(kwargs)
         async with self._gate.request():
             url = f"{self._base_url}{path}"
-            if self._fingerprint is None:
-                async with self._session.request(method, url, ssl=self._ssl, **kwargs) as resp:
-                    yield resp
-                return
             for _ in range(_MAX_REDIRECTS + 1):
                 async with self._session.request(method, url, ssl=self._ssl, allow_redirects=False, **kwargs) as resp:
                     if resp.status not in _FOLLOWED_REDIRECT_STATUSES:
                         yield resp
                         return
-                    url = _pinned_redirect_target(resp, what)
+                    url = redirect_target(resp, what)
                     # The Location carries its own query; like aiohttp, a 303 (except on a HEAD) and a POST on
                     # 301/302 continue as a body-less GET.
                     kwargs.pop("params", None)
@@ -2145,6 +2218,8 @@ class ComexioClient:
                     if see_other or (resp.status in _REDIRECT_STATUSES and method == "POST"):
                         method = "GET"
                         kwargs.pop("data", None)
+                    else:
+                        _require_replayable_body(kwargs, what, resp.status)
             raise ComexioResponseError(f"{what} failed: more than {_MAX_REDIRECTS} redirects", status=resp.status)
 
     def _transport_error(self, what: str, err: aiohttp.ClientError | TimeoutError) -> ComexioError:
@@ -2180,7 +2255,7 @@ class ComexioClient:
             async with (
                 self._gate.request(),
                 self._session.request(
-                    method, f"{self._base_url}{path}", allow_redirects=False, ssl=self._ssl, **kwargs
+                    method, f"{self._base_url}{path}", allow_redirects=False, ssl=self._ssl, **_unencoded(kwargs)
                 ) as resp,
             ):
                 if resp.status in _REDIRECT_STATUSES:
@@ -3063,6 +3138,92 @@ class _CommandRangeParser(_FormParser):
             self.fields.setdefault(field, attributes.get("value"))
 
 
+class _DoorstationParser(_FormParser):
+    """The Doorstation attributes of every element carrying data-camera_id, read as a browser reads them.
+
+    Only the distinct attribute sets are kept, in the order they first appear: a Doorstation tab repeats them on
+    many elements, so the parser's state grows with the Doorstations, not with the page.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.elements: dict[tuple[tuple[str, str], ...], None] = {}
+        self.saw_extension_counter = False
+
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        if _is_extension_counter(tag, attributes):
+            self.saw_extension_counter = True
+        if CAMERA_ID_ATTRIBUTE in attributes:
+            kept = tuple((name, attributes[name]) for name in DOORSTATION_ATTRIBUTES if name in attributes)
+            self.elements.setdefault(kept, None)
+
+
+def _is_extension_counter(tag: str, attributes: dict[str, str]) -> bool:
+    """Whether a tag is the device counter of an extension block (see _EXTENSION_COUNTER_ID_PREFIX)."""
+    return (
+        tag == "div"
+        and attributes.get("id", "").startswith(_EXTENSION_COUNTER_ID_PREFIX)
+        and any(_EXTENSION_COUNTER_CLASS_RE.fullmatch(name) for name in attributes.get("class", "").split())
+    )
+
+
+def parse_doorstations(io_home_html: str) -> dict[int, Doorstation]:
+    """The Doorstations of the IO home page, keyed by extension id (see doorstation.doorstations_from_attributes).
+
+    Every extension block of the page, BASE included, carries a device counter (see _EXTENSION_COUNTER_ID_PREFIX).
+    A page with such counters but no element with data-camera_id has no Doorstation and gives an empty result. A
+    page with neither counters nor an element with a non-empty data-camera_id is a changed page, not an installation
+    without Doorstations: that raises ComexioDataError, so a caller never drops its cameras on a silent empty result;
+    other Doorstation attributes alone (data-extid, an empty data-camera_id) do not count, a page that kept them but
+    lost its camera ids has changed. Limit: a firmware that renames data-camera_id but keeps the counters looks like
+    an installation without Doorstations.
+    """
+    parser = _DoorstationParser()
+    parser.feed(io_home_html)
+    parser.close()
+    names_a_camera = any(dict(element).get(CAMERA_ID_ATTRIBUTE) for element in parser.elements)
+    if not parser.saw_extension_counter and not names_a_camera:
+        raise ComexioDataError("IO home page has no extension counters, the Doorstations are unknown")
+    return doorstations_from_attributes(dict(element) for element in parser.elements)
+
+
+async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
+    """The first complete JPEG of a stream response; see ComexioClient.get_doorstation_snapshot."""
+    received = bytearray()
+    reader = JpegFrameReader()
+    at_cap = False
+    async for chunk in resp.content.iter_any():
+        # Bytes past the cap are not kept: a frame that ends beyond it is too large, like no frame at all.
+        kept = chunk[: _MAX_SNAPSHOT_BYTES - len(received)]
+        received += kept
+        # With the cap reached no further byte can complete a frame, so the read ends here and does not wait for a
+        # chunk that would only be dropped (a stream that stalls at exactly the cap would end in a timeout).
+        at_cap = len(received) >= _MAX_SNAPSHOT_BYTES
+        # A frame is complete only once its EOI arrived; looking for it only in the new bytes (and the byte before
+        # them, a marker may span two chunks) keeps the stream from being rescanned for every chunk.
+        new_bytes = received[-len(kept) - 1 :]
+        if JPEG_EOI in new_bytes and (frame := _complete_frame(reader, received, what)) is not None:
+            return frame
+        if at_cap:
+            break
+    # A login form in the kept bytes is an expired session, also when the stream ran past the cap.
+    if _LOGIN_FORM_SUBMIT_MARKER.encode() in received:
+        raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
+    if at_cap:
+        raise ComexioDataError(f"{what}: no complete JPEG in the first {_MAX_SNAPSHOT_BYTES} bytes of the stream")
+    raise ComexioDataError(
+        f"{what}: the stream ({resp.content_type!r}) ended after {len(received)} bytes without a complete JPEG"
+    )
+
+
+def _complete_frame(reader: JpegFrameReader, received: bytearray, what: str) -> bytes | None:
+    """The first complete JPEG of the stream so far (reader goes on where it stopped), its error naming the camera."""
+    try:
+        return reader.frame(received)
+    except ComexioDataError as err:
+        raise ComexioDataError(f"{what}: {err}") from err
+
+
 class _CommandTextParser(_FormParser):
     """Where the text of the first <textarea id="parameter"> and <textarea id="data"> of an edit form lies.
 
@@ -3419,6 +3580,43 @@ def _bulk_plan_entry(
 
 def _pinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
     """Where a redirect of a pinned client leads; ComexioResponseError unless it stays on the same HTTPS origin."""
+    return _redirect_target(resp, what, _same_origin, "outside the pinned HTTPS connection")
+
+
+def _unpinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
+    """Where a redirect of an unpinned client leads; ComexioResponseError unless it stays on the Comexio server.
+
+    It may stay on the origin or move on to HTTPS on port 443 of the same host (plain HTTP sent on to HTTPS). Any
+    other port may be another service of that host, and the session cookie is not bound to a port; any other host
+    would let a peer make the caller request whatever its network reaches.
+    """
+    return _redirect_target(resp, what, _same_origin_or_https, "away from the Comexio server")
+
+
+def _same_origin(current: str, target: str) -> bool:
+    """Whether target has the scheme, host and port of current; ValueError for a malformed port."""
+    return _origin(target) == _origin(current)
+
+
+def _same_origin_or_https(current: str, target: str) -> bool:
+    """Whether target is on current's origin or HTTPS on its host's default port; ValueError for a malformed port."""
+    here = _origin(current)
+    return _origin(target) in {here, ("https", here[1], _HTTPS_DEFAULT_PORT)}
+
+
+def _require_replayable_body(kwargs: dict[str, Any], what: str, status: int) -> None:
+    """ComexioResponseError if a redirect that keeps the method would send a multipart body a second time.
+
+    aiohttp.FormData can be sent once; a second use raises a RuntimeError of aiohttp's own, which no caller expects.
+    """
+    if isinstance(kwargs.get("data"), aiohttp.FormData):
+        raise ComexioResponseError(
+            f"{what} failed: Comexio answered {status} to a multipart upload, which cannot be sent again", status=status
+        )
+
+
+def _redirect_target(resp: aiohttp.ClientResponse, what: str, stays: Callable[[str, str], bool], outside: str) -> str:
+    """Where a redirect leads; ComexioResponseError unless stays(current URL, target) holds."""
     location = resp.headers.get("Location", "")
     if not location:
         raise ComexioResponseError(
@@ -3427,36 +3625,60 @@ def _pinned_redirect_target(resp: aiohttp.ClientResponse, what: str) -> str:
     current = str(resp.url)
     try:
         target = urljoin(current, location)
-        same_origin = _https_origin(target) == _https_origin(current)
+        same_place = stays(current, target)
     except ValueError as err:
         raise ComexioResponseError(
             f"{what} failed: Comexio redirected to an unparsable location {_excerpt(location)}", status=resp.status
         ) from err
-    if not same_origin:
+    if not same_place:
         raise ComexioResponseError(
-            f"{what} refused: Comexio redirected to {_excerpt(location)}, outside the pinned HTTPS connection",
-            status=resp.status,
+            f"{what} refused: Comexio redirected to {_excerpt(location)}, {outside}", status=resp.status
         )
     return target
 
 
-def _https_origin(url: str) -> tuple[str, str | None, int | None]:
-    """Scheme, host and port of url, the port filled in for https; ValueError for a malformed port."""
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    """Scheme, host and port of url, the port filled in for http and https; ValueError for a malformed port."""
     parts = urlsplit(url)
-    return (
-        parts.scheme.lower(),
-        parts.hostname,
-        _HTTPS_DEFAULT_PORT if parts.port is None and parts.scheme.lower() == "https" else parts.port,
-    )
+    scheme = parts.scheme.lower()
+    port = parts.port  # parses the port, so a malformed one raises here and not inside aiohttp
+    return scheme, parts.hostname, _DEFAULT_PORTS.get(scheme) if port is None else port
+
+
+def _unencoded(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The request arguments with an Accept-Encoding: identity header, so a device sends no compressed answer.
+
+    aiohttp decompresses an answer before the reader sees it, so a byte cap on what is read (_ERROR_BODY_MAX_BYTES)
+    limits the plain bytes only when nothing was compressed. A header the caller sets itself wins, whatever the case
+    of its name (HTTP header names are case-insensitive).
+    """
+    headers = dict(kwargs.get("headers") or {})
+    if all(name.lower() != _ACCEPT_ENCODING.lower() for name in headers):
+        headers[_ACCEPT_ENCODING] = _IDENTITY_ENCODING
+    return {**kwargs, "headers": headers}
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
-    """Body of an error-status answer; "" if it breaks off mid-read — the status must still be reported."""
+    """The first _ERROR_BODY_MAX_BYTES of the body of an error-status answer as text; "" if it breaks off mid-read.
+
+    The rest is not read, and the status must be reported even when the body cannot be.
+    """
+    body = bytearray()
     try:
-        return await resp.text(errors="replace")
+        while (left := _ERROR_BODY_MAX_BYTES - len(body)) > 0 and (chunk := await resp.content.read(left)):
+            body += chunk
     except (aiohttp.ClientError, TimeoutError) as err:
         _LOGGER.debug("%s: body of the HTTP %s answer could not be read: %r", what, resp.status, err)
         return ""
+    return _decoded(body, resp.charset)
+
+
+def _decoded(body: bytes | bytearray, charset: str | None) -> str:
+    """body as text in charset (UTF-8 if there is none or Python does not know it), undecodable bytes replaced."""
+    try:
+        return body.decode(charset or "utf-8", errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
 
 
 def _collapse_error_body(text: str) -> str | None:

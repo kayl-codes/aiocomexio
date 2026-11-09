@@ -1714,3 +1714,168 @@ async def test_check_extension_firmware_error_payload_raises(
 
 def test_host_property(client: ComexioClient, comexio: FakeComexio) -> None:
     assert client.host == comexio.host
+
+
+# --- redirects of an unpinned client --------------------------------------------------------
+
+_FROM_PATH = "/admin/from"
+_TO_PATH = "/admin/to"
+
+
+def _redirect_to(location: str) -> Any:
+    async def redirect(_request: web.Request) -> web.Response:
+        return web.Response(status=302, headers={"Location": location})
+
+    return redirect
+
+
+@pytest.mark.parametrize("location", [_TO_PATH, "http://{host}/admin/to", "HTTP://{host}/admin/to"])
+async def test_unpinned_client_follows_a_redirect_on_the_same_host(
+    client: ComexioClient, comexio: FakeComexio, location: str
+) -> None:
+    comexio.serve("GET", _FROM_PATH, _redirect_to(location.format(host=comexio.host)))
+    comexio.serve_text("GET", _TO_PATH, "moved")
+
+    assert await client._request_text("GET", _FROM_PATH, what="Moved") == "moved"
+    assert comexio.requests == [("GET", _FROM_PATH), ("GET", _TO_PATH)]
+
+
+@pytest.mark.parametrize("location", ["https://127.0.0.1/admin/to", "HTTPS://127.0.0.1:443/admin/to"])
+async def test_unpinned_client_follows_a_redirect_on_to_https_of_the_same_host(
+    client: ComexioClient, comexio: FakeComexio, location: str
+) -> None:
+    # Nothing serves HTTPS on 127.0.0.1:443 here: the connection error shows the redirect was followed, not refused.
+    comexio.serve("GET", _FROM_PATH, _redirect_to(location))
+
+    with pytest.raises(ComexioConnectionError):
+        await client._request_text("GET", _FROM_PATH, what="Moved")
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "http://comexio.example.com/admin/to",  # another host
+        "https://comexio.example.com/admin/to",  # HTTPS on its default port, but another host
+        "//comexio.example.com/admin/to",  # scheme-relative, another host
+        "http://localhost:{port}/admin/to",  # the same server under another host name
+        "ftp://{host}/admin/to",  # not http(s)
+        "http://127.0.0.1:1/admin/to",  # another port of the same host: maybe another service
+        "https://127.0.0.1:8443/admin/to",  # HTTPS, but not on its default port
+        "https://{host}/admin/to",  # HTTPS on the port of the plain HTTP server
+    ],
+)
+async def test_unpinned_client_refuses_a_redirect_away_from_the_comexio_server(
+    client: ComexioClient, comexio: FakeComexio, location: str
+) -> None:
+    location = location.format(host=comexio.host, port=urlsplit(f"http://{comexio.host}").port)
+    comexio.serve("GET", _FROM_PATH, _redirect_to(location))
+    request = client._request_text("GET", _FROM_PATH, what="Moved")
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert str(excinfo.value) == f"Moved refused: Comexio redirected to {location!r}, away from the Comexio server"
+    assert comexio.requests == [("GET", _FROM_PATH)]
+
+
+async def test_unpinned_client_refuses_an_unparsable_redirect(client: ComexioClient, comexio: FakeComexio) -> None:
+    location = "http://127.0.0.1:99999/admin/to"
+    comexio.serve("GET", _FROM_PATH, _redirect_to(location))
+    request = client._request_text("GET", _FROM_PATH, what="Moved")
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert str(excinfo.value) == f"Moved failed: Comexio redirected to an unparsable location {location!r}"
+
+
+@pytest.mark.parametrize(("status", "method", "followed_with"), [(302, "POST", "GET"), (307, "POST", "POST")])
+async def test_unpinned_client_follows_a_redirect_like_aiohttp(
+    client: ComexioClient, comexio: FakeComexio, status: int, method: str, followed_with: str
+) -> None:
+    async def moved(_request: web.Request) -> web.Response:
+        return web.Response(status=status, headers={"Location": _TO_PATH})
+
+    comexio.serve(method, _FROM_PATH, moved)
+    comexio.serve_text(followed_with, _TO_PATH, "moved")
+
+    body = await client._request_text(method, _FROM_PATH, what="Moved", data={"a": "1"}, params={"q": "1"})
+
+    assert body == "moved"
+    # A 302 turns the POST into a GET without the form, a 307 keeps both; the old query never follows.
+    followed_form = {"a": "1"} if followed_with == "POST" else {}
+    assert [(r.method, r.path, r.query, r.form) for r in comexio.received] == [
+        (method, _FROM_PATH, {"q": "1"}, {"a": "1"}),
+        (followed_with, _TO_PATH, {}, followed_form),
+    ]
+
+
+@pytest.mark.parametrize("status", [307, 308])
+async def test_a_multipart_upload_is_not_sent_again_on_a_redirect_that_keeps_the_method(
+    client: ComexioClient, comexio: FakeComexio, status: int
+) -> None:
+    async def moved(_request: web.Request) -> web.Response:
+        return web.Response(status=status, headers={"Location": _TO_PATH})
+
+    comexio.serve("POST", _FROM_PATH, moved)
+    comexio.serve_text("POST", _TO_PATH, "moved")
+    form = aiohttp.FormData()
+    form.add_field("file", b"{}", filename="a.json", content_type="application/json")
+    request = client._request_text("POST", _FROM_PATH, what="Uploading", data=form)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert (
+        str(excinfo.value)
+        == f"Uploading failed: Comexio answered {status} to a multipart upload, which cannot be sent again"
+    )
+    assert excinfo.value.status == status
+    assert comexio.requests == [("POST", _FROM_PATH)]
+
+
+async def test_a_multipart_put_is_not_sent_again_on_a_302(client: ComexioClient, comexio: FakeComexio) -> None:
+    # A 302 turns only a POST into a GET; a PUT keeps its method and so its body.
+    async def moved(_request: web.Request) -> web.Response:
+        return web.Response(status=302, headers={"Location": _TO_PATH})
+
+    comexio.serve("PUT", _FROM_PATH, moved)
+    form = aiohttp.FormData()
+    form.add_field("file", b"{}", filename="a.json", content_type="application/json")
+    request = client._request_text("PUT", _FROM_PATH, what="Uploading", data=form)
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert excinfo.value.status == 302
+    assert comexio.requests == [("PUT", _FROM_PATH)]
+
+
+@pytest.mark.parametrize("status", [302, 303])
+async def test_a_multipart_upload_follows_a_redirect_that_turns_it_into_a_get(
+    client: ComexioClient, comexio: FakeComexio, status: int
+) -> None:
+    async def moved(_request: web.Request) -> web.Response:
+        return web.Response(status=status, headers={"Location": _TO_PATH})
+
+    comexio.serve("POST", _FROM_PATH, moved)
+    comexio.serve_text("GET", _TO_PATH, "moved")
+    form = aiohttp.FormData()
+    form.add_field("file", b"{}", filename="a.json", content_type="application/json")
+
+    body = await client._request_text("POST", _FROM_PATH, what="Uploading", data=form)
+
+    assert body == "moved"
+    assert comexio.requests == [("POST", _FROM_PATH), ("GET", _TO_PATH)]
+
+
+async def test_unpinned_client_stops_an_endless_redirect_loop(client: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve("GET", _FROM_PATH, _redirect_to(_FROM_PATH))
+    request = client._request_text("GET", _FROM_PATH, what="Moved")
+
+    with pytest.raises(ComexioResponseError) as excinfo:
+        await request
+
+    assert str(excinfo.value) == "Moved failed: more than 10 redirects"
+    assert excinfo.value.status == 302
+    assert comexio.requests == [("GET", _FROM_PATH)] * 11
