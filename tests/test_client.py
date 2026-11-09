@@ -798,7 +798,9 @@ async def test_endless_answer_raises_instead_of_filling_memory(
 def body_reads(monkeypatch: pytest.MonkeyPatch) -> list[StreamReader]:
     """Every response body the client reads from now on, once each, to show a refused answer is not read at all."""
     streams: list[StreamReader] = []  # the objects, not their ids: a freed stream's id can come back
-    client_streams: list[StreamReader] = []  # the fake server in this process reads its request bodies the same way
+    client_streams: list[
+        StreamReader
+    ] = []  # only these count: the fake server in this process reads request bodies with the same class
     real_start = aiohttp.ClientResponse.start
 
     async def start(self: aiohttp.ClientResponse, connection: Any) -> aiohttp.ClientResponse:
