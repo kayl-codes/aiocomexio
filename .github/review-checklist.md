@@ -127,8 +127,10 @@ published on PyPI and consumed by the Home Assistant integration
   decoding the compressed bytes as text (`get_doorstation_snapshot`). Decode the capped bytes yourself, with the
   declared charset and a UTF-8 fallback for a missing or unknown one: strictly for a successful answer (undecodable
   bytes are a `ComexioDataError`, as in `_request_text`), with `errors="replace"` only for the excerpt of an error
-  page. A read that breaks off must not hide the status: report the HTTP status without the body. Older uncapped
-  reads are not a finding unless the diff touches them.
+  page. A successful answer that does not fit under the cap raises `ComexioDataError`: the capped prefix is never
+  handed on as the whole answer, even when it parses (`get_doorstation_snapshot` reports "no complete JPEG in the
+  first N bytes"). A read that breaks off must not hide the status: report the HTTP status without the body. Older
+  uncapped reads are not a finding unless the diff touches them.
 - **Live readings stay at DEBUG:** a WARNING or higher about an unexpected answer to a *value* request (live states,
   IO/marker values — anything that may wrap a reading of the installation) names only ids, keys, counts and the
   answer *type*; the content itself goes to DEBUG. Raw Comexio content in any log line or exception message goes
