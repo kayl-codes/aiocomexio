@@ -808,25 +808,26 @@ def body_reads(monkeypatch: pytest.MonkeyPatch) -> list[StreamReader]:
 
     monkeypatch.setattr(aiohttp.ClientResponse, "start", start)
 
+    def note(stream: StreamReader) -> None:
+        if any(stream is client for client in client_streams) and all(stream is not seen for seen in streams):
+            streams.append(stream)
+
     def counting(name: str) -> None:
         real = getattr(StreamReader, name)
 
         async def counted(self: StreamReader, *args: Any) -> Any:
-            is_client_stream = any(self is stream for stream in client_streams)
-            if is_client_stream and all(self is not seen for seen in streams):
-                streams.append(self)
+            note(self)
             return await real(self, *args)
 
         monkeypatch.setattr(StreamReader, name, counted)
 
-    for method in (
-        "read",
-        "readany",
-        "readchunk",
-        "readline",
-        "readuntil",
-        "readexactly",
-    ):  # every way to take body bytes
+    def counting_nowait(self: StreamReader, *args: Any) -> Any:  # the one way to take bytes that is no coroutine
+        note(self)
+        return real_read_nowait(self, *args)
+
+    real_read_nowait = StreamReader.read_nowait
+    monkeypatch.setattr(StreamReader, "read_nowait", counting_nowait)
+    for method in ("read", "readany", "readchunk", "readline", "readuntil", "readexactly"):  # every coroutine
         counting(method)
     return streams
 
