@@ -54,7 +54,11 @@ class ComexioResponseError(ComexioError):
 
 
 class ComexioDataError(ComexioError):
-    """The server answered, but the payload was not in the expected shape."""
+    """The server answered, but the payload was not in the expected shape.
+
+    Also an answer longer than the client reads or sent compressed: the request was sent, so for a write it does
+    not prove that nothing changed.
+    """
 
 
 class ComexioRequestRejectedError(ComexioError):
