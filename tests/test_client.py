@@ -922,6 +922,7 @@ _ESCAPED = rb"K\u00fcche \n"  # what unicode_escape would turn into "Küche" and
         ("text/html; charset=undefined", "Küche".encode(), "Küche"),  # a codec that refuses every input
         ("text/html; charset=zlib", "Küche".encode(), "Küche"),  # a bytes-to-bytes codec: LookupError, not TypeError
         ("text/html; charset=base64_codec", "Küche".encode(), "Küche"),  # the long names of those codecs too
+        ("text/html; charset=rot_13", "Küche".encode(), "Küche"),  # a str-to-str codec: LookupError too
         # codecs that transform the page instead of reading it: a declared one counts as undeclared
         ("text/html; charset=unicode_escape", _ESCAPED, _ESCAPED.decode()),
         ("text/html; charset=raw_unicode_escape", _ESCAPED, _ESCAPED.decode()),
