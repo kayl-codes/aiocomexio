@@ -10,6 +10,7 @@ raises ValueError or TypeError before anything is sent, as the method's docstrin
 
 import asyncio
 import base64
+import codecs
 import inspect
 import json
 import logging
@@ -18,7 +19,7 @@ import re
 import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -421,6 +422,9 @@ _ERROR_BODY_MAX_CHARS = 500
 # Bytes of an error-status answer that are read at most: enough for the excerpt after collapsing whitespace, so a
 # huge error page cannot fill memory.
 _ERROR_BODY_MAX_BYTES = 64 * 1024
+# Bytes of a successful answer that are read at most. A real answer is far smaller (the largest pages of an
+# installation with 30 function plans are under 1 MB), so a device or proxy that sends more cannot fill memory.
+_RESPONSE_MAX_BYTES = 16 * 1024 * 1024
 # Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.
 _EMPTY_CONNECTION_VALUES: tuple[Any, ...] = (None, "", [], {})
 
@@ -2183,10 +2187,7 @@ class ComexioClient:
             async with self._response(method, path, what=what, **kwargs) as resp:
                 if check_status and resp.status != HTTPStatus.OK:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
-                try:
-                    return await resp.text()
-                except UnicodeDecodeError as err:
-                    raise ComexioDataError(f"{what}: response is not valid {resp.get_encoding()}") from err
+                return await _response_text(resp, what)
         except (aiohttp.ClientError, TimeoutError) as err:
             raise self._transport_error(what, err) from err
 
@@ -2273,7 +2274,11 @@ class ComexioClient:
                         )
                     return location
                 status = resp.status
-                body = await (resp.text(errors="replace") if status == HTTPStatus.OK else _error_page_text(resp, what))
+                body = await (
+                    _response_text(resp, what, errors="replace")
+                    if status == HTTPStatus.OK
+                    else _error_page_text(resp, what)
+                )
         except (aiohttp.ClientError, TimeoutError) as err:
             raise self._transport_error(what, err) from err
         if _LOGIN_FORM_SUBMIT_MARKER in body:
@@ -3652,6 +3657,32 @@ def _unencoded(kwargs: dict[str, Any]) -> dict[str, Any]:
     if all(name.lower() != _ACCEPT_ENCODING.lower() for name in headers):
         headers[_ACCEPT_ENCODING] = _IDENTITY_ENCODING
     return {**kwargs, "headers": headers}
+
+
+def _text_encoding(resp: aiohttp.ClientResponse) -> str:
+    """The codec resp's body is decoded with: its declared charset if Python knows it, else UTF-8."""
+    if resp.charset:
+        with suppress(LookupError, ValueError):
+            return codecs.lookup(resp.charset).name
+    return "utf-8"
+
+
+async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str = "strict") -> str:
+    """The body of a successful answer as text; ComexioDataError if it passes _RESPONSE_MAX_BYTES or cannot be decoded.
+
+    Reads at most one byte more than the cap, so an answer of any size costs at most the cap in memory, and
+    refuses the answer instead of cutting it: a cut page or plan would read as complete.
+    """
+    body = bytearray()
+    while (left := _RESPONSE_MAX_BYTES + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
+        body += chunk
+    if len(body) > _RESPONSE_MAX_BYTES:
+        raise ComexioDataError(f"{what}: response is longer than {_RESPONSE_MAX_BYTES} bytes")
+    encoding = _text_encoding(resp)
+    try:
+        return body.decode(encoding, errors=errors)
+    except UnicodeDecodeError as err:
+        raise ComexioDataError(f"{what}: response is not valid {encoding}") from err
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:

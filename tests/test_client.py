@@ -685,6 +685,88 @@ async def test_get_raw_config_undecodable_page_raises_data_error(
         await logged_in.get_raw_config()
 
 
+_SMALL_CAP = 4096
+
+
+def _serve_bytes(comexio: FakeComexio, body: bytes, content_type: str = "text/html; charset=utf-8") -> None:
+    async def handler(_request: web.Request) -> web.Response:
+        return web.Response(body=body, headers={"Content-Type": content_type})
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, handler)
+
+
+async def test_request_text_answer_of_exactly_the_cap_is_read(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    _serve_bytes(comexio, b"x" * _SMALL_CAP)
+
+    text = await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+    assert text == "x" * _SMALL_CAP
+
+
+async def test_request_text_answer_one_byte_over_the_cap_raises_data_error(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    _serve_bytes(comexio, b"x" * (_SMALL_CAP + 1))
+
+    with pytest.raises(ComexioDataError, match=f"page: response is longer than {_SMALL_CAP} bytes"):
+        await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+async def test_request_text_endless_answer_raises_instead_of_filling_memory(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    sent = 0
+
+    async def endless(request: web.Request) -> web.StreamResponse:
+        nonlocal sent
+        resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
+        await resp.prepare(request)  # no Content-Length: only the byte cap can end this
+        try:
+            while True:
+                await resp.write(b"x" * 1024)
+                sent += 1024
+        except ConnectionResetError:
+            return resp
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, endless)
+
+    with pytest.raises(ComexioDataError, match="longer than"):
+        await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+    assert sent > _SMALL_CAP  # the server did offer more than the cap; the client stopped on its own
+
+
+async def test_request_redirect_answer_over_the_cap_raises_data_error(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    _serve_bytes(comexio, b"x" * (_SMALL_CAP + 1))
+
+    with pytest.raises(ComexioDataError, match="longer than"):
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body", "expected"),
+    [
+        ("text/html; charset=iso-8859-1", "Küche".encode("iso-8859-1"), "Küche"),
+        ("text/html", "Küche".encode(), "Küche"),  # no charset: UTF-8, like aiohttp's default fallback
+        ("text/html; charset=no-such-codec", "Küche".encode(), "Küche"),
+        ("application/json", "Küche".encode(), "Küche"),
+    ],
+)
+async def test_request_text_decodes_with_the_declared_charset_or_utf8(
+    logged_in: ComexioClient, comexio: FakeComexio, content_type: str, body: bytes, expected: str
+) -> None:
+    _serve_bytes(comexio, body, content_type)
+
+    assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == expected
+
+
 async def test_fetch_marker_titles(logged_in: ComexioClient) -> None:
     assert await logged_in.fetch_marker_titles() == {1: "Licht, Wohnen"}
 
