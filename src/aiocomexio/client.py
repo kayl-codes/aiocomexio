@@ -1637,7 +1637,8 @@ class ComexioClient:
         confirm the plan, ComexioCreatedWithoutIdError if it confirmed the plan but the scrape
         failed or $Fubs does not list it exactly once — the plan exists, do not create it again.
         A ComexioConnectionError from the create request itself leaves open whether the plan
-        was created; look it up by name before creating it again.
+        was created, and so does a ComexioDataError (an answer longer than _RESPONSE_MAX_BYTES or sent
+        compressed); look it up by name before creating it again.
         """
         what = f"Creating function plan {name!r}"
         form = _plan_form(name, comment, paper_format, orientation, dpi)
@@ -1670,7 +1671,8 @@ class ComexioClient:
         Comexio's save takes the whole settings form, so pass the current value of every setting
         that should stay. $Fubs does not reveal "reset outputs on stop", so it is sent as given
         (default off, Comexio's own default for new plans). Values as for create_function_plan.
-        Raises ComexioRequestRejectedError if Comexio does not confirm the save.
+        Raises ComexioRequestRejectedError if Comexio does not confirm the save. A ComexioDataError (an answer
+        longer than _RESPONSE_MAX_BYTES or sent compressed) leaves open whether the save took effect.
         """
         _require_ints(fub_id=fub_id, position=position)
         _require_bools(active=active, reset_outputs_on_stop=reset_outputs_on_stop)
@@ -1690,7 +1692,8 @@ class ComexioClient:
     async def delete_function_plan(self, fub_id: int) -> None:
         """Delete a whole function plan with everything on it.
 
-        Raises ComexioRequestRejectedError if Comexio does not confirm the deletion.
+        Raises ComexioRequestRejectedError if Comexio does not confirm the deletion. A ComexioDataError (an answer
+        longer than _RESPONSE_MAX_BYTES or sent compressed) leaves open whether the plan is gone.
         """
         _require_ints(fub_id=fub_id)
         what = f"Deleting function plan {fub_id}"

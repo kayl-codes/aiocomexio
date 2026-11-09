@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import aiohttp
 import pytest
 from aiohttp import web
+from aiohttp.streams import StreamReader
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from multidict import CIMultiDict
 
@@ -767,6 +768,20 @@ async def test_endless_answer_raises_instead_of_filling_memory(
     assert sent < _ENDLESS_LIMIT  # and the client stopped on its own, back-pressure kept the server from finishing
 
 
+@pytest.fixture
+def body_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The size of every read of a response body from now on, to show that a refused answer is not read at all."""
+    reads: list[int] = []
+    real_read = StreamReader.read
+
+    async def counting_read(self: StreamReader, n: int = -1) -> bytes:
+        reads.append(n)
+        return await real_read(self, n)
+
+    monkeypatch.setattr(StreamReader, "read", counting_read)
+    return reads
+
+
 _COMPRESSED = [
     pytest.param(("gzip",), "gzip", id="gzip"),
     pytest.param(("deflate",), "deflate", id="deflate"),
@@ -784,13 +799,20 @@ _COMPRESSED = [
 @pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
 @pytest.mark.parametrize(("encodings", "coding"), _COMPRESSED)
 async def test_compressed_answer_is_refused_unread(
-    logged_in: ComexioClient, comexio: FakeComexio, method_name: str, encodings: tuple[str, ...], coding: str
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    body_reads: list[int],
+    method_name: str,
+    encodings: tuple[str, ...],
+    coding: str,
 ) -> None:
     _serve_bytes_with_encoding(comexio, gzip.compress(b"x" * 1024), *encodings)
     request = getattr(logged_in, method_name)
+    body_reads.clear()
 
     with pytest.raises(ComexioDataError, match=f"page: the answer came '{coding}'-encoded, not unencoded"):
         await request("GET", FUNCTION_MODULE_PATH, what="page")
+    assert not body_reads  # refused before any byte of the body was taken from the stream
 
 
 async def test_compressed_login_form_is_a_data_error_not_an_expired_session(
@@ -826,33 +848,54 @@ async def test_compressed_login_form_with_an_error_status_is_a_status_error(
     assert raised.value.status == HTTPStatus.UNAUTHORIZED
 
 
-async def test_login_does_not_read_the_answer_of_its_own_post(client: ComexioClient, comexio: FakeComexio) -> None:
+async def test_login_does_not_read_the_answer_of_its_own_post(
+    client: ComexioClient, comexio: FakeComexio, body_reads: list[int]
+) -> None:
+    await client._request_json("POST", LOGIN_PATH, what="keys", data={"login_keys": "true"})
+    await client._request_text("GET", ADMIN_PATH, what="admin page")
+    reads_of_a_login = len(body_reads)  # the two answers login() reads, nothing of the credentials POST
+    assert reads_of_a_login  # the spy sees reads at all
     real_login = comexio._login
+    served: list[bool] = []
 
-    async def compressed_login_answer(request: web.Request) -> web.Response:
+    async def endless_compressed_login_answer(request: web.Request) -> web.StreamResponse:
         response = await real_login(request)
-        if comexio.logins:  # the credentials POST, not the key request
-            response.body = gzip.compress(b"x" * 1024)
-            response.headers["Content-Encoding"] = "gzip"
-        return response
+        if (await request.post()).get("login_keys") == "true":
+            return response
+        served.append(True)
+        answer = web.StreamResponse(headers={"Content-Encoding": "gzip"})
+        answer.set_cookie(SESSION_COOKIE, SESSION_VALUE)
+        await answer.prepare(request)
+        try:
+            for _ in range(_ENDLESS_LIMIT // 1024):  # compressed and (up to the limit) endless
+                await answer.write(b"x" * 1024)
+        except ConnectionError:  # the client closed the connection without reading the answer
+            pass
+        return answer
 
-    comexio.serve("POST", LOGIN_PATH, compressed_login_answer)
+    comexio.serve("POST", LOGIN_PATH, endless_compressed_login_answer)
+    body_reads.clear()
 
     await client.login()  # the admin page is the verdict, the answer of the POST is not read
+
+    assert served == [True]  # the credentials POST got the compressed, endless answer
+    assert len(body_reads) == reads_of_a_login
 
 
 @pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
 async def test_compressed_error_page_still_reports_its_status_and_names_the_coding(
-    logged_in: ComexioClient, comexio: FakeComexio, method_name: str
+    logged_in: ComexioClient, comexio: FakeComexio, body_reads: list[int], method_name: str
 ) -> None:
     _serve_bytes_with_encoding(comexio, gzip.compress(b"Kueche"), "gzip", status=500)
     request = getattr(logged_in, method_name)
+    body_reads.clear()
 
     with pytest.raises(ComexioResponseError) as raised:
         await request("GET", FUNCTION_MODULE_PATH, what="page")
 
     assert raised.value.status == HTTPStatus.INTERNAL_SERVER_ERROR
     assert raised.value.body == "('gzip'-encoded body not read)"  # the compressed bytes are not read as text
+    assert not body_reads  # and not read at all
 
 
 async def test_request_redirect_answer_over_the_cap_raises_data_error(
