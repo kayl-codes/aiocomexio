@@ -428,8 +428,8 @@ _ERROR_BODY_MAX_BYTES = 64 * 1024
 _RESPONSE_MAX_BYTES = 16 * 1024 * 1024
 # Codecs that Python lists as text encodings but that transform a page instead of reading it (an escape sequence
 # such as a backslash-n becomes a line feed); a declared charset naming one of them is treated as undeclared.
-# The names are the normalized ones of codecs.lookup (hyphens). idna is one of them: it reads ASCII text such as
-# `xn--kche-0ra` as an internationalized label and returns another string.
+# The names are the CodecInfo.name values that codecs.lookup returns (hyphenated). idna is one of them: it reads
+# ASCII text such as `xn--kche-0ra` as an internationalized label and returns another string.
 _NOT_A_CHARSET = frozenset({"unicode-escape", "raw-unicode-escape", "punycode", "idna"})
 _UTF8 = "utf-8"  # what a body without a usable charset is decoded as, like aiohttp's default fallback
 # Explicitly empty fupValueData answers; any other value (0, False, ...) must parse or raise.

@@ -819,9 +819,26 @@ def body_reads(monkeypatch: pytest.MonkeyPatch) -> list[StreamReader]:
 
         monkeypatch.setattr(StreamReader, name, counted)
 
-    for method in ("read", "readany", "readchunk", "readline", "readexactly"):  # every way to take body bytes
+    for method in (
+        "read",
+        "readany",
+        "readchunk",
+        "readline",
+        "readuntil",
+        "readexactly",
+    ):  # every way to take body bytes
         counting(method)
     return streams
+
+
+async def test_body_reads_spy_sees_the_read_of_an_ordinary_answer(
+    logged_in: ComexioClient, comexio: FakeComexio, body_reads: list[StreamReader]
+) -> None:
+    _serve_bytes(comexio, b"x" * 10)
+
+    await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+    assert len(body_reads) == 1  # the positive control of every `assert not body_reads` below
 
 
 _COMPRESSED = [
@@ -1001,10 +1018,10 @@ async def test_codec_that_fails_even_with_replace_is_a_data_error(
         await request("GET", FUNCTION_MODULE_PATH, what="page")
 
 
+@pytest.mark.usefixtures("failing_codec")
 async def test_error_page_in_a_codec_that_fails_still_reports_the_status(
-    logged_in: ComexioClient, comexio: FakeComexio, failing_codec: str
+    logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
-    assert failing_codec  # the codec is registered for this test
     comexio.serve("GET", FUNCTION_MODULE_PATH, _error_page_in_a_failing_codec)
 
     with pytest.raises(ComexioResponseError) as excinfo:
