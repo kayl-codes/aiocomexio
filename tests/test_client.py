@@ -14,6 +14,7 @@ import aiohttp
 import pytest
 from aiohttp import web
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from multidict import CIMultiDict
 
 from aiocomexio import (
     ComexioAuthenticationError,
@@ -699,11 +700,14 @@ def _serve_bytes(comexio: FakeComexio, body: bytes, content_type: str = "text/ht
     comexio.serve("GET", FUNCTION_MODULE_PATH, handler)
 
 
-def _serve_bytes_with_encoding(comexio: FakeComexio, body: bytes, encoding: str, status: int = 200) -> None:
+def _serve_bytes_with_encoding(comexio: FakeComexio, body: bytes, *encodings: str, status: int = 200) -> None:
+    """Serve body with one Content-Encoding header line per entry of encodings."""
+
     async def handler(_request: web.Request) -> web.Response:
-        return web.Response(
-            body=body, status=status, headers={"Content-Type": "text/html; charset=utf-8", "Content-Encoding": encoding}
-        )
+        headers = CIMultiDict([("Content-Type", "text/html; charset=utf-8")])
+        for encoding in encodings:
+            headers.add("Content-Encoding", encoding)
+        return web.Response(body=body, status=status, headers=headers)
 
     comexio.serve("GET", FUNCTION_MODULE_PATH, handler)
 
@@ -741,19 +745,17 @@ async def test_endless_answer_raises_instead_of_filling_memory(
 ) -> None:
     monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
     sent = 0
-    ended_by_itself = False
 
     async def endless(request: web.Request) -> web.StreamResponse:
-        nonlocal sent, ended_by_itself
+        nonlocal sent
         resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
         await resp.prepare(request)  # no Content-Length: only the byte cap can end this
         try:
             while sent < _ENDLESS_LIMIT:
                 await resp.write(b"x" * 1024)
                 sent += 1024
-        except ConnectionResetError:
-            return resp
-        ended_by_itself = True  # the client read it all, whatever the cap says
+        except ConnectionError:  # reset or aborted: the client closed the connection
+            pass
         return resp
 
     comexio.serve("GET", FUNCTION_MODULE_PATH, endless)
@@ -762,34 +764,62 @@ async def test_endless_answer_raises_instead_of_filling_memory(
     with pytest.raises(ComexioDataError, match="longer than"):
         await request("GET", FUNCTION_MODULE_PATH, what="page")
     assert sent > _SMALL_CAP  # the server did offer more than the cap
-    assert not ended_by_itself  # and the client stopped on its own
+    assert sent < _ENDLESS_LIMIT  # and the client stopped on its own, back-pressure kept the server from finishing
+
+
+_COMPRESSED = [
+    pytest.param(("gzip",), "gzip", id="gzip"),
+    pytest.param(("deflate",), "deflate", id="deflate"),
+    pytest.param(("br",), "br", id="brotli"),
+    pytest.param(("GZIP",), "GZIP", id="upper-case"),
+    pytest.param(("identity, gzip",), "gzip", id="identity-then-gzip-in-one-line"),
+    pytest.param(("identity", "gzip"), "gzip", id="identity-then-gzip-in-two-lines"),
+]
 
 
 @pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
+@pytest.mark.parametrize(("encodings", "coding"), _COMPRESSED)
 async def test_compressed_answer_is_refused_unread(
-    logged_in: ComexioClient, comexio: FakeComexio, method_name: str
+    logged_in: ComexioClient, comexio: FakeComexio, method_name: str, encodings: tuple[str, ...], coding: str
 ) -> None:
-    _serve_bytes_with_encoding(comexio, gzip.compress(b"x" * 1024), "gzip")
+    _serve_bytes_with_encoding(comexio, gzip.compress(b"x" * 1024), *encodings)
     request = getattr(logged_in, method_name)
 
-    with pytest.raises(ComexioDataError, match="page: the answer came 'gzip'-encoded, not unencoded"):
+    with pytest.raises(ComexioDataError, match=f"page: the answer came '{coding}'-encoded, not unencoded"):
         await request("GET", FUNCTION_MODULE_PATH, what="page")
 
 
-async def test_answer_declared_identity_encoded_is_read(logged_in: ComexioClient, comexio: FakeComexio) -> None:
-    _serve_bytes_with_encoding(comexio, b"plain", "identity")
+async def test_compressed_login_form_is_a_data_error_not_an_expired_session(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    login_form = f"<form>{client_module._LOGIN_FORM_SUBMIT_MARKER}</form>".encode()
+    _serve_bytes_with_encoding(comexio, gzip.compress(login_form), "gzip")
+
+    with pytest.raises(ComexioDataError, match="'gzip'-encoded"):
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
+
+
+@pytest.mark.parametrize("encodings", [("identity",), ("Identity",), (" identity ",), ("identity,",), ("identity", "")])
+async def test_answer_declared_identity_encoded_is_read(
+    logged_in: ComexioClient, comexio: FakeComexio, encodings: tuple[str, ...]
+) -> None:
+    _serve_bytes_with_encoding(comexio, b"plain", *encodings)
 
     assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == "plain"
 
 
-async def test_compressed_error_page_still_reports_its_status(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+@pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
+async def test_compressed_error_page_still_reports_its_status_and_names_the_coding(
+    logged_in: ComexioClient, comexio: FakeComexio, method_name: str
+) -> None:
     _serve_bytes_with_encoding(comexio, gzip.compress(b"Kueche"), "gzip", status=500)
+    request = getattr(logged_in, method_name)
 
     with pytest.raises(ComexioResponseError) as raised:
-        await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+        await request("GET", FUNCTION_MODULE_PATH, what="page")
 
     assert raised.value.status == HTTPStatus.INTERNAL_SERVER_ERROR
-    assert raised.value.body is None  # the compressed bytes are not read as text
+    assert raised.value.body == "('gzip'-encoded body not read)"  # the compressed bytes are not read as text
 
 
 async def test_request_redirect_answer_over_the_cap_raises_data_error(

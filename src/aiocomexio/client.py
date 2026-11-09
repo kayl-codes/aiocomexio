@@ -3653,7 +3653,8 @@ def _unencoded(kwargs: dict[str, Any]) -> dict[str, Any]:
     aiohttp decompresses an answer before the reader sees it, so a byte cap on what is read (_RESPONSE_MAX_BYTES,
     _ERROR_BODY_MAX_BYTES) would limit the plain bytes only when nothing was compressed. A device that ignores the
     header and sends a compressed answer anyway is caught by _content_encoding, since the bytes are not decompressed.
-    A header the caller sets itself wins, whatever the case of its name (HTTP header names are case-insensitive).
+    A header the caller sets itself wins, whatever the case of its name (HTTP header names are case-insensitive);
+    a caller that asks for a coding gets every answer refused. auto_decompress is always False.
     """
     headers = dict(kwargs.get("headers") or {})
     if all(name.lower() != _ACCEPT_ENCODING.lower() for name in headers):
@@ -3662,9 +3663,12 @@ def _unencoded(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _content_encoding(resp: aiohttp.ClientResponse) -> str:
-    """The Content-Encoding resp declares, "" for none or identity: its bytes are then the plain page."""
-    encoding = resp.headers.get("Content-Encoding", "").strip()
-    return "" if encoding.lower() == _IDENTITY_ENCODING else encoding
+    """The first coding other than identity that resp's Content-Encoding lines declare, "" if there is none.
+
+    Then its bytes are the plain page. Every header line counts and each may list codings (`identity, gzip`).
+    """
+    codings = (token.strip() for line in resp.headers.getall("Content-Encoding", []) for token in line.split(","))
+    return next((coding for coding in codings if coding and coding.lower() != _IDENTITY_ENCODING), "")
 
 
 def _text_encoding(resp: aiohttp.ClientResponse) -> str:
@@ -3685,7 +3689,9 @@ async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str
     """The body of a successful answer as text; ComexioDataError if it passes _RESPONSE_MAX_BYTES or cannot be decoded.
 
     Reads at most one byte more than the cap, so an answer of any size costs at most the cap in memory, and
-    refuses the answer instead of cutting it: a cut page or plan would read as complete.
+    refuses the answer instead of cutting it: a cut page or plan would read as complete. A compressed answer
+    (see _unencoded) is refused the same way, before its text could show the login form: a device that ignores
+    the identity request fails with ComexioDataError, not ComexioAuthenticationError.
     """
     if encoding := _content_encoding(resp):
         raise ComexioDataError(f"{what}: the answer came {_excerpt(encoding)}-encoded, not unencoded")
@@ -3705,11 +3711,11 @@ async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:
     """The first _ERROR_BODY_MAX_BYTES of the body of an error-status answer as text; "" if it breaks off mid-read.
 
     The rest is not read, and the status must be reported even when the body cannot be. Undecodable bytes are
-    replaced; a compressed page (see _unencoded) is not read at all.
+    replaced; a compressed page (see _unencoded) is not read, its text names the coding so the status is not
+    reported without a cause.
     """
     if encoding := _content_encoding(resp):
-        _LOGGER.debug("%s: body of the HTTP %s answer is %s-encoded, not read", what, resp.status, _excerpt(encoding))
-        return ""
+        return f"({_excerpt(encoding)}-encoded body not read)"
     body = bytearray()
     try:
         while (left := _ERROR_BODY_MAX_BYTES - len(body)) > 0 and (chunk := await resp.content.read(left)):
