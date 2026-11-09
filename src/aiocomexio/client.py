@@ -729,10 +729,9 @@ class ComexioClient:
             "loginsubmit": "Anmelden",
             "encryption": "rsa",
         }
-        # The login POST's own status is not meaningful; the admin page below is the verdict.
-        await self._request_text(
-            "POST", _LOGIN_PATH, what="Login", check_status=False, data=form, headers={"Referer": login_url}
-        )
+        # The login POST's own status and body are not meaningful (they are not read, so even a compressed or
+        # endless answer cannot fail the login); the admin page below is the verdict.
+        await self._request_unread("POST", _LOGIN_PATH, what="Login", data=form, headers={"Referer": login_url})
         html = await self._request_text("GET", _ADMIN_PATH, what="Login check")
         if not html or _LOGIN_PAGE_MARKER in html:
             raise ComexioAuthenticationError(f"Comexio at {self._host} rejected the admin login")
@@ -2179,15 +2178,22 @@ class ComexioClient:
         path: str,
         *,
         what: str,
-        check_status: bool = True,
         **kwargs: Any,
     ) -> str:
         """Body of one request as text, with transport errors and error statuses mapped to ComexioError."""
         try:
             async with self._response(method, path, what=what, **kwargs) as resp:
-                if check_status and resp.status != HTTPStatus.OK:
+                if resp.status != HTTPStatus.OK:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
                 return await _response_text(resp, what)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise self._transport_error(what, err) from err
+
+    async def _request_unread(self, method: str, path: str, *, what: str, **kwargs: Any) -> None:
+        """Send one request whose answer, whatever its status or body, is not looked at; only transport errors count."""
+        try:
+            async with self._response(method, path, what=what, **kwargs):
+                return
         except (aiohttp.ClientError, TimeoutError) as err:
             raise self._transport_error(what, err) from err
 
@@ -3665,7 +3671,8 @@ def _unencoded(kwargs: dict[str, Any]) -> dict[str, Any]:
 def _content_encoding(resp: aiohttp.ClientResponse) -> str:
     """The first coding other than identity that resp's Content-Encoding lines declare, "" if there is none.
 
-    Then its bytes are the plain page. Every header line counts and each may list codings (`identity, gzip`).
+    An empty result means the bytes are the plain page. Every header line counts and each may list codings
+    (`identity, gzip`).
     """
     codings = (token.strip() for line in resp.headers.getall("Content-Encoding", []) for token in line.split(","))
     return next((coding for coding in codings if coding and coding.lower() != _IDENTITY_ENCODING), "")

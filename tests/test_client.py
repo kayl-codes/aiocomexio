@@ -774,6 +774,10 @@ _COMPRESSED = [
     pytest.param(("GZIP",), "GZIP", id="upper-case"),
     pytest.param(("identity, gzip",), "gzip", id="identity-then-gzip-in-one-line"),
     pytest.param(("identity", "gzip"), "gzip", id="identity-then-gzip-in-two-lines"),
+    pytest.param(("gzip", "identity"), "gzip", id="gzip-then-identity-in-two-lines"),
+    pytest.param(("identity, gzip, br",), "gzip", id="the-first-coding-is-named"),
+    pytest.param(("zstd",), "zstd", id="zstd"),
+    pytest.param(("compress",), "compress", id="any-other-coding"),
 ]
 
 
@@ -806,6 +810,35 @@ async def test_answer_declared_identity_encoded_is_read(
     _serve_bytes_with_encoding(comexio, b"plain", *encodings)
 
     assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == "plain"
+    with pytest.raises(ComexioRequestRejectedError, match="was not confirmed: 'plain'"):
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")  # read, not refused
+
+
+async def test_compressed_login_form_with_an_error_status_is_a_status_error(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    login_form = f"<form>{client_module._LOGIN_FORM_SUBMIT_MARKER}</form>".encode()
+    _serve_bytes_with_encoding(comexio, gzip.compress(login_form), "gzip", status=401)
+
+    with pytest.raises(ComexioResponseError) as raised:  # not ComexioAuthenticationError: it is not read
+        await logged_in._request_redirect("GET", FUNCTION_MODULE_PATH, what="action")
+
+    assert raised.value.status == HTTPStatus.UNAUTHORIZED
+
+
+async def test_login_does_not_read_the_answer_of_its_own_post(client: ComexioClient, comexio: FakeComexio) -> None:
+    real_login = comexio._login
+
+    async def compressed_login_answer(request: web.Request) -> web.Response:
+        response = await real_login(request)
+        if comexio.logins:  # the credentials POST, not the key request
+            response.body = gzip.compress(b"x" * 1024)
+            response.headers["Content-Encoding"] = "gzip"
+        return response
+
+    comexio.serve("POST", LOGIN_PATH, compressed_login_answer)
+
+    await client.login()  # the admin page is the verdict, the answer of the POST is not read
 
 
 @pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
