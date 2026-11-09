@@ -3191,23 +3191,25 @@ async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
     """The first complete JPEG of a stream response; see ComexioClient.get_doorstation_snapshot."""
     received = bytearray()
     reader = JpegFrameReader()
-    over_cap = False
+    at_cap = False
     async for chunk in resp.content.iter_any():
         # Bytes past the cap are not kept: a frame that ends beyond it is too large, like no frame at all.
         kept = chunk[: _MAX_SNAPSHOT_BYTES - len(received)]
-        over_cap = len(kept) < len(chunk)
         received += kept
+        # With the cap reached no further byte can complete a frame, so the read ends here and does not wait for a
+        # chunk that would only be dropped (a stream that stalls at exactly the cap would end in a timeout).
+        at_cap = len(received) >= _MAX_SNAPSHOT_BYTES
         # A frame is complete only once its EOI arrived; looking for it only in the new bytes (and the byte before
         # them, a marker may span two chunks) keeps the stream from being rescanned for every chunk.
         new_bytes = received[-len(kept) - 1 :]
         if JPEG_EOI in new_bytes and (frame := _complete_frame(reader, received, what)) is not None:
             return frame
-        if over_cap:
+        if at_cap:
             break
     # A login form in the kept bytes is an expired session, also when the stream ran past the cap.
     if _LOGIN_FORM_SUBMIT_MARKER.encode() in received:
         raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
-    if over_cap:
+    if at_cap:
         raise ComexioDataError(f"{what}: no complete JPEG in the first {_MAX_SNAPSHOT_BYTES} bytes of the stream")
     raise ComexioDataError(
         f"{what}: the stream ({resp.content_type!r}) ended after {len(received)} bytes without a complete JPEG"

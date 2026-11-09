@@ -1102,22 +1102,33 @@ async def test_a_stream_of_exactly_the_byte_cap_is_read_whole(monkeypatch: pytes
     with pytest.raises(ComexioDataError) as info:
         await client_module._read_first_frame(resp, "snapshot")
 
-    assert str(info.value) == (
-        "snapshot: the stream ('multipart/x-mixed-replace') ended after 64 bytes without a complete JPEG"
-    )
+    assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
     assert resp.content.read == 2
 
 
-async def test_one_byte_over_the_cap_stops_the_read(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_stream_that_stalls_at_the_byte_cap_does_not_wait_for_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No byte after the cap can complete a frame, so the read must end with the chunk that reaches the cap
+    # and not ask the stream for another one (which a stalled stream would answer with a timeout).
     monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 64)
-    # An image that never ends: its start, then a segment that claims to run on far beyond the cap.
-    resp: Any = _ChunkedResponse([SOI + b"\xff\xe1\xff\xff" + bytes(57), b"\x00", b"\x00", b"\x00"])
+    resp: Any = _ChunkedResponse([SOI + b"\xff\xe1\xff\xff" + bytes(58), b"\x00"])
 
     with pytest.raises(ComexioDataError) as info:
         await client_module._read_first_frame(resp, "snapshot")
 
     assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
-    assert resp.content.read == 3  # the chunk that crosses the cap is the last one read
+    assert resp.content.read == 1
+
+
+async def test_one_byte_over_the_cap_stops_the_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "_MAX_SNAPSHOT_BYTES", 64)
+    # An image that never ends: its start, then a segment that claims to run on far beyond the cap.
+    resp: Any = _ChunkedResponse([SOI + b"\xff\xe1\xff\xff" + bytes(57), b"\x00\x00", b"\x00", b"\x00"])
+
+    with pytest.raises(ComexioDataError) as info:
+        await client_module._read_first_frame(resp, "snapshot")
+
+    assert str(info.value) == "snapshot: no complete JPEG in the first 64 bytes of the stream"
+    assert resp.content.read == 2  # the chunk that crosses the cap is the last one read
 
 
 async def test_a_login_form_that_runs_past_the_cap_is_an_expired_session(monkeypatch: pytest.MonkeyPatch) -> None:
