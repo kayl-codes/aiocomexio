@@ -12,7 +12,7 @@ consume it as a PyPI dependency (prerequisite for a later Home Assistant Core su
 
 ## Status
 
-Pre-alpha. Planned order of the move:
+Beta. The move out of the integration, in order:
 
 1. Pure parsing/building logic together with its unit tests, snapshots and synthetic fixtures from
    the integration's `tests/unit/` and `tests/fixtures/comexio/`.

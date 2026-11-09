@@ -7,7 +7,7 @@ No dependency on Home Assistant or any other framework — usable as a standalon
 provide the communication layer of the
 [homeassistant-comexio](https://github.com/kayl-codes/homeassistant-comexio) integration.
 
-> **Status: pre-alpha.** The code is being moved over from the integration step by step. So far:
+> **Status: beta.** The code was moved over from the integration step by step and is in use there. It covers:
 > admin login, read access (including live values of physical IOs and system info — free
 > storage, time server settings, uptime), value writes, the Web-IO
 > lifecycle (including the command protocol, HTTP or HTTPS), marker / KNX object management and
