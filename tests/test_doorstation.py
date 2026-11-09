@@ -469,6 +469,33 @@ async def test_every_request_asks_for_an_unencoded_answer(
     assert asked_for == [(expected, (headers or {}).get("Referer"))]
 
 
+@pytest.mark.parametrize(
+    ("method_name", "status"),
+    [pytest.param("_request_text", 200, id="text-request"), pytest.param("_request_redirect", 302, id="redirect")],
+)
+async def test_every_request_leaves_the_answer_undecompressed(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, method_name: str, status: int
+) -> None:
+    # The compressed-answer tests pass either way (the Content-Encoding header stays): only the option pins it.
+    async def handler(_request: web.Request) -> web.StreamResponse:
+        return web.Response(status=status, headers={"Location": "/elsewhere"} if status == 302 else {})
+
+    comexio.serve("POST", "/probe", handler)
+    options: list[dict[str, Any]] = []
+    request = logged_in._session.request
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        options.append(kwargs)
+        return request(*args, **kwargs)
+
+    monkeypatch.setattr(logged_in._session, "request", spy)
+    send = getattr(logged_in, method_name)
+
+    await send("POST", "/probe", what="Probe")
+
+    assert [kwargs.get("auto_decompress") for kwargs in options] == [False]
+
+
 async def test_a_followed_redirect_asks_for_an_unencoded_answer_too(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
@@ -581,6 +608,7 @@ class _ErrorResponse:
     def __init__(self, chunks: Iterable[bytes], charset: str | None = None) -> None:
         self.content = _ErrorBody(chunks)
         self.charset = charset
+        self.headers: dict[str, str] = {}
 
 
 async def test_an_error_page_is_read_up_to_its_byte_cap_only() -> None:

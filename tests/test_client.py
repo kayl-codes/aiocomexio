@@ -1,9 +1,11 @@
 """ComexioClient against the in-process fake Comexio server."""
 
 import asyncio
+import gzip
 import json
 import logging
 from datetime import timedelta
+from http import HTTPStatus
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
@@ -687,11 +689,21 @@ async def test_get_raw_config_undecodable_page_raises_data_error(
 
 
 _SMALL_CAP = 4096
+_ENDLESS_LIMIT = 64 * 1024 * 1024  # an "endless" answer ends here, so a client without a cap fails instead of hanging
 
 
 def _serve_bytes(comexio: FakeComexio, body: bytes, content_type: str = "text/html; charset=utf-8") -> None:
     async def handler(_request: web.Request) -> web.Response:
         return web.Response(body=body, headers={"Content-Type": content_type})
+
+    comexio.serve("GET", FUNCTION_MODULE_PATH, handler)
+
+
+def _serve_bytes_with_encoding(comexio: FakeComexio, body: bytes, encoding: str, status: int = 200) -> None:
+    async def handler(_request: web.Request) -> web.Response:
+        return web.Response(
+            body=body, status=status, headers={"Content-Type": "text/html; charset=utf-8", "Content-Encoding": encoding}
+        )
 
     comexio.serve("GET", FUNCTION_MODULE_PATH, handler)
 
@@ -723,28 +735,61 @@ async def test_request_text_answer_one_byte_over_the_cap_raises_data_error(
         await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
 
 
-async def test_request_text_endless_answer_raises_instead_of_filling_memory(
-    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
+async def test_endless_answer_raises_instead_of_filling_memory(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, method_name: str
 ) -> None:
     monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
     sent = 0
+    ended_by_itself = False
 
     async def endless(request: web.Request) -> web.StreamResponse:
-        nonlocal sent
+        nonlocal sent, ended_by_itself
         resp = web.StreamResponse(headers={"Content-Type": "text/html; charset=utf-8"})
         await resp.prepare(request)  # no Content-Length: only the byte cap can end this
         try:
-            while True:
+            while sent < _ENDLESS_LIMIT:
                 await resp.write(b"x" * 1024)
                 sent += 1024
         except ConnectionResetError:
             return resp
+        ended_by_itself = True  # the client read it all, whatever the cap says
+        return resp
 
     comexio.serve("GET", FUNCTION_MODULE_PATH, endless)
+    request = getattr(logged_in, method_name)
 
     with pytest.raises(ComexioDataError, match="longer than"):
+        await request("GET", FUNCTION_MODULE_PATH, what="page")
+    assert sent > _SMALL_CAP  # the server did offer more than the cap
+    assert not ended_by_itself  # and the client stopped on its own
+
+
+@pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])
+async def test_compressed_answer_is_refused_unread(
+    logged_in: ComexioClient, comexio: FakeComexio, method_name: str
+) -> None:
+    _serve_bytes_with_encoding(comexio, gzip.compress(b"x" * 1024), "gzip")
+    request = getattr(logged_in, method_name)
+
+    with pytest.raises(ComexioDataError, match="page: the answer came 'gzip'-encoded, not unencoded"):
+        await request("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+async def test_answer_declared_identity_encoded_is_read(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    _serve_bytes_with_encoding(comexio, b"plain", "identity")
+
+    assert await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page") == "plain"
+
+
+async def test_compressed_error_page_still_reports_its_status(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    _serve_bytes_with_encoding(comexio, gzip.compress(b"Kueche"), "gzip", status=500)
+
+    with pytest.raises(ComexioResponseError) as raised:
         await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
-    assert sent > _SMALL_CAP  # the server did offer more than the cap; the client stopped on its own
+
+    assert raised.value.status == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert raised.value.body is None  # the compressed bytes are not read as text
 
 
 async def test_request_redirect_answer_over_the_cap_raises_data_error(
