@@ -7,12 +7,13 @@ No dependency on Home Assistant or any other framework — usable as a standalon
 provide the communication layer of the
 [homeassistant-comexio](https://github.com/kayl-codes/homeassistant-comexio) integration.
 
-> **Status: pre-alpha.** The code is being moved over from the integration step by step. So far:
+> **Status: beta.** The code was moved over from the integration step by step and is in use there. It covers:
 > admin login, read access (including live values of physical IOs and system info — free
 > storage, time server settings, uptime), value writes, the Web-IO
 > lifecycle (including the command protocol, HTTP or HTTPS), marker / KNX object management and
 > function plan editing — plans, elements, wires, block instance settings, scene blocks and
-> Quantum modules with their configs, run / stop
+> Quantum modules with their configs, run / stop, 1-Wire sensors, Doorstation detection with a
+> camera snapshot
 > (`ComexioClient`), admin page scraping (`aiocomexio.scrape`), config parsing
 > (`aiocomexio.config`, including Quickbus devices such as Multitouch panels and their IOs), KNX
 > DPT tables (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`, with separate

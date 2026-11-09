@@ -12,7 +12,7 @@ consume it as a PyPI dependency (prerequisite for a later Home Assistant Core su
 
 ## Status
 
-Pre-alpha. Planned order of the move:
+Beta. The move out of the integration, in order:
 
 1. Pure parsing/building logic together with its unit tests, snapshots and synthetic fixtures from
    the integration's `tests/unit/` and `tests/fixtures/comexio/`.
@@ -40,6 +40,14 @@ Pre-alpha. Planned order of the move:
      bus workload and extension firmware, value writes (`set_*_value`), the Web-IO lifecycle
      (class upload, device, commands), marker / KNX object management and function plan editing
      (plans, elements, wires, block settings, scenes, Quantum modules, run / stop).
+   - Done: 1-Wire sensors (`get_onewire_sensors`, live status, device count) with their Web-IO push
+     commands, and Doorstation detection (`get_doorstations`) with a camera snapshot
+     (`get_doorstation_snapshot`, `doorstation_stream_url`). Not built yet: the Doorstation's own IP
+     (`extension_location` of `/admin/extension/edit/`).
+   - A successful admin answer is read through a byte cap (`_RESPONSE_MAX_BYTES`, 16 MiB); an error
+     page has its own 64 KiB cap and the Doorstation snapshot its own 4 MiB cap. The credentials POST
+     of `login()` is sent without reading its answer (`_request_unread`). Every request sends
+     `Accept-Encoding: identity` and `auto_decompress=False`; see the README for the failure modes.
 
 ## Commands
 
