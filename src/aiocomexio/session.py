@@ -66,6 +66,10 @@ def session_kwargs(
     name that flag changes nothing. Each session needs its own cookie jar — two clients sharing
     one would share (and overwrite) one login, and the client clears the jar on every login. Pass
     progress_log_interval (e.g. DEFAULT_PROGRESS_LOG_INTERVAL_SEC) to log slow requests.
+
+    The result always carries "trace_configs" (connection_trace_config() for the client's debug line about a failed
+    request, plus the progress one if asked): a caller that has trace configs of its own appends them to that list
+    instead of passing the keyword a second time.
     """
     trace_configs = [connection_trace_config()]
     if progress_log_interval is not None:
@@ -91,12 +95,13 @@ def connection_trace_config() -> aiohttp.TraceConfig:
     async def on_reuse(_session: aiohttp.ClientSession, ctx: SimpleNamespace, _params: Any) -> None:  # NOSONAR
         _note_connection(ctx, CONNECTION_REUSED)
 
+    # On the start, not the end: a connect that fails (refused, timed out, TLS) never ends, but is still noted.
     async def on_create(_session: aiohttp.ClientSession, ctx: SimpleNamespace, _params: Any) -> None:  # NOSONAR
         _note_connection(ctx, CONNECTION_NEW)
 
     trace_config = aiohttp.TraceConfig()
     trace_config.on_connection_reuseconn.append(on_reuse)
-    trace_config.on_connection_create_end.append(on_create)
+    trace_config.on_connection_create_start.append(on_create)
     return trace_config
 
 

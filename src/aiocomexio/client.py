@@ -129,6 +129,8 @@ _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
 _API_PATH = "/api/"
 # A request that comes after at least this long without any answer gets a debug line even if it succeeds.
 _IDLE_LOG_MIN_SEC = 5.0
+# Where _follow_redirects leaves the moment its request got a slot at the login gate (next to CONNECTION_KEY).
+_STARTED_KEY = "started"
 _WEBIO_HOME_PATH = "/admin/web_io/home"
 _WEBIO_ADD_PATH = "/admin/web_io/add"
 _WEBIO_BASE_WINDOW_PATH = "/admin/web_io/baseDeviceWindow/"
@@ -2258,32 +2260,46 @@ class ComexioClient:
     ) -> AsyncIterator[aiohttp.ClientResponse]:
         """The response to one request (see _follow_redirects), with a debug line when it fails or comes after a pause.
 
-        The line says how long the client had been idle, on which connections the request was tried (a reused one, a
-        new one; two entries mean aiohttp tried again itself) and how many other requests were in flight: what tells a
-        kept-alive connection the server closed from a server that refuses a request (#289). It costs nothing unless
-        the aiocomexio logger is at DEBUG.
+        The line says how long the client had been idle, on which connection the request was tried last (a reused
+        one, a new one; two entries mean aiohttp tried again itself) and how many other requests were in flight: what
+        tells a kept-alive connection the server closed from a server that refuses a request (#289). The time counts
+        from the moment the request got its slot at the login gate. It costs nothing unless the aiocomexio logger is
+        at DEBUG, and a failure of the line itself never replaces the request's own result.
         """
         previous_response_at = self._last_response_at
         started = time.monotonic()
-        connection: dict[str, list[str]] = {}
-        transport_error: BaseException | None = None
+        notes: dict[str, Any] = {}
+        failure: BaseException | None = None
         try:
-            async with self._follow_redirects(method, path, what=what, connection=connection, **kwargs) as resp:
+            async with self._follow_redirects(method, path, what=what, connection=notes, **kwargs) as resp:
+                # Headers are in: the server answered, whatever the body turns out to be.
+                self._last_response_at = time.monotonic()
                 yield resp
-        except (aiohttp.ClientError, TimeoutError) as err:
-            transport_error = err
+        except BaseException as err:  # noqa: BLE001 - only noted for the debug line, always re-raised
+            failure = err
             raise
         finally:
-            if transport_error is None:
-                self._last_response_at = time.monotonic()
-            self._log_request(what, started, previous_response_at, connection, transport_error)
+            self._log_request_safely(what, notes.get(_STARTED_KEY, started), previous_response_at, notes, failure)
+
+    def _log_request_safely(
+        self,
+        what: str,
+        started: float,
+        previous_response_at: float | None,
+        notes: dict[str, Any],
+        error: BaseException | None,
+    ) -> None:
+        try:
+            self._log_request(what, started, previous_response_at, notes, error)
+        except Exception:  # noqa: BLE001 - a diagnostic line must never replace the request's own exception
+            _LOGGER.debug("Request diagnostics for %s failed", what, exc_info=True)
 
     def _log_request(
         self,
         what: str,
         started: float,
         previous_response_at: float | None,
-        connection: dict[str, list[str]],
+        notes: dict[str, Any],
         error: BaseException | None,
     ) -> None:
         """Debug line for a request that failed, or that came after at least _IDLE_LOG_MIN_SEC without an answer."""
@@ -2292,22 +2308,23 @@ class ComexioClient:
         idle = None if previous_response_at is None else started - previous_response_at
         if error is None and (idle is None or idle < _IDLE_LOG_MIN_SEC):
             return
-        tried = connection.get(CONNECTION_KEY, [])
+        tried = notes.get(CONNECTION_KEY, [])
         _LOGGER.debug(
             "%s: %s after %.3f s; idle %s before it, connection %s%s, %d other request(s) in flight%s",
             what,
             "failed" if error else "answered",
             time.monotonic() - started,
             "n/a (first request)" if idle is None else f"{idle:.1f} s",
-            " → ".join(tried) or "unknown",
+            " → ".join(tried) or "unknown (no connection trace on the session?)",
             " (aiohttp tried again)" if len(tried) > 1 else "",
-            max(self._gate.requests_in_flight - 1, 0),
+            # This request has left the login gate by now, so the count is the others only.
+            self._gate.requests_in_flight,
             f": {error!r}" if error else "",
         )
 
     @asynccontextmanager
     async def _follow_redirects(
-        self, method: str, path: str, *, what: str, connection: dict[str, list[str]], **kwargs: Any
+        self, method: str, path: str, *, what: str, connection: dict[str, Any], **kwargs: Any
     ) -> AsyncIterator[aiohttp.ClientResponse]:
         """The response to one request; the client follows redirects itself, a pinned one only within its HTTPS origin.
 
@@ -2319,8 +2336,11 @@ class ComexioClient:
         redirect_target = _unpinned_redirect_target if self._fingerprint is None else _pinned_redirect_target
         kwargs = _unencoded(kwargs)
         async with self._gate.request():
+            connection[_STARTED_KEY] = time.monotonic()
             url = f"{self._base_url}{path}"
             for _ in range(_MAX_REDIRECTS + 1):
+                # The connections of the hop being sent: a followed redirect is no second try of aiohttp.
+                connection.pop(CONNECTION_KEY, None)
                 async with self._session.request(
                     method, url, ssl=self._ssl, allow_redirects=False, trace_request_ctx=connection, **kwargs
                 ) as resp:
