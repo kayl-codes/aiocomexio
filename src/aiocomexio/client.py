@@ -310,6 +310,8 @@ _TABLE_PARTS = frozenset({_CAPTION, "col", "colgroup", _TBODY, "td", "tfoot", "t
 _TABLE_SCOPE_BOUNDARIES = frozenset({"html", _TABLE, _TEMPLATE})
 # Start tags a browser ignores in a page body (or only merges the attributes of): they open no element.
 _IGNORED_IN_BODY = frozenset({"body", "frame", "frameset", "head", "html"})
+# The start tags of a frameset page: a browser ignores them in the body of any other page.
+_IGNORED_FRAMES = frozenset({"frame", "frameset"})
 # A <colgroup> holds only <col>s: anything else closes it, so its end tag never closes what follows it.
 _OPENS_NO_ELEMENT = _IGNORED_IN_BODY | {"colgroup"}
 _HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
@@ -2801,6 +2803,7 @@ class _FormParser(HTMLParser):
         self._hidden: list[tuple[str, int]] = []
         self._select_open = False  # any select is open; a <select> inside it only ends it
         self._form_open = False  # a form is open (the browser's form element pointer): another <form> is ignored
+        self._start_ignored = False  # the start tag handle_form_tag now reads is one a browser ignores: no element
         # The browser's list of active formatting elements: open (or implicitly closed) formatting elements, and the
         # cells, captions, templates and objects they do not leak into (markers).
         self._formatting: list[_OpenElement] = []
@@ -2879,6 +2882,7 @@ class _FormParser(HTMLParser):
 
     def _start(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> None:
         self._foreign_start = False
+        self._start_ignored = False
         self._text_start = self._text_only is not None
         if self._text_start:
             return
@@ -2890,6 +2894,7 @@ class _FormParser(HTMLParser):
             return
         html = self._foreign[-1].html if self._foreign else self._html
         self._prepare_start(tag, html)
+        self._start_ignored = self._is_ignored(tag, html)
         if self._start_html(tag, attrs, self_closing=self_closing) and self._opens(tag, html):
             self._insert(tag, attrs, html)
         self._check_depth()
@@ -3013,6 +3018,18 @@ class _FormParser(HTMLParser):
         for index in range(start, len(entries)):
             entries[index] = _OpenElement(entries[index], entries[index].attributes)
             html.append(entries[index])
+
+    def _is_ignored(self, tag: str, html: list[str]) -> bool:
+        """Whether a browser ignores the start tag altogether, so that it makes no element of the page.
+
+        That is a table part outside a <table>, a <frame> or <frameset>, and a <form> while another one is open
+        (outside a <template>). <html>, <body> and <head> are not listed: a browser merges their attributes, and
+        the first of each is a real element. A <colgroup> inside a table does make an element (_opens only keeps no
+        stack entry for it).
+        """
+        if tag in _TABLE_PARTS:
+            return _TABLE not in html
+        return tag in _IGNORED_FRAMES or (tag == "form" and self._form_open and not self._hidden)
 
     def _opens(self, tag: str, html: list[str]) -> bool:
         """Whether a browser opens an element for the start tag, given the HTML elements open around it.
@@ -3265,7 +3282,7 @@ class _ExtensionFormParser(_FormParser):
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         element_id = attributes.get("id", "")
-        if element_id not in EXTENSION_INPUTS or element_id in self._seen:
+        if self._start_ignored or element_id not in EXTENSION_INPUTS or element_id in self._seen:
             return
         self._seen.add(element_id)
         if tag == "input":
@@ -3279,7 +3296,9 @@ class _ExtensionFormParser(_FormParser):
 
     def _note_other_element(self, attributes: dict[str, str]) -> None:
         """An element that is no input: it is the first of its id unless an element of that id came before."""
-        self._seen.add(attributes.get("id", ""))
+        element_id = attributes.get("id", "")
+        if element_id in EXTENSION_INPUTS:
+            self._seen.add(element_id)
 
 
 def parse_extension_form(ext_id: int, html: str) -> ExtensionInfo:

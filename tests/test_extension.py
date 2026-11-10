@@ -247,6 +247,85 @@ def test_an_element_inside_script_template_or_textarea_is_no_element_of_the_page
     assert parse_extension_form(14, html).location == "192.168.0.50"
 
 
+@pytest.mark.parametrize(
+    "ignored",
+    [
+        *(
+            f"<{part} id='{{}}'>"
+            for part in ("tr", "td", "th", "caption", "col", "colgroup", "tbody", "thead", "tfoot")
+        ),
+        "<frame id='{}'>",
+        "<frameset id='{}'>",
+        "<form><form id='{}'>",
+    ],
+)
+def test_a_start_tag_a_browser_ignores_is_no_element_of_its_id(ignored: str) -> None:
+    # A table part outside a table, a frame and a nested form make no element: the input is the first of its id.
+    html = ignored.format("extension_location") + _form(location="192.168.0.50")
+
+    assert parse_extension_form(14, html).location == "192.168.0.50"
+
+
+@pytest.mark.parametrize("part", ["tbody", "thead", "colgroup", "caption", "tr"])
+def test_a_table_part_inside_a_table_is_an_element_of_its_id(part: str) -> None:
+    html = f"<table><{part} id='extension_location'></{part}></table>" + _form(location="192.168.0.50")
+
+    with pytest.raises(ComexioDataError) as no_address:
+        parse_extension_form(14, html)
+
+    assert str(no_address.value) == NO_ADDRESS_MESSAGE
+
+
+def test_a_start_tag_a_browser_ignores_does_not_claim_the_type_id_either() -> None:
+    html = f"<tr id='extension_type_id'/><frame id='extension_type_id'/>{_form(type_id='16')}"
+
+    assert parse_extension_form(14, html).type_id == DOORSTATION_TYPE_ID
+
+
+@pytest.mark.parametrize("part", ["tr", "td", "th", "caption", "col", "colgroup"])
+def test_a_table_part_after_the_end_of_its_table_is_ignored_again(part: str) -> None:
+    html = f"<table></table><{part} id='extension_location'>{_form(location='192.168.0.50')}"
+
+    assert parse_extension_form(14, html).location == "192.168.0.50"
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "<table><tr><td id='extension_location'></td></tr></table>",
+        "<table><tr><th id='extension_location'></th></tr></table>",
+        "<table><colgroup><col id='extension_location'></colgroup></table>",
+    ],
+)
+def test_a_table_part_nested_in_a_table_is_an_element_of_its_id(table: str) -> None:
+    html = f"{table}{_form(location='192.168.0.50')}"
+
+    with pytest.raises(ComexioDataError) as no_address:
+        parse_extension_form(14, html)
+
+    assert str(no_address.value) == NO_ADDRESS_MESSAGE
+
+
+def test_a_form_after_the_end_of_another_one_is_an_element_of_its_id() -> None:
+    shadowed = f"<form></form><form id='extension_location'>{_form(location='192.168.0.50')}"
+
+    with pytest.raises(ComexioDataError) as no_address:
+        parse_extension_form(14, shadowed)
+
+    assert str(no_address.value) == NO_ADDRESS_MESSAGE
+
+
+def test_only_the_ids_the_client_reads_are_remembered() -> None:
+    # Any other id of a large page must not pile up in the parser (it keeps one entry per id it has to remember).
+    unrelated = "".join(f"<div id='d{n}'></div><svg id='s{n}'></svg><textarea id='t{n}'></textarea>" for n in range(50))
+    parser = _ExtensionFormParser()
+
+    parser.feed(f"{unrelated}<script id='extension_name'></script>{_form()}")
+    parser.close()
+
+    assert parser._seen == {"extension_name", "extension_type_id", "extension_location"}
+
+
 @pytest.mark.parametrize("field", ["name", "serial"])
 def test_a_first_element_of_the_name_or_serial_id_that_is_no_input_hides_a_later_input(field: str) -> None:
     shadowed = f'<div id="extension_{field}" value="Alt"></div><input id="extension_{field}" value="Neu">'
