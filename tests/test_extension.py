@@ -6,7 +6,7 @@ import pytest
 from aiohttp import web
 
 from aiocomexio import ComexioAuthenticationError, ComexioClient, ComexioDataError, ExtensionInfo
-from aiocomexio.client import _ExtensionFormParser, parse_extension_form
+from aiocomexio.client import _FRAMESET_BLOCKERS, _ExtensionFormParser, parse_extension_form
 from aiocomexio.extension import DOORSTATION_TYPE_ID, extension_from_inputs, extension_ip
 from tests.common import load_fixture
 from tests.fake_comexio import LOGIN_PAGE, SESSION_COOKIE, SESSION_VALUE, FakeComexio, Handler
@@ -255,13 +255,75 @@ def test_an_element_inside_script_template_or_textarea_is_no_element_of_the_page
             for part in ("tr", "td", "th", "caption", "col", "colgroup", "tbody", "thead", "tfoot")
         ),
         "<frame id='{}'>",
-        "<frameset id='{}'>",
+        "<br><frameset id='{}'>",
         "<form><form id='{}'>",
     ],
 )
 def test_a_start_tag_a_browser_ignores_is_no_element_of_its_id(ignored: str) -> None:
-    # A table part outside a table, a frame and a nested form make no element: the input is the first of its id.
+    # A table part outside a table, a frame outside a frameset, a frameset in a page and a nested form make no
+    # element: the input is the first of its id.
     html = ignored.format("extension_location") + _form(location="192.168.0.50")
+
+    assert parse_extension_form(14, html).location == "192.168.0.50"
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [
+        "<frameset id='extension_location'>",
+        "<html><head></head><frameset id='extension_location'>",
+        "<div><frameset id='extension_location'>",
+        "<input type='HIDDEN'><frameset id='extension_location'>",
+        "<frameset><frame id='extension_location'>",
+        "<frameset><frameset id='extension_location'>",
+        "<frameset><frameset></frameset><frame id='extension_location'>",
+        "<svg><frameset id='extension_location'></frameset></svg>",
+    ],
+)
+def test_a_frame_element_of_a_frameset_page_is_an_element_of_its_id(frames: str) -> None:
+    # Until a start tag clears the frameset-ok flag a <frameset> makes the page a frameset page; a <frame> in one is
+    # an element too, and so is any SVG element with the id.
+    html = f"{frames}{_form(location='192.168.0.50')}"
+
+    with pytest.raises(ComexioDataError) as no_address:
+        parse_extension_form(14, html)
+
+    assert str(no_address.value) == NO_ADDRESS_MESSAGE
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [
+        "<input><frameset id='extension_location'>",
+        "<body><frameset id='extension_location'>",
+        "<table></table><frameset id='extension_location'>",
+        "<frameset></frameset><frameset id='extension_location'>",
+        "<frameset></frameset><frame id='extension_location'>",
+        "<frameset><frameset></frameset></frameset><frame id='extension_location'>",
+        "<input><frameset><frame id='extension_location'>",
+        "</frameset><frame id='extension_location'>",
+        "<template><frameset></frameset></template><frame id='extension_location'>",
+        "<frameset><template><frameset></frameset></template></frameset><frame id='extension_location'>",
+        "<template><frameset id='extension_location'></frameset></template>",
+        "<template></template><frameset id='extension_location'>",
+    ],
+)
+def test_a_frame_element_a_browser_ignores_is_no_element_of_its_id(frames: str) -> None:
+    # An <input> (not a hidden one) or a <body> clears the flag, a frameset that has ended takes no more frames, and
+    # an ignored frameset (or a stray end tag, or one in a <template>) opens none.
+    html = f"{frames}{_form(location='192.168.0.50')}"
+
+    assert parse_extension_form(14, html).location == "192.168.0.50"
+
+
+# These open raw text or a hidden element that swallows the rest of the page, the form included (the closed
+# <template></template> case has a test of its own above).
+_RAW_TEXT_BLOCKERS = frozenset({"iframe", "plaintext", "template", "textarea", "xmp"})
+
+
+@pytest.mark.parametrize("blocker", sorted(_FRAMESET_BLOCKERS - _RAW_TEXT_BLOCKERS))
+def test_every_start_tag_that_clears_the_frameset_ok_flag_ignores_a_later_frameset(blocker: str) -> None:
+    html = f"<{blocker}><frameset id='extension_location'>{_form(location='192.168.0.50')}"
 
     assert parse_extension_form(14, html).location == "192.168.0.50"
 

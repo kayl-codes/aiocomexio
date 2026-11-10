@@ -316,8 +316,15 @@ _ROOT_TAGS = frozenset({"html", "head", "body"})
 _BEFORE_HEAD_TAGS = frozenset({"html", "head"})
 # The end tags that imply the head too when they come before it (the "anything else" case of the before-head mode).
 _HEAD_IMPLYING_END_TAGS = frozenset({"html", "head", "body", "br"})
-# The start tags of a frameset page: a browser ignores them in the body of any other page.
-_IGNORED_FRAMES = frozenset({"frame", "frameset"})
+# The start tags that clear a browser's "frameset-ok" flag (an <input> too, unless it is hidden): after one of them a
+# <frameset> is ignored. A page that has none of them yet may still be a frameset page; a <frame> counts only in one.
+_FRAMESET_BLOCKERS = frozenset(
+    {
+        "applet", "area", "body", "br", "button", "dd", "dt", "embed", "hr", "iframe", "image", "img", "keygen",
+        "li", "listing", "marquee", "object", "plaintext", "pre", "select", "table", "template", "textarea", "wbr",
+        "xmp",
+    }
+)  # fmt: skip
 # A <colgroup> holds only <col>s: anything else closes it, so its end tag never closes what follows it.
 _OPENS_NO_ELEMENT = _IGNORED_IN_BODY | {"colgroup"}
 _HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
@@ -2630,6 +2637,13 @@ def _first_attributes(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
     return attributes
 
 
+def _clears_frameset_ok(tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+    """Whether the start tag clears a browser's frameset-ok flag: an <input> does unless its type is hidden."""
+    if tag == "input":
+        return _first_attributes(attrs).get("type", "").lower() != "hidden"
+    return tag in _FRAMESET_BLOCKERS
+
+
 class _ForeignElement(NamedTuple):
     """An open SVG or MathML element.
 
@@ -2809,6 +2823,8 @@ class _FormParser(HTMLParser):
         self._select_open = False  # any select is open; a <select> inside it only ends it
         self._form_open = False  # a form is open (the browser's form element pointer): another <form> is ignored
         self._start_ignored = False  # the start tag handle_form_tag now reads is one a browser ignores: no element
+        self._frameset_ok = True  # no start tag has cleared the browser's "frameset-ok" flag yet
+        self._frameset_depth = 0  # the <frameset> elements a browser keeps open (a <frame> belongs in one of them)
         # The browser's list of active formatting elements: open (or implicitly closed) formatting elements, and the
         # cells, captions, templates and objects they do not leak into (markers).
         self._formatting: list[_OpenElement] = []
@@ -2900,6 +2916,7 @@ class _FormParser(HTMLParser):
         html = self._foreign[-1].html if self._foreign else self._html
         self._prepare_start(tag, html)
         self._start_ignored = self._is_ignored(tag, html)
+        self._track_frameset(tag, attrs)
         if self._start_html(tag, attrs, self_closing=self_closing) and self._opens(tag, html):
             self._insert(tag, attrs, html)
         self._check_depth()
@@ -3027,14 +3044,27 @@ class _FormParser(HTMLParser):
     def _is_ignored(self, tag: str, html: list[str]) -> bool:
         """Whether a browser ignores the start tag altogether, so that it makes no element of the page.
 
-        That is a table part outside a <table>, a <frame> or <frameset>, and a <form> while another one is open
+        That is a table part outside a <table>, a <frameset> once the page cannot be a frameset page any more (or
+        after its frameset has ended), a <frame> outside a frameset, and a <form> while another one is open
         (outside a <template>). <html>, <body> and <head> are not listed: a browser merges their attributes, and
         the first of each is a real element. A <colgroup> inside a table does make an element (_opens only keeps no
         stack entry for it).
         """
         if tag in _TABLE_PARTS:
             return _TABLE not in html
-        return tag in _IGNORED_FRAMES or (tag == "form" and self._form_open and not self._hidden)
+        if tag == "frameset":
+            return not (self._frameset_ok or self._frameset_depth)
+        if tag == "frame":
+            return not self._frameset_depth
+        return tag == "form" and self._form_open and not self._hidden
+
+    def _track_frameset(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Follow the browser's frameset-ok flag and the frameset elements it keeps open (see _is_ignored)."""
+        if tag == "frameset" and not self._start_ignored and not self._hidden:  # a hidden one is ignored too
+            self._frameset_depth += 1
+            self._frameset_ok = False  # the first frameset replaces the body; a later one only nests or is ignored
+        elif _clears_frameset_ok(tag, attrs):
+            self._frameset_ok = False
 
     def _opens(self, tag: str, html: list[str]) -> bool:
         """Whether a browser opens an element for the start tag, given the HTML elements open around it.
@@ -3121,6 +3151,8 @@ class _FormParser(HTMLParser):
         return False
 
     def _end_html(self, tag: str) -> None:
+        if tag == "frameset" and self._frameset_depth and not self._hidden:
+            self._frameset_depth -= 1
         if self._hidden:  # only the end tag of the innermost hidden element ends it
             name, depth = self._hidden[-1]
             if tag == name:
