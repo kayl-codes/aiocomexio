@@ -273,6 +273,8 @@ def test_a_start_tag_a_browser_ignores_is_no_element_of_its_id(ignored: str) -> 
         "<frameset id='extension_location'>",
         "<html><head></head><frameset id='extension_location'>",
         "<div><frameset id='extension_location'>",
+        "<form><frameset id='extension_location'>",
+        "<p><frameset id='extension_location'>",
         "<input type='HIDDEN'><frameset id='extension_location'>",
         "<frameset><frame id='extension_location'>",
         "<frameset><frameset id='extension_location'>",
