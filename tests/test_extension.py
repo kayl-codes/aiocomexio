@@ -315,6 +315,58 @@ def test_a_form_after_the_end_of_another_one_is_an_element_of_its_id() -> None:
     assert str(no_address.value) == NO_ADDRESS_MESSAGE
 
 
+@pytest.mark.parametrize(
+    "root",
+    [
+        "<html id='extension_location'>",
+        "<body id='extension_location'>",
+        "<head id='extension_location'>",
+        "<html><html id='extension_location'>",
+        "<body><body id='extension_location'>",
+        "<html id=''><body id='extension_location'>",
+        "<html id='root'><body id='extension_location'>",
+        "<html id='root'><head id='extension_location'>",
+        "<body id='root'><html id='extension_location'>",
+    ],
+)
+def test_a_root_tag_that_gives_its_element_the_id_is_an_element_of_it(root: str) -> None:
+    # The first html/head/body makes its element; a repeated html or body adds the id its element lacks.
+    html = f"{root}{_form(location='192.168.0.50')}"
+
+    with pytest.raises(ComexioDataError) as no_address:
+        parse_extension_form(14, html)
+
+    assert str(no_address.value) == NO_ADDRESS_MESSAGE
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        "<html id='root'><html id='extension_location'>",
+        "<body id='root'><body id='extension_location'>",
+        "<head><head id='extension_location'>",
+        "<head id='root'><head id='extension_location'>",
+        "<html id=''><html id='extension_location'>",
+        "<html><html id='a'><html id='extension_location'>",
+        "<body><body id='a'><body id='extension_location'>",
+    ],
+)
+def test_a_repeated_root_tag_that_adds_no_id_to_its_element_is_no_element_of_it(root: str) -> None:
+    # The element already has an id (html, body) or the repeated tag is ignored altogether (head).
+    html = f"{root}{_form(location='192.168.0.50')}"
+
+    assert parse_extension_form(14, html).location == "192.168.0.50"
+
+
+def test_a_root_tag_with_the_type_id_hides_a_later_type_input_only() -> None:
+    html = f"<html><html id='extension_type_id'>{_form(location='192.168.0.50', type_id='16')}"
+
+    with pytest.raises(ComexioDataError) as no_type:
+        parse_extension_form(99, html)
+
+    assert str(no_type.value) == NEW_EXTENSION_MESSAGE
+
+
 def test_only_the_ids_the_client_reads_are_remembered() -> None:
     # Any other id of a large page must not pile up in the parser (it keeps one entry per id it has to remember).
     unrelated = "".join(f"<div id='d{n}'></div><svg id='s{n}'></svg><textarea id='t{n}'></textarea>" for n in range(50))

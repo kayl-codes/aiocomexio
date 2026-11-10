@@ -310,6 +310,8 @@ _TABLE_PARTS = frozenset({_CAPTION, "col", "colgroup", _TBODY, "td", "tfoot", "t
 _TABLE_SCOPE_BOUNDARIES = frozenset({"html", _TABLE, _TEMPLATE})
 # Start tags a browser ignores in a page body (or only merges the attributes of): they open no element.
 _IGNORED_IN_BODY = frozenset({"body", "frame", "frameset", "head", "html"})
+# The root elements of a page: a repeated start tag of one makes no new element (see _ExtensionFormParser).
+_ROOT_TAGS = frozenset({"html", "head", "body"})
 # The start tags of a frameset page: a browser ignores them in the body of any other page.
 _IGNORED_FRAMES = frozenset({"frame", "frameset"})
 # A <colgroup> holds only <col>s: anything else closes it, so its end tag never closes what follows it.
@@ -1048,15 +1050,14 @@ class ComexioClient:
         its camera stream is served under (ExtensionInfo.ip). That is None for `local` but also for a host name, an
         IPv6 address or a malformed one; ExtensionInfo.location keeps the raw field to tell them apart. ext_id must
         be a positive int (not a bool): anything else raises TypeError or ValueError before a request. An id Comexio
-        does not know, a form
-        without an IP address field and a page that nests more than 256 elements raise ComexioDataError, the
-        login form ComexioAuthenticationError.
+        does not know, a form without an IP address field and a page that nests more than 256 elements raise
+        ComexioDataError, the login form ComexioAuthenticationError.
         """
         ext_id = require_ext_id(ext_id)
         html = await self._request_admin_text(
             "GET",
             _EXTENSION_EDIT_PATH,
-            what=f"Extension {ext_id} edit form",
+            what=f"Extension {ext_id!r} edit form",
             params={"id": str(ext_id), "json_return": "true"},
         )
         return parse_extension_form(ext_id, html)
@@ -3279,9 +3280,12 @@ class _ExtensionFormParser(_FormParser):
         super().__init__()
         self.inputs: dict[str, str | None] = {}
         self._seen: set[str] = set()
+        self._root_has_id: dict[str, bool] = {}  # each of html/head/body seen so far: does its element carry an id
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         element_id = attributes.get("id", "")
+        if tag in _ROOT_TAGS and not self._root_adds_attributes(tag, "id" in attributes):
+            return
         if self._start_ignored or element_id not in EXTENSION_INPUTS or element_id in self._seen:
             return
         self._seen.add(element_id)
@@ -3293,6 +3297,17 @@ class _ExtensionFormParser(_FormParser):
 
     def handle_other_tag(self, tag: str, attributes: dict[str, str]) -> None:
         self._note_other_element(attributes)
+
+    def _root_adds_attributes(self, tag: str, has_id: bool) -> bool:
+        """Whether a start tag of html, head or body can give its element an id, as a browser does.
+
+        The first one makes the element. A repeated <html> or <body> only adds the attributes its element lacks, so
+        its id counts only while the element has none; a repeated <head> is ignored altogether.
+        """
+        first = tag not in self._root_has_id
+        had_id = self._root_has_id.get(tag, False)
+        self._root_has_id[tag] = had_id or has_id
+        return first or (tag != "head" and not had_id)
 
     def _note_other_element(self, attributes: dict[str, str]) -> None:
         """An element that is no input: it is the first of its id unless an element of that id came before."""

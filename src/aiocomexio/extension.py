@@ -106,10 +106,10 @@ def extension_from_inputs(ext_id: int, inputs: Mapping[str, str | None]) -> Exte
     if type_id is None:
         found = "none" if raw_type_id is None else _excerpt(raw_type_id)
         raise ComexioDataError(
-            f"Extension {ext_id} edit form names no extension type (found {found}): unknown id or changed page"
+            f"Extension {ext_id!r} edit form names no extension type (found {found}): unknown id or changed page"
         )
     if LOCATION_INPUT not in inputs:
-        raise ComexioDataError(f"Extension {ext_id} edit form has no IP address field: changed page")
+        raise ComexioDataError(f"Extension {ext_id!r} edit form has no IP address field: changed page")
     return ExtensionInfo(
         ext_id=ext_id,
         type_id=type_id,
