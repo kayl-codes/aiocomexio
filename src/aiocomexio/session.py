@@ -24,6 +24,12 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_SEC = 120
 DEFAULT_PROGRESS_LOG_INTERVAL_SEC = 10
 
+# Where connection_trace_config() leaves its findings in a request's trace_request_ctx dict (a list, one entry per
+# connection the request was tried on), and the two values.
+CONNECTION_KEY = "connection"
+CONNECTION_REUSED = "reused"
+CONNECTION_NEW = "new"
+
 _LOCAL_HOSTNAME_RE = re.compile(r"^(?:localhost|[a-zA-Z0-9_-]+\.local|[a-zA-Z0-9_-]+\.lan|[a-zA-Z0-9_-]+\.home)\.?$")
 
 
@@ -61,13 +67,43 @@ def session_kwargs(
     one would share (and overwrite) one login, and the client clears the jar on every login. Pass
     progress_log_interval (e.g. DEFAULT_PROGRESS_LOG_INTERVAL_SEC) to log slow requests.
     """
-    kwargs: dict[str, Any] = {
+    trace_configs = [connection_trace_config()]
+    if progress_log_interval is not None:
+        trace_configs.append(progress_trace_config(progress_log_interval))
+    return {
         "timeout": aiohttp.ClientTimeout(total=timeout),
         "cookie_jar": aiohttp.CookieJar(unsafe=True),
+        "trace_configs": trace_configs,
     }
-    if progress_log_interval is not None:
-        kwargs["trace_configs"] = [progress_trace_config(progress_log_interval)]
-    return kwargs
+
+
+def connection_trace_config() -> aiohttp.TraceConfig:
+    """TraceConfig that notes on which connections a request was tried: a reused one, a newly opened one.
+
+    It logs nothing itself: it appends CONNECTION_REUSED or CONNECTION_NEW to the list under CONNECTION_KEY in the
+    dict a caller passes as trace_request_ctx, and the client reads it back for its debug line about a failed
+    request. Two entries mean aiohttp tried again on its own (it does for an idempotent method, GET included, whose
+    connection the server dropped). That is what tells a closed idle connection from a server that refuses a
+    request. A request without such a dict is left alone.
+    """
+
+    # aiohttp requires async trace callbacks even when they never await (python:S7503).
+    async def on_reuse(_session: aiohttp.ClientSession, ctx: SimpleNamespace, _params: Any) -> None:  # NOSONAR
+        _note_connection(ctx, CONNECTION_REUSED)
+
+    async def on_create(_session: aiohttp.ClientSession, ctx: SimpleNamespace, _params: Any) -> None:  # NOSONAR
+        _note_connection(ctx, CONNECTION_NEW)
+
+    trace_config = aiohttp.TraceConfig()
+    trace_config.on_connection_reuseconn.append(on_reuse)
+    trace_config.on_connection_create_end.append(on_create)
+    return trace_config
+
+
+def _note_connection(ctx: SimpleNamespace, kind: str) -> None:
+    request_ctx = getattr(ctx, "trace_request_ctx", None)
+    if isinstance(request_ctx, dict):
+        request_ctx.setdefault(CONNECTION_KEY, []).append(kind)
 
 
 def progress_trace_config(interval: float = DEFAULT_PROGRESS_LOG_INTERVAL_SEC) -> aiohttp.TraceConfig:

@@ -39,7 +39,7 @@ async def test_session_kwargs_with_progress_logging() -> None:
     kwargs = session_kwargs(timeout=30, progress_log_interval=10)
 
     assert kwargs["timeout"].total == 30
-    assert len(kwargs["trace_configs"]) == 1
+    assert len(kwargs["trace_configs"]) == 2  # the connection note and the progress logging
 
 
 @pytest.mark.parametrize("interval", [0, -1, float("nan")])
@@ -49,7 +49,11 @@ async def test_session_kwargs_rejects_non_positive_progress_interval(interval: f
 
 
 async def test_session_kwargs_logs_nothing_by_default() -> None:
-    assert set(session_kwargs()) == {"timeout", "cookie_jar"}
+    # No progress logging: only the connection note, which logs nothing itself.
+    kwargs = session_kwargs()
+
+    assert set(kwargs) == {"timeout", "cookie_jar", "trace_configs"}
+    assert len(kwargs["trace_configs"]) == 1
 
 
 @pytest.mark.parametrize("ip", ["192.168.0.5", "203.0.113.7"])

@@ -28,7 +28,7 @@ from .exceptions import (
 from .extension import DOORSTATION_TYPE_ID, ExtensionInfo
 from .onewire import OneWireSensor, OneWireStatus
 from .scrape import TimeServerSettings
-from .session import is_local_address, progress_trace_config, session_kwargs
+from .session import connection_trace_config, is_local_address, progress_trace_config, session_kwargs
 from .tls import fetch_certificate_fingerprint, format_fingerprint, normalize_fingerprint
 
 __version__ = version("aiocomexio")
@@ -58,6 +58,7 @@ __all__ = [
     "WebioBaseInfo",
     "WebioCommandForm",
     "__version__",
+    "connection_trace_config",
     "fetch_certificate_fingerprint",
     "format_fingerprint",
     "io_written_over_admin_session",
