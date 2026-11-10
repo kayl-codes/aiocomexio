@@ -199,6 +199,54 @@ def test_a_first_element_of_an_id_that_is_no_input_hides_a_later_input(tag: str)
     assert str(no_type.value) == NEW_EXTENSION_MESSAGE
 
 
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        "<script id='{}'></script>",
+        "<template id='{}'></template>",
+        "<textarea id='{}'></textarea>",
+        "<title id='{}'></title>",
+        "<svg id='{}'></svg>",
+        "<svg id='{}'/>",
+        "<svg><circle id='{}'/></svg>",
+        "<svg><foreignObject><svg id='{}'></svg></foreignObject></svg>",
+        "<math id='{}'></math>",
+        "<math id='{}'/>",
+        "<math><mi id='{}'>x</mi></math>",
+    ],
+)
+def test_script_template_textarea_svg_and_math_elements_are_elements_of_their_id_too(shadow: str) -> None:
+    # getElementById finds them like a <div>: a later input is not the element of the id.
+    shadowed_address = shadow.format("extension_location") + _form(location="10.0.0.9")
+    shadowed_type = shadow.format("extension_type_id") + _form(type_id="16")
+
+    with pytest.raises(ComexioDataError) as no_address:
+        parse_extension_form(14, shadowed_address)
+    with pytest.raises(ComexioDataError) as no_type:
+        parse_extension_form(99, shadowed_type)
+
+    assert str(no_address.value) == NO_ADDRESS_MESSAGE
+    assert str(no_type.value) == NEW_EXTENSION_MESSAGE
+
+
+@pytest.mark.parametrize("wrapper", ["script", "template", "textarea"])
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "<div id='extension_location'></div>",
+        "<svg id='extension_location'></svg>",
+        "<svg><circle id='extension_location'/></svg>",
+        "<math id='extension_location'></math>",
+        "<script id='extension_location'></script>",
+    ],
+)
+def test_an_element_inside_script_template_or_textarea_is_no_element_of_the_page(wrapper: str, inner: str) -> None:
+    hidden = f"<{wrapper}>{inner}</{wrapper}>"
+    html = hidden + _form(location="192.168.0.50")
+
+    assert parse_extension_form(14, html).location == "192.168.0.50"
+
+
 @pytest.mark.parametrize("field", ["name", "serial"])
 def test_a_first_element_of_the_name_or_serial_id_that_is_no_input_hides_a_later_input(field: str) -> None:
     shadowed = f'<div id="extension_{field}" value="Alt"></div><input id="extension_{field}" value="Neu">'

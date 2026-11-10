@@ -2905,8 +2905,14 @@ class _FormParser(HTMLParser):
         if max(open_elements, len(self._formatting)) > _MAX_OPEN_ELEMENTS:
             raise ComexioDataError(f"form page nests more than {_MAX_OPEN_ELEMENTS} elements")
 
+    def _report_other(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Hand a start tag that is no form field (but an element of the page) to handle_other_tag, unless hidden."""
+        if not self._hidden:
+            self.handle_other_tag(tag, _first_attributes(attrs))
+
     def _start_foreign(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> None:
         self._foreign_start = True
+        self._report_other(tag, attrs)
         if not self_closing:
             current = self._foreign[-1]
             # An <svg> inside a MathML <annotation-xml> is SVG; any other element keeps the namespace around it.
@@ -3049,10 +3055,12 @@ class _FormParser(HTMLParser):
             return False
         if tag in _FOREIGN_ROOTS:
             self._foreign_start = True
+            self._report_other(tag, attrs)
             if not self_closing:
                 self._foreign.append(_ForeignElement(tag, tag, False, []))
             return False
         if tag in _HIDDEN_ELEMENTS:
+            self._report_other(tag, attrs)
             self._hidden.append((tag, len(self._foreign)))
             return True
         if self._hidden:  # a tag inside a hidden element is no field
@@ -3159,6 +3167,13 @@ class _FormParser(HTMLParser):
     def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
         """A start tag of a text-only element (a <textarea>, <title>, ...) outside a hidden one; its text follows."""
 
+    def handle_other_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        """A start tag of a <script>, a <template> or an SVG or MathML element outside a hidden element.
+
+        They are elements of the page, not form fields: a subclass that needs every element of an id (getElementById
+        finds them all) reads them here, the others ignore them.
+        """
+
     def handle_form_endtag(self, tag: str) -> None:
         """An end tag other than </select> outside a text-only or hidden element or an open foreign element."""
 
@@ -3235,12 +3250,12 @@ def parse_doorstations(io_home_html: str) -> dict[int, Doorstation]:
 class _ExtensionFormParser(_FormParser):
     """The value of each input of the extension edit form the client reads (EXTENSION_INPUTS), read as a browser does.
 
-    The first HTML element of an id counts, whatever its tag, and the id is compared exactly, as getElementById finds
-    it: if that element is no input, the id has no input at all and a later input of it is not read. Elements the
-    base parser does not report (inside a <script>, <template> or <textarea>, or SVG/MathML) are no fields and do
-    not count. inputs maps the id to
-    the value, or None if the input has no value attribute; an input the form lacks has no key. The login rows of the
-    form are not among the ids, so no password field is ever kept.
+    The first element of an id counts, whatever its tag (a <script>, <template>, <textarea> or SVG/MathML element
+    too), and the id is compared exactly, as getElementById finds it: if that element is no input, the id has no input
+    at all and a later input of it is not read. What lies inside a <script>, <template> or <textarea> is no element of
+    the page and does not count. inputs maps the id to the value, or None if the input has no value attribute; an
+    input the form lacks has no key. The login rows of the form are not among the ids, so no password field is ever
+    kept.
     """
 
     def __init__(self) -> None:
@@ -3255,6 +3270,16 @@ class _ExtensionFormParser(_FormParser):
         self._seen.add(element_id)
         if tag == "input":
             self.inputs[element_id] = attributes.get("value")
+
+    def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        self._note_other_element(attributes)
+
+    def handle_other_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        self._note_other_element(attributes)
+
+    def _note_other_element(self, attributes: dict[str, str]) -> None:
+        """An element that is no input: it is the first of its id unless an element of that id came before."""
+        self._seen.add(attributes.get("id", ""))
 
 
 def parse_extension_form(ext_id: int, html: str) -> ExtensionInfo:
