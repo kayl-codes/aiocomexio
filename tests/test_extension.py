@@ -318,16 +318,96 @@ def test_a_frame_element_a_browser_ignores_is_no_element_of_its_id(frames: str) 
     assert parse_extension_form(14, html).location == "192.168.0.50"
 
 
+# The start tags the HTML spec lists as clearing the frameset-ok flag ("in body", and <template> through "in head"),
+# written out here, not derived from _FRAMESET_BLOCKERS, so a tag missing there fails the tests below. A visible
+# <input> clears it too (see the ignored cases above).
+_SPEC_FRAMESET_BLOCKERS = frozenset(
+    {
+        "applet",
+        "area",
+        "body",
+        "br",
+        "button",
+        "dd",
+        "dt",
+        "embed",
+        "hr",
+        "iframe",
+        "image",
+        "img",
+        "keygen",
+        "li",
+        "listing",
+        "marquee",
+        "object",
+        "plaintext",
+        "pre",
+        "select",
+        "table",
+        "template",
+        "textarea",
+        "wbr",
+        "xmp",
+    }
+)
+
 # These open raw text or a hidden element that swallows the rest of the page, the form included (the closed
 # <template></template> case has a test of its own above).
 _RAW_TEXT_BLOCKERS = frozenset({"iframe", "plaintext", "template", "textarea", "xmp"})
 
 
-@pytest.mark.parametrize("blocker", sorted(_FRAMESET_BLOCKERS - _RAW_TEXT_BLOCKERS))
+def test_the_frameset_blockers_are_the_start_tags_of_the_spec() -> None:
+    assert _FRAMESET_BLOCKERS == _SPEC_FRAMESET_BLOCKERS
+
+
+@pytest.mark.parametrize("blocker", sorted(_SPEC_FRAMESET_BLOCKERS - _RAW_TEXT_BLOCKERS))
 def test_every_start_tag_that_clears_the_frameset_ok_flag_ignores_a_later_frameset(blocker: str) -> None:
     html = f"<{blocker}><frameset id='extension_location'>{_form(location='192.168.0.50')}"
 
     assert parse_extension_form(14, html).location == "192.168.0.50"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "text",
+        "&nbsp;",
+        " ",
+        "\x0b",
+        "<html><head></head>text",
+        "<svg>text</svg>",
+        "\n text \n",
+    ],
+)
+def test_text_before_a_frameset_clears_the_frameset_ok_flag(text: str) -> None:
+    # Text that is more than whitespace (a no-break space is none) puts the page in the body: the <frameset> is ignored.
+    html = f"{text}<frameset id='extension_location'>{_form(location='192.168.0.50')}"
+
+    assert parse_extension_form(14, html).location == "192.168.0.50"
+
+
+@pytest.mark.parametrize(
+    "lead",
+    [
+        " \t\r\n\f",
+        "&#32;&#10;",
+        "<!-- note -->",
+        "<style>body { color: red }</style>",
+        "<script>var text = 1;</script>",
+        "<title>text</title>",
+        "<noscript>text</noscript>",  # raw text, as in a browser that runs scripts
+        "\x00",
+        "\x00 \x00",
+    ],
+)
+def test_whitespace_and_the_text_of_style_script_or_title_leave_a_frameset_an_element(lead: str) -> None:
+    # A NUL is dropped by the parser, so a page of nothing but NULs and whitespace still has its frameset.
+    html = f"{lead}<frameset id='extension_location'>{_form(location='192.168.0.50')}"
+
+    with pytest.raises(ComexioDataError) as no_address:
+        parse_extension_form(14, html)
+
+    assert str(no_address.value) == NO_ADDRESS_MESSAGE
 
 
 @pytest.mark.parametrize("part", ["tbody", "thead", "colgroup", "caption", "tr"])
@@ -438,10 +518,14 @@ def test_a_repeated_root_tag_that_adds_no_id_to_its_element_is_no_element_of_it(
         "</body><head id='extension_location'>",
         "</html><head id='extension_location'>",
         "</br><head id='extension_location'>",
+        "text<head id='extension_location'>",
+        "&nbsp;<head id='extension_location'>",
+        "<html>text<head id='extension_location'>",
     ],
 )
 def test_a_head_tag_after_another_start_tag_is_no_element_of_its_id(root: str) -> None:
-    # A start tag but html/head, or an end tag of html/head/body/br, implies the head: a later <head> is ignored.
+    # A start tag but html/head, an end tag of html/head/body/br or text that is more than whitespace implies the
+    # head: a later <head> is ignored.
     html = f"{root}{_form(location='192.168.0.50')}"
 
     assert parse_extension_form(14, html).location == "192.168.0.50"
@@ -453,6 +537,8 @@ def test_a_head_tag_after_another_start_tag_is_no_element_of_its_id(root: str) -
         "<html><head id='extension_location'>",
         "<!-- note --><head id='extension_location'>",
         " <html> <head id='extension_location'>",
+        "\t\r\n\f <head id='extension_location'>",
+        "&#32;<head id='extension_location'>",
     ],
 )
 def test_a_head_tag_before_any_other_start_tag_is_an_element_of_its_id(root: str) -> None:

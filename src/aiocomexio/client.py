@@ -3215,6 +3215,17 @@ class _FormParser(HTMLParser):
         self._close_html("select")
         self.handle_select_end()
 
+    def handle_data(self, data: str) -> None:
+        # Text of the page itself (not of a text-only element, a <script> or <style>) that is more than whitespace
+        # clears the frameset-ok flag: a <frameset> after it is ignored. A NUL is dropped, so it does not count.
+        if (
+            self._text_only is None
+            and not self._hidden
+            and self.cdata_elem is None
+            and data.strip(_HTML_WHITESPACE + "\0")
+        ):
+            self._frameset_ok = False
+
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         """A start tag of an HTML element outside a text-only or hidden element; a <select> only when none is open."""
 
@@ -3331,6 +3342,11 @@ class _ExtensionFormParser(_FormParser):
 
     def handle_form_endtag(self, tag: str) -> None:
         self._head_implied = self._head_implied or tag in _HEAD_IMPLYING_END_TAGS
+
+    def handle_data(self, data: str) -> None:
+        super().handle_data(data)
+        # Text that is more than whitespace makes the browser insert the head before the first <head>: it is ignored.
+        self._head_implied = self._head_implied or bool(data.strip(_HTML_WHITESPACE))
 
     def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
         self._note_other_element(attributes)
@@ -3542,6 +3558,7 @@ class _ProtocolSelectParser(_FormParser):
             self._group = None
 
     def handle_data(self, data: str) -> None:
+        super().handle_data(data)
         # The text of a <title> in an option is part of its text; the content of a <script> or <template> is not.
         if self._text is not None and not self._hidden:
             self._text.write(data)
