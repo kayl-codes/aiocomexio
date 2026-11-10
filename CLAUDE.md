@@ -42,8 +42,9 @@ Beta. The move out of the integration, in order:
      (plans, elements, wires, block settings, scenes, Quantum modules, run / stop).
    - Done: 1-Wire sensors (`get_onewire_sensors`, live status, device count) with their Web-IO push
      commands, and Doorstation detection (`get_doorstations`) with a camera snapshot
-     (`get_doorstation_snapshot`, `doorstation_stream_url`). Not built yet: the Doorstation's own IP
-     (`extension_location` of `/admin/extension/edit/`).
+     (`get_doorstation_snapshot`, `doorstation_stream_url`), and the settings of one extension
+     (`get_extension`, `ExtensionInfo`: name, serial, type id and the IP address from
+     `extension_location` of `/admin/extension/edit/`).
    - A successful admin answer is read through a byte cap (`_RESPONSE_MAX_BYTES`, 16 MiB); an error
      page has its own 64 KiB cap and the Doorstation snapshot its own 4 MiB cap. The credentials POST
      of `login()` is sent without reading its answer (`_request_unread`). Every request sends

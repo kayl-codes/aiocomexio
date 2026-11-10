@@ -25,6 +25,7 @@ from .exceptions import (
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
+from .extension import DOORSTATION_TYPE_ID, ExtensionInfo
 from .onewire import OneWireSensor, OneWireStatus
 from .scrape import TimeServerSettings
 from .session import is_local_address, progress_trace_config, session_kwargs
@@ -43,7 +44,9 @@ __all__ = [
     "ComexioRequestRejectedError",
     "ComexioResponseError",
     "CreatedFunctionPlan",
+    "DOORSTATION_TYPE_ID",
     "Doorstation",
+    "ExtensionInfo",
     "IoAddress",
     "LiveStates",
     "OneWireSensor",

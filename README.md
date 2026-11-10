@@ -215,6 +215,16 @@ extension. The camera calls need the admin session (`login()` first):
   such elements but none is usable, the call raises `ComexioDataError`. Detection follows the IO home page
   of Comexio OS 11.0.2: the elements of a Doorstation tab carry `data-extid`, `data-extname` and
   `data-camera_id`.
+- `get_extension(ext_id)` reads the edit form of one extension (`/admin/extension/edit/?id=<ext_id>&json_return=true`,
+  which answers with the HTML of the form, not JSON) and returns an `ExtensionInfo`: `ext_id`, `type_id`
+  (`DOORSTATION_TYPE_ID`, 16, for a Doorstation; `is_doorstation` tells), `name` and `serial` (`None` if empty; an
+  extension learned offline has no serial), `location` (the raw "IP-Adresse (optional)" field, `None` if the input has
+  no value) and `ip`: that field as a usable IPv4 address, `None` for `local`, a host name, IPv6 or anything else
+  (`location` tells them apart). A Doorstation with an address of its own is the device that serves the camera
+  stream (the exact stream URL is not read from the form). The login rows of the form (user name, password) are
+  never read. An id Comexio does not know (it answers with the form for a new
+  extension) or a form without the address field raises `ComexioDataError`, the login form
+  `ComexioAuthenticationError`, an `ext_id` that is no positive int `TypeError` / `ValueError`.
 - `doorstation_stream_url(camera_id)` is the URL of the camera's MJPEG stream on the IO-Server
   (`/proxy/cam/<camera_id>/`, `multipart/x-mixed-replace`, one JPEG per part).
 - `get_doorstation_snapshot(camera_id)` returns the current image: the first complete JPEG of that

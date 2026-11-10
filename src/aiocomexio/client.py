@@ -56,6 +56,7 @@ from .exceptions import (
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
+from .extension import EXTENSION_INPUTS, ExtensionInfo, extension_from_inputs, require_ext_id
 from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_missing_collections
 from .onewire import (
     _ANY_TYPE_COUNTER,
@@ -122,6 +123,7 @@ _IDENTITY_ENCODING = "identity"
 _EXTENSION_COUNTER_ID_PREFIX = "number_of_"
 _EXTENSION_COUNTER_CLASS_RE = re.compile(rf"{_ANY_TYPE_COUNTER}\d+(?:_\d+)*", re.ASCII)
 _EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
+_EXTENSION_EDIT_PATH = "/admin/extension/edit/"
 _SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
 _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
 _API_PATH = "/api/"
@@ -308,6 +310,21 @@ _TABLE_PARTS = frozenset({_CAPTION, "col", "colgroup", _TBODY, "td", "tfoot", "t
 _TABLE_SCOPE_BOUNDARIES = frozenset({"html", _TABLE, _TEMPLATE})
 # Start tags a browser ignores in a page body (or only merges the attributes of): they open no element.
 _IGNORED_IN_BODY = frozenset({"body", "frame", "frameset", "head", "html"})
+# The root elements of a page: a repeated start tag of one makes no new element (see _ExtensionFormParser).
+_ROOT_TAGS = frozenset({"html", "head", "body"})
+# The only start tags a page can open with before its <head>: any other one implies the head (and later the body).
+_BEFORE_HEAD_TAGS = frozenset({"html", "head"})
+# The end tags that imply the head too when they come before it (the "anything else" case of the before-head mode).
+_HEAD_IMPLYING_END_TAGS = frozenset({"html", "head", "body", "br"})
+# The start tags that clear a browser's "frameset-ok" flag (an <input> too, unless it is hidden): after one of them a
+# <frameset> is ignored. A page that has none of them yet may still be a frameset page; a <frame> counts only in one.
+_FRAMESET_BLOCKERS = frozenset(
+    {
+        "applet", "area", "body", "br", "button", "dd", "dt", "embed", "hr", "iframe", "image", "img", "keygen",
+        "li", "listing", "marquee", "object", "plaintext", "pre", "select", "table", "template", "textarea", "wbr",
+        "xmp",
+    }
+)  # fmt: skip
 # A <colgroup> holds only <col>s: anything else closes it, so its end tag never closes what follows it.
 _OPENS_NO_ELEMENT = _IGNORED_IN_BODY | {"colgroup"}
 _HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
@@ -1035,6 +1052,26 @@ class ComexioClient:
         """
         html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what=_IO_HOME_PAGE)
         return parse_doorstations(html)
+
+    async def get_extension(self, ext_id: int) -> ExtensionInfo:
+        """The settings of one extension (name, serial, type, IP address), read from its edit form.
+
+        One small request (about 2 KB) to /admin/extension/edit/ with json_return=true, which makes Comexio answer
+        with the HTML of the form (not JSON); see parse_extension_form. For a Doorstation the IP address is the one
+        its camera stream is served under (ExtensionInfo.ip). That is None for `local` but also for a host name, an
+        IPv6 address or a malformed one; ExtensionInfo.location keeps the raw field to tell them apart. ext_id must
+        be a positive int (not a bool): anything else raises TypeError or ValueError before a request. An id Comexio
+        does not know, a form without an IP address field and a page that nests more than 256 elements raise
+        ComexioDataError, the login form ComexioAuthenticationError.
+        """
+        ext_id = require_ext_id(ext_id)
+        html = await self._request_admin_text(
+            "GET",
+            _EXTENSION_EDIT_PATH,
+            what=f"Extension {ext_id!r} edit form",
+            params={"id": str(ext_id), "json_return": "true"},
+        )
+        return parse_extension_form(ext_id, html)
 
     def doorstation_stream_url(self, camera_id: int) -> str:
         """URL of the MJPEG stream of a Doorstation camera on the IO-Server (Doorstation.camera_id)."""
@@ -2600,6 +2637,13 @@ def _first_attributes(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
     return attributes
 
 
+def _clears_frameset_ok(tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+    """Whether the start tag clears a browser's frameset-ok flag: an <input> does unless its type is hidden."""
+    if tag == "input":
+        return _first_attributes(attrs).get("type", "").lower() != "hidden"
+    return tag in _FRAMESET_BLOCKERS
+
+
 class _ForeignElement(NamedTuple):
     """An open SVG or MathML element.
 
@@ -2778,6 +2822,9 @@ class _FormParser(HTMLParser):
         self._hidden: list[tuple[str, int]] = []
         self._select_open = False  # any select is open; a <select> inside it only ends it
         self._form_open = False  # a form is open (the browser's form element pointer): another <form> is ignored
+        self._start_ignored = False  # the start tag handle_form_tag now reads is one a browser ignores: no element
+        self._frameset_ok = True  # no start tag has cleared the browser's "frameset-ok" flag yet
+        self._frameset_depth = 0  # the <frameset> elements a browser keeps open (a <frame> belongs in one of them)
         # The browser's list of active formatting elements: open (or implicitly closed) formatting elements, and the
         # cells, captions, templates and objects they do not leak into (markers).
         self._formatting: list[_OpenElement] = []
@@ -2856,6 +2903,7 @@ class _FormParser(HTMLParser):
 
     def _start(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> None:
         self._foreign_start = False
+        self._start_ignored = False
         self._text_start = self._text_only is not None
         if self._text_start:
             return
@@ -2867,6 +2915,8 @@ class _FormParser(HTMLParser):
             return
         html = self._foreign[-1].html if self._foreign else self._html
         self._prepare_start(tag, html)
+        self._start_ignored = self._is_ignored(tag, html)
+        self._track_frameset(tag, attrs)
         if self._start_html(tag, attrs, self_closing=self_closing) and self._opens(tag, html):
             self._insert(tag, attrs, html)
         self._check_depth()
@@ -2882,8 +2932,14 @@ class _FormParser(HTMLParser):
         if max(open_elements, len(self._formatting)) > _MAX_OPEN_ELEMENTS:
             raise ComexioDataError(f"form page nests more than {_MAX_OPEN_ELEMENTS} elements")
 
+    def _report_other(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Hand a start tag that is no form field (but an element of the page) to handle_other_tag, unless hidden."""
+        if not self._hidden:
+            self.handle_other_tag(tag, _first_attributes(attrs))
+
     def _start_foreign(self, tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool) -> None:
         self._foreign_start = True
+        self._report_other(tag, attrs)
         if not self_closing:
             current = self._foreign[-1]
             # An <svg> inside a MathML <annotation-xml> is SVG; any other element keeps the namespace around it.
@@ -2985,6 +3041,31 @@ class _FormParser(HTMLParser):
             entries[index] = _OpenElement(entries[index], entries[index].attributes)
             html.append(entries[index])
 
+    def _is_ignored(self, tag: str, html: list[str]) -> bool:
+        """Whether a browser ignores the start tag altogether, so that it makes no element of the page.
+
+        That is a table part outside a <table>, a <frameset> once the page cannot be a frameset page any more (or
+        after its frameset has ended), a <frame> outside a frameset, and a <form> while another one is open
+        (outside a <template>). <html>, <body> and <head> are not listed: a browser merges their attributes, and
+        the first of each is a real element. A <colgroup> inside a table does make an element (_opens only keeps no
+        stack entry for it).
+        """
+        if tag in _TABLE_PARTS:
+            return _TABLE not in html
+        if tag == "frameset":
+            return not (self._frameset_ok or self._frameset_depth)
+        if tag == "frame":
+            return not self._frameset_depth
+        return tag == "form" and self._form_open and not self._hidden
+
+    def _track_frameset(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Follow the browser's frameset-ok flag and the frameset elements it keeps open (see _is_ignored)."""
+        if tag == "frameset" and not self._start_ignored and not self._hidden:  # a hidden one is ignored too
+            self._frameset_depth += 1
+            self._frameset_ok = False  # the first frameset replaces the body; a later one only nests or is ignored
+        elif _clears_frameset_ok(tag, attrs):
+            self._frameset_ok = False
+
     def _opens(self, tag: str, html: list[str]) -> bool:
         """Whether a browser opens an element for the start tag, given the HTML elements open around it.
 
@@ -3026,10 +3107,12 @@ class _FormParser(HTMLParser):
             return False
         if tag in _FOREIGN_ROOTS:
             self._foreign_start = True
+            self._report_other(tag, attrs)
             if not self_closing:
                 self._foreign.append(_ForeignElement(tag, tag, False, []))
             return False
         if tag in _HIDDEN_ELEMENTS:
+            self._report_other(tag, attrs)
             self._hidden.append((tag, len(self._foreign)))
             return True
         if self._hidden:  # a tag inside a hidden element is no field
@@ -3068,6 +3151,8 @@ class _FormParser(HTMLParser):
         return False
 
     def _end_html(self, tag: str) -> None:
+        if tag == "frameset" and self._frameset_depth and not self._hidden:
+            self._frameset_depth -= 1
         if self._hidden:  # only the end tag of the innermost hidden element ends it
             name, depth = self._hidden[-1]
             if tag == name:
@@ -3130,11 +3215,29 @@ class _FormParser(HTMLParser):
         self._close_html("select")
         self.handle_select_end()
 
+    def handle_data(self, data: str) -> None:
+        # Text of the page itself (not of a text-only element, a <script> or <style>) that is more than whitespace
+        # clears the frameset-ok flag: a <frameset> after it is ignored. A NUL is dropped, so it does not count.
+        if (
+            self._text_only is None
+            and not self._hidden
+            and self.cdata_elem is None
+            and data.strip(_HTML_WHITESPACE + "\0")
+        ):
+            self._frameset_ok = False
+
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         """A start tag of an HTML element outside a text-only or hidden element; a <select> only when none is open."""
 
     def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
         """A start tag of a text-only element (a <textarea>, <title>, ...) outside a hidden one; its text follows."""
+
+    def handle_other_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        """A start tag of a <script>, a <template> or an SVG or MathML element outside a hidden element.
+
+        They are elements of the page, not form fields: a subclass that needs every element of an id (getElementById
+        finds them all) reads them here, the others ignore them.
+        """
 
     def handle_form_endtag(self, tag: str) -> None:
         """An end tag other than </select> outside a text-only or hidden element or an open foreign element."""
@@ -3207,6 +3310,78 @@ def parse_doorstations(io_home_html: str) -> dict[int, Doorstation]:
     if not parser.saw_extension_counter and not names_a_camera:
         raise ComexioDataError("IO home page has no extension counters, the Doorstations are unknown")
     return doorstations_from_attributes(dict(element) for element in parser.elements)
+
+
+class _ExtensionFormParser(_FormParser):
+    """The value of each input of the extension edit form the client reads (EXTENSION_INPUTS), read as a browser does.
+
+    The first element of an id counts, whatever its tag (a <script>, <template>, <textarea> or SVG/MathML element
+    too), and the id is compared exactly, as getElementById finds it: if that element is no input, the id has no input
+    at all and a later input of it is not read. What lies inside a <script>, <template> or <textarea> is no element of
+    the page and does not count. inputs maps the id to the value, or None if the input has no value attribute; an
+    input the form lacks has no key. The login rows of the form are not among the ids, so no password field is ever
+    kept.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.inputs: dict[str, str | None] = {}
+        self._seen: set[str] = set()
+        self._root_has_id: dict[str, bool] = {}  # each of html/head/body seen so far: does its element carry an id
+        self._head_implied = False  # a start tag other than html/head came: the head exists, a <head> tag is ignored
+
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        element_id = attributes.get("id", "")
+        counts = tag not in _ROOT_TAGS or self._root_adds_attributes(tag, "id" in attributes)
+        self._head_implied = self._head_implied or tag not in _BEFORE_HEAD_TAGS
+        if not counts or self._start_ignored or element_id not in EXTENSION_INPUTS or element_id in self._seen:
+            return
+        self._seen.add(element_id)
+        if tag == "input":
+            self.inputs[element_id] = attributes.get("value")
+
+    def handle_form_endtag(self, tag: str) -> None:
+        self._head_implied = self._head_implied or tag in _HEAD_IMPLYING_END_TAGS
+
+    def handle_data(self, data: str) -> None:
+        super().handle_data(data)
+        # Text that is more than whitespace makes the browser insert the head before the first <head>: it is ignored.
+        self._head_implied = self._head_implied or bool(data.strip(_HTML_WHITESPACE))
+
+    def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        self._note_other_element(attributes)
+
+    def handle_other_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        self._note_other_element(attributes)
+
+    def _root_adds_attributes(self, tag: str, has_id: bool) -> bool:
+        """Whether a start tag of html, head or body can give its element an id, as a browser does.
+
+        The first one makes the element. A repeated <html> or <body> only adds the attributes its element lacks, so
+        its id counts only while the element has none; a repeated <head> is ignored altogether, and so is the first
+        <head> once another start tag has implied the head (a <head> in the body, or after a <meta>).
+        """
+        first = tag not in self._root_has_id
+        had_id = self._root_has_id.get(tag, False)
+        self._root_has_id[tag] = had_id or has_id
+        if tag == "head":
+            return first and not self._head_implied
+        return first or not had_id
+
+    def _note_other_element(self, attributes: dict[str, str]) -> None:
+        """An element that is no input: it is the first of its id unless an element of that id came before."""
+        self._head_implied = True  # a script, template, textarea or SVG/MathML element: no <html>/<head> tag
+        element_id = attributes.get("id", "")
+        if element_id in EXTENSION_INPUTS:
+            self._seen.add(element_id)
+
+
+def parse_extension_form(ext_id: int, html: str) -> ExtensionInfo:
+    """The ExtensionInfo of the edit form html of extension ext_id (see extension.extension_from_inputs)."""
+    parser = _ExtensionFormParser()
+    parser.feed(html)
+    parser.close()
+    return extension_from_inputs(ext_id, parser.inputs)
 
 
 async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
@@ -3383,6 +3558,7 @@ class _ProtocolSelectParser(_FormParser):
             self._group = None
 
     def handle_data(self, data: str) -> None:
+        super().handle_data(data)
         # The text of a <title> in an option is part of its text; the content of a <script> or <template> is not.
         if self._text is not None and not self._hidden:
             self._text.write(data)
