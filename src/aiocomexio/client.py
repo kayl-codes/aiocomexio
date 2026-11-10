@@ -56,6 +56,7 @@ from .exceptions import (
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
+from .extension import EXTENSION_INPUTS, ExtensionInfo, extension_from_inputs, require_ext_id
 from .function_plan.payload import build_run_payload, normalize_plan_payload, plan_payload_missing_collections
 from .onewire import (
     _ANY_TYPE_COUNTER,
@@ -122,6 +123,7 @@ _IDENTITY_ENCODING = "identity"
 _EXTENSION_COUNTER_ID_PREFIX = "number_of_"
 _EXTENSION_COUNTER_CLASS_RE = re.compile(rf"{_ANY_TYPE_COUNTER}\d+(?:_\d+)*", re.ASCII)
 _EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
+_EXTENSION_EDIT_PATH = "/admin/extension/edit/"
 _SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
 _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
 _API_PATH = "/api/"
@@ -1035,6 +1037,27 @@ class ComexioClient:
         """
         html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what=_IO_HOME_PAGE)
         return parse_doorstations(html)
+
+    async def get_extension(self, ext_id: int) -> ExtensionInfo:
+        """The settings of one extension (name, serial, type, IP address), read from its edit form.
+
+        One small request (about 2 KB) to /admin/extension/edit/ with json_return=true, which makes Comexio answer
+        with the HTML of the form (not JSON); see parse_extension_form. For a Doorstation the IP address is the one
+        its camera stream is served under (ExtensionInfo.ip). That is None for `local` but also for a host name, an
+        IPv6 address or a malformed one; ExtensionInfo.location keeps the raw field to tell them apart. ext_id must
+        be a positive int (not a bool): anything else raises TypeError or ValueError before a request. An id Comexio
+        does not know, a form
+        without an IP address field and a page that nests more than 256 elements raise ComexioDataError, the
+        login form ComexioAuthenticationError.
+        """
+        ext_id = require_ext_id(ext_id)
+        html = await self._request_admin_text(
+            "GET",
+            _EXTENSION_EDIT_PATH,
+            what=f"Extension {ext_id} edit form",
+            params={"id": str(ext_id), "json_return": "true"},
+        )
+        return parse_extension_form(ext_id, html)
 
     def doorstation_stream_url(self, camera_id: int) -> str:
         """URL of the MJPEG stream of a Doorstation camera on the IO-Server (Doorstation.camera_id)."""
@@ -3207,6 +3230,31 @@ def parse_doorstations(io_home_html: str) -> dict[int, Doorstation]:
     if not parser.saw_extension_counter and not names_a_camera:
         raise ComexioDataError("IO home page has no extension counters, the Doorstations are unknown")
     return doorstations_from_attributes(dict(element) for element in parser.elements)
+
+
+class _ExtensionFormParser(_FormParser):
+    """The value of each input of the extension edit form the client reads (EXTENSION_INPUTS), read as a browser does.
+
+    The first input of an id counts and the id is compared exactly, as getElementById finds it. inputs maps the id to
+    the value, or None if the input has no value attribute; an input the form lacks has no key. The login rows of the
+    form are not among the ids, so no password field is ever kept.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.inputs: dict[str, str | None] = {}
+
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        if tag == "input" and (input_id := attributes.get("id", "")) in EXTENSION_INPUTS:
+            self.inputs.setdefault(input_id, attributes.get("value"))
+
+
+def parse_extension_form(ext_id: int, html: str) -> ExtensionInfo:
+    """The ExtensionInfo of the edit form html of extension ext_id (see extension.extension_from_inputs)."""
+    parser = _ExtensionFormParser()
+    parser.feed(html)
+    parser.close()
+    return extension_from_inputs(ext_id, parser.inputs)
 
 
 async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
