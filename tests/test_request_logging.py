@@ -3,13 +3,21 @@
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import aiohttp
 import pytest
 from aiohttp import web
 
-from aiocomexio import ComexioClient, ComexioConnectionError, connection_trace_config, session_kwargs
+from aiocomexio import (
+    ComexioClient,
+    ComexioConnectionError,
+    ComexioResponseError,
+    connection_trace_config,
+    session_kwargs,
+)
 from aiocomexio import client as client_module
 from aiocomexio.session import CONNECTION_KEY, CONNECTION_NEW, CONNECTION_REUSED
 from tests.fake_comexio import PASSWORD, USERNAME, FakeComexio
@@ -120,6 +128,24 @@ async def test_a_session_without_the_connection_note_says_unknown(
             await client.set_marker_value(5, 0)
 
     (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    # A failure may have happened before the connector was reached: no hint about the trace then.
+    assert "connection unknown," in line
+    assert "no connection trace" not in line
+
+
+async def test_an_answered_request_without_the_connection_note_points_at_the_missing_trace(
+    comexio: FakeComexio, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    comexio.serve_text("GET", API_PATH, "1")
+    monkeypatch.setattr(client_module, "_IDLE_LOG_MIN_SEC", 0.0)
+    async with aiohttp.ClientSession() as bare_session:
+        client = ComexioClient(comexio.host, USERNAME, PASSWORD, session=bare_session, api_username="api")
+        await client.set_marker_value(5, 1)
+
+        with caplog.at_level(logging.DEBUG, logger=LOGGER):
+            await client.set_marker_value(5, 0)
+
+    (line,) = (r.getMessage() for r in caplog.records if "answered after" in r.getMessage())
     assert "connection unknown (no connection trace on the session?)," in line
 
 
@@ -141,7 +167,7 @@ async def test_the_connection_note_fills_the_context_dict_and_ignores_other_cont
 
     assert first == {CONNECTION_KEY: [CONNECTION_NEW]}
     assert second == {CONNECTION_KEY: [CONNECTION_REUSED]}
-    assert vars(other) == {}
+    assert not vars(other)
 
 
 def test_the_connection_trace_config_hooks_both_signals() -> None:
@@ -204,12 +230,13 @@ async def test_a_cancelled_request_is_no_answer(
     await api_client.set_marker_value(5, 1)
     answered_at = api_client._last_response_at
     assert answered_at is not None
-    task, _release = await _hold_request(api_client, comexio)
+    task, release = await _hold_request(api_client, comexio)
 
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+    release.set()
 
     assert api_client._last_response_at == answered_at
     (line,) = (r.getMessage() for r in caplog.records if "Slow page: failed after" in r.getMessage())
@@ -294,3 +321,67 @@ async def test_a_failing_debug_line_never_replaces_the_requests_own_exception(
         await api_client.set_marker_value(5, 0)
 
     assert "Request diagnostics for Writing marker M5 failed" in caplog.text
+
+
+async def test_a_failing_debug_line_does_not_replace_a_successful_answer(
+    api_client: ComexioClient,
+    comexio: FakeComexio,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*_args: object) -> None:
+        raise RuntimeError("the line itself broke")
+
+    monkeypatch.setattr(api_client, "_log_request", broken)
+    comexio.serve_text("GET", API_PATH, "1")
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        await api_client.set_marker_value(5, 1)
+
+    (record,) = (r for r in caplog.records if "Request diagnostics" in r.getMessage())
+    assert record.exc_info is not None
+
+
+async def test_the_wait_at_the_login_gate_is_not_idle_time(
+    api_client: ComexioClient,
+    comexio: FakeComexio,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Another request answers while this one waits for its slot: the client was not idle then.
+    real_request = api_client._gate.request
+
+    @asynccontextmanager
+    async def slot_after_another_answer() -> AsyncIterator[object]:
+        await asyncio.sleep(0.05)
+        api_client._last_response_at = time.monotonic()
+        async with real_request() as slot:
+            yield slot
+
+    monkeypatch.setattr(api_client._gate, "request", slot_after_another_answer)
+    api_client._last_response_at = time.monotonic() - 30
+    comexio.serve("GET", API_PATH, _close_connection)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
+        await api_client.set_marker_value(5, 0)
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    assert "idle 0.0 s before it" in line
+    assert "failed after 0.0" in line
+
+
+async def test_a_status_error_names_its_class_and_not_the_page(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def server_error(_request: web.Request) -> web.StreamResponse:
+        return web.Response(status=500, text="PAGE-EXCERPT-NOT-FOR-THE-LOG")
+
+    comexio.serve("GET", API_PATH, server_error)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioResponseError):
+        await api_client.set_marker_value(5, 0)
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    assert line.endswith(": ComexioResponseError")
+    assert "PAGE-EXCERPT" not in line
+    assert "no connection trace" not in line

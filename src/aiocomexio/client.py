@@ -129,8 +129,10 @@ _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
 _API_PATH = "/api/"
 # A request that comes after at least this long without any answer gets a debug line even if it succeeds.
 _IDLE_LOG_MIN_SEC = 5.0
-# Where _follow_redirects leaves the moment its request got a slot at the login gate (next to CONNECTION_KEY).
+# Where _follow_redirects leaves the moment its request got a slot at the login gate, and the time of the last
+# answer as it stood then (next to CONNECTION_KEY): what the request itself waited for is not "idle".
 _STARTED_KEY = "started"
+_PREVIOUS_RESPONSE_KEY = "previous_response_at"
 _WEBIO_HOME_PATH = "/admin/web_io/home"
 _WEBIO_ADD_PATH = "/admin/web_io/add"
 _WEBIO_BASE_WINDOW_PATH = "/admin/web_io/baseDeviceWindow/"
@@ -2260,11 +2262,14 @@ class ComexioClient:
     ) -> AsyncIterator[aiohttp.ClientResponse]:
         """The response to one request (see _follow_redirects), with a debug line when it fails or comes after a pause.
 
-        The line says how long the client had been idle, on which connection the request was tried last (a reused
-        one, a new one; two entries mean aiohttp tried again itself) and how many other requests were in flight: what
-        tells a kept-alive connection the server closed from a server that refuses a request (#289). The time counts
-        from the moment the request got its slot at the login gate. It costs nothing unless the aiocomexio logger is
-        at DEBUG, and a failure of the line itself never replaces the request's own result.
+        The line says how long the client had been idle, on which connections the request was tried (a reused one,
+        a new one; two entries mean aiohttp tried again itself) and how many other requests were in flight: what
+        tells a kept-alive connection the server closed from a server that refuses a request (#289). Idle time and
+        duration both count from the moment the request got its slot at the login gate. "failed" is any exception
+        out of the request or the caller's block (a status or data error too; the line names its class, and the
+        message only for a transport error). It costs nothing unless the aiocomexio logger is at DEBUG, and a failure
+        of the line itself never replaces the request's own result. A request that bypasses this method
+        (_request_redirect) is not noted, and does not move the time of the last answer.
         """
         previous_response_at = self._last_response_at
         started = time.monotonic()
@@ -2279,7 +2284,15 @@ class ComexioClient:
             failure = err
             raise
         finally:
-            self._log_request_safely(what, notes.get(_STARTED_KEY, started), previous_response_at, notes, failure)
+            self._log_request_safely(
+                what,
+                notes.get(_STARTED_KEY, started),
+                notes.get(_PREVIOUS_RESPONSE_KEY, previous_response_at),
+                notes,
+                failure,
+            )
+            # The traceback of the error holds this frame: drop the reference so the two do not keep each other.
+            failure = None
 
     def _log_request_safely(
         self,
@@ -2315,11 +2328,11 @@ class ComexioClient:
             "failed" if error else "answered",
             time.monotonic() - started,
             "n/a (first request)" if idle is None else f"{idle:.1f} s",
-            " → ".join(tried) or "unknown (no connection trace on the session?)",
+            " → ".join(tried) or ("unknown" if error else "unknown (no connection trace on the session?)"),
             " (aiohttp tried again)" if len(tried) > 1 else "",
             # This request has left the login gate by now, so the count is the others only.
             self._gate.requests_in_flight,
-            f": {error!r}" if error else "",
+            "" if error is None else f": {_diagnostic_error_text(error)}",
         )
 
     @asynccontextmanager
@@ -2337,6 +2350,7 @@ class ComexioClient:
         kwargs = _unencoded(kwargs)
         async with self._gate.request():
             connection[_STARTED_KEY] = time.monotonic()
+            connection[_PREVIOUS_RESPONSE_KEY] = self._last_response_at
             url = f"{self._base_url}{path}"
             for _ in range(_MAX_REDIRECTS + 1):
                 # The connections of the hop being sent: a followed redirect is no second try of aiohttp.
@@ -3962,6 +3976,11 @@ def _text_encoding(resp: aiohttp.ClientResponse) -> str:
             if name not in _NOT_A_CHARSET:
                 return name
     return _UTF8
+
+
+def _diagnostic_error_text(error: BaseException) -> str:
+    """A transport error in full; any other (a status or data error carries a page excerpt or the URL) by class."""
+    return repr(error) if isinstance(error, (aiohttp.ClientError, TimeoutError)) else type(error).__name__
 
 
 async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str = "strict") -> str:
