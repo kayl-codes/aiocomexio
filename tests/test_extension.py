@@ -358,6 +358,48 @@ def test_a_repeated_root_tag_that_adds_no_id_to_its_element_is_no_element_of_it(
     assert parse_extension_form(14, html).location == "192.168.0.50"
 
 
+@pytest.mark.parametrize(
+    "root",
+    [
+        "<body><head id='extension_location'>",
+        "<body id='root'><head id='extension_location'>",
+        "<html><body><head id='extension_location'>",
+        "<div><head id='extension_location'>",
+        "<meta><head id='extension_location'>",
+        "<html><meta><head id='extension_location'>",
+        "<title>t</title><head id='extension_location'>",
+        "<script></script><head id='extension_location'>",
+        "<svg></svg><head id='extension_location'>",
+        "</head><head id='extension_location'>",
+        "</body><head id='extension_location'>",
+        "</html><head id='extension_location'>",
+        "</br><head id='extension_location'>",
+    ],
+)
+def test_a_head_tag_after_another_start_tag_is_no_element_of_its_id(root: str) -> None:
+    # A start tag but html/head, or an end tag of html/head/body/br, implies the head: a later <head> is ignored.
+    html = f"{root}{_form(location='192.168.0.50')}"
+
+    assert parse_extension_form(14, html).location == "192.168.0.50"
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        "<html><head id='extension_location'>",
+        "<!-- note --><head id='extension_location'>",
+        " <html> <head id='extension_location'>",
+    ],
+)
+def test_a_head_tag_before_any_other_start_tag_is_an_element_of_its_id(root: str) -> None:
+    html = f"{root}{_form(location='192.168.0.50')}"
+
+    with pytest.raises(ComexioDataError) as no_address:
+        parse_extension_form(14, html)
+
+    assert str(no_address.value) == NO_ADDRESS_MESSAGE
+
+
 def test_a_root_tag_with_the_type_id_hides_a_later_type_input_only() -> None:
     html = f"<html><html id='extension_type_id'>{_form(location='192.168.0.50', type_id='16')}"
 

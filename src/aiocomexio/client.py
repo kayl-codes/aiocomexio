@@ -312,6 +312,10 @@ _TABLE_SCOPE_BOUNDARIES = frozenset({"html", _TABLE, _TEMPLATE})
 _IGNORED_IN_BODY = frozenset({"body", "frame", "frameset", "head", "html"})
 # The root elements of a page: a repeated start tag of one makes no new element (see _ExtensionFormParser).
 _ROOT_TAGS = frozenset({"html", "head", "body"})
+# The only start tags a page can open with before its <head>: any other one implies the head (and later the body).
+_BEFORE_HEAD_TAGS = frozenset({"html", "head"})
+# The end tags that imply the head too when they come before it (the "anything else" case of the before-head mode).
+_HEAD_IMPLYING_END_TAGS = frozenset({"html", "head", "body", "br"})
 # The start tags of a frameset page: a browser ignores them in the body of any other page.
 _IGNORED_FRAMES = frozenset({"frame", "frameset"})
 # A <colgroup> holds only <col>s: anything else closes it, so its end tag never closes what follows it.
@@ -3281,16 +3285,20 @@ class _ExtensionFormParser(_FormParser):
         self.inputs: dict[str, str | None] = {}
         self._seen: set[str] = set()
         self._root_has_id: dict[str, bool] = {}  # each of html/head/body seen so far: does its element carry an id
+        self._head_implied = False  # a start tag other than html/head came: the head exists, a <head> tag is ignored
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         element_id = attributes.get("id", "")
-        if tag in _ROOT_TAGS and not self._root_adds_attributes(tag, "id" in attributes):
-            return
-        if self._start_ignored or element_id not in EXTENSION_INPUTS or element_id in self._seen:
+        counts = tag not in _ROOT_TAGS or self._root_adds_attributes(tag, "id" in attributes)
+        self._head_implied = self._head_implied or tag not in _BEFORE_HEAD_TAGS
+        if not counts or self._start_ignored or element_id not in EXTENSION_INPUTS or element_id in self._seen:
             return
         self._seen.add(element_id)
         if tag == "input":
             self.inputs[element_id] = attributes.get("value")
+
+    def handle_form_endtag(self, tag: str) -> None:
+        self._head_implied = self._head_implied or tag in _HEAD_IMPLYING_END_TAGS
 
     def handle_text_only_tag(self, tag: str, attributes: dict[str, str]) -> None:
         self._note_other_element(attributes)
@@ -3302,15 +3310,19 @@ class _ExtensionFormParser(_FormParser):
         """Whether a start tag of html, head or body can give its element an id, as a browser does.
 
         The first one makes the element. A repeated <html> or <body> only adds the attributes its element lacks, so
-        its id counts only while the element has none; a repeated <head> is ignored altogether.
+        its id counts only while the element has none; a repeated <head> is ignored altogether, and so is the first
+        <head> once another start tag has implied the head (a <head> in the body, or after a <meta>).
         """
         first = tag not in self._root_has_id
         had_id = self._root_has_id.get(tag, False)
         self._root_has_id[tag] = had_id or has_id
-        return first or (tag != "head" and not had_id)
+        if tag == "head":
+            return first and not self._head_implied
+        return first or not had_id
 
     def _note_other_element(self, attributes: dict[str, str]) -> None:
         """An element that is no input: it is the first of its id unless an element of that id came before."""
+        self._head_implied = True  # a script, template, textarea or SVG/MathML element: no <html>/<head> tag
         element_id = attributes.get("id", "")
         if element_id in EXTENSION_INPUTS:
             self._seen.add(element_id)
