@@ -29,7 +29,9 @@ EXTENSION_INPUTS = (NAME_INPUT, SERIAL_INPUT, LOCATION_INPUT, TYPE_ID_INPUT)
 # its tab on the IO home page.
 DOORSTATION_TYPE_ID = 16
 
-_BROADCAST = ipaddress.IPv4Address("255.255.255.255")
+# 0.0.0.0/8, "this network": 0.0.0.0 and every address below it name no host. ipaddress.is_reserved covers 240.0.0.0/4,
+# the broadcast address 255.255.255.255 included.
+_THIS_NETWORK = ipaddress.IPv4Network("0.0.0.0/8")
 
 # How much of an unusable type id an error message quotes.
 _EXCERPT_LIMIT = 40
@@ -68,8 +70,9 @@ def extension_ip(location: str | None) -> str | None:
 
     Surrounding whitespace is ignored. `local`, an empty value, a host name, an IPv6 address, a malformed address
     (a missing octet, an octet above 255, one with a leading zero, non-ASCII digits) and an address no device can
-    have (0.0.0.0, loopback, multicast, the broadcast address) give None: None means "no usable IPv4 address", so a
-    caller that must tell `local` from a typo reads ExtensionInfo.location, which keeps the raw value.
+    have (0.0.0.0/8, loopback, multicast, the reserved 240.0.0.0/4 with the broadcast address) give None: None means
+    "no usable IPv4 address", so a caller that must tell `local` from a typo reads ExtensionInfo.location, which
+    keeps the raw value.
     """
     if location is None:
         return None
@@ -77,7 +80,7 @@ def extension_ip(location: str | None) -> str | None:
         address = ipaddress.IPv4Address(location.strip())
     except ValueError:
         return None
-    if address.is_unspecified or address.is_loopback or address.is_multicast or address == _BROADCAST:
+    if address in _THIS_NETWORK or address.is_loopback or address.is_multicast or address.is_reserved:
         return None
     return str(address)
 

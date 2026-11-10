@@ -231,9 +231,20 @@ def test_a_page_that_nests_too_deeply_is_refused() -> None:
         ("  192.168.0.50\n", "192.168.0.50"),
         ("10.0.0.1", "10.0.0.1"),
         ("0.0.0.0", None),
+        ("0.0.0.1", None),
+        ("0.128.0.0", None),
+        ("0.255.255.255", None),
+        ("1.0.0.0", "1.0.0.0"),
         ("127.0.0.1", None),
+        ("223.255.255.255", "223.255.255.255"),
+        ("224.0.0.0", None),
         ("224.0.0.1", None),
+        ("239.255.255.255", None),
+        ("240.0.0.0", None),
+        ("240.0.0.1", None),
+        ("255.255.255.254", None),
         ("255.255.255.255", None),
+        ("169.254.1.1", "169.254.1.1"),
         ("local", None),
         ("LOCAL", None),
         ("", None),
@@ -254,6 +265,14 @@ def test_a_page_that_nests_too_deeply_is_refused() -> None:
 )
 def test_only_an_ipv4_address_is_an_ip(location: str | None, ip: str | None) -> None:
     assert extension_ip(location) == ip
+
+
+@pytest.mark.parametrize("location", ["0.0.0.1", "239.255.255.255", "240.0.0.1", "local"])
+def test_an_unusable_address_leaves_the_raw_location_on_the_extension(location: str) -> None:
+    info = extension_from_inputs(7, {"extension_type_id": "16", "extension_location": location})
+
+    assert info.ip is None
+    assert info.location == location
 
 
 # --- the client ----------------------------------------------------------------------------------------------------
