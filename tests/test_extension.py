@@ -183,6 +183,39 @@ def test_a_first_input_without_a_value_is_not_replaced_by_a_later_one() -> None:
     assert info.location is None
 
 
+@pytest.mark.parametrize("tag", ["div", "span", "label"])
+def test_a_first_element_of_an_id_that_is_no_input_hides_a_later_input(tag: str) -> None:
+    # getElementById finds the <tag>, so the input after it is not the element of that id: the field is missing.
+    # The <tag> carries a value too: a parser that took the value of any first element would read 192.168.0.50 / 16.
+    shadowed_address = f'<{tag} id="extension_location" value="192.168.0.50"></{tag}>' + _form(location="10.0.0.9")
+    shadowed_type = f'<{tag} id="extension_type_id" value="16"></{tag}>' + _form(type_id="16")
+
+    with pytest.raises(ComexioDataError) as no_address:
+        parse_extension_form(14, shadowed_address)
+    with pytest.raises(ComexioDataError) as no_type:
+        parse_extension_form(99, shadowed_type)
+
+    assert str(no_address.value) == NO_ADDRESS_MESSAGE
+    assert str(no_type.value) == NEW_EXTENSION_MESSAGE
+
+
+@pytest.mark.parametrize("field", ["name", "serial"])
+def test_a_first_element_of_the_name_or_serial_id_that_is_no_input_hides_a_later_input(field: str) -> None:
+    shadowed = f'<div id="extension_{field}" value="Alt"></div><input id="extension_{field}" value="Neu">'
+    base = '<input type="hidden" id="extension_type_id" value="16"><input id="extension_location">'
+    html = f"<form>{base}{shadowed}</form>"
+
+    info = parse_extension_form(14, html)
+
+    assert getattr(info, field) is None
+
+
+def test_a_later_element_of_an_id_does_not_replace_the_input_before_it() -> None:
+    form = _form(location="192.168.0.50", extra='<div id="extension_location" value="10.0.0.9"></div>')
+
+    assert parse_extension_form(14, form).location == "192.168.0.50"
+
+
 @pytest.mark.parametrize("wrapper", ["textarea", "template", "script"])
 def test_an_input_inside_text_or_a_template_is_no_field(wrapper: str) -> None:
     hidden = f'<{wrapper}><input id="extension_location" value="10.0.0.9"></{wrapper}>'

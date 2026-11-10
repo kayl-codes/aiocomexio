@@ -3235,7 +3235,10 @@ def parse_doorstations(io_home_html: str) -> dict[int, Doorstation]:
 class _ExtensionFormParser(_FormParser):
     """The value of each input of the extension edit form the client reads (EXTENSION_INPUTS), read as a browser does.
 
-    The first input of an id counts and the id is compared exactly, as getElementById finds it. inputs maps the id to
+    The first HTML element of an id counts, whatever its tag, and the id is compared exactly, as getElementById finds
+    it: if that element is no input, the id has no input at all and a later input of it is not read. Elements the
+    base parser does not report (inside a <script>, <template> or <textarea>, or SVG/MathML) are no fields and do
+    not count. inputs maps the id to
     the value, or None if the input has no value attribute; an input the form lacks has no key. The login rows of the
     form are not among the ids, so no password field is ever kept.
     """
@@ -3243,10 +3246,15 @@ class _ExtensionFormParser(_FormParser):
     def __init__(self) -> None:
         super().__init__()
         self.inputs: dict[str, str | None] = {}
+        self._seen: set[str] = set()
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        if tag == "input" and (input_id := attributes.get("id", "")) in EXTENSION_INPUTS:
-            self.inputs.setdefault(input_id, attributes.get("value"))
+        element_id = attributes.get("id", "")
+        if element_id not in EXTENSION_INPUTS or element_id in self._seen:
+            return
+        self._seen.add(element_id)
+        if tag == "input":
+            self.inputs[element_id] = attributes.get("value")
 
 
 def parse_extension_form(ext_id: int, html: str) -> ExtensionInfo:
