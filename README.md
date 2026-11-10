@@ -13,7 +13,7 @@ provide the communication layer of the
 > lifecycle (including the command protocol, HTTP or HTTPS), marker / KNX object management and
 > function plan editing — plans, elements, wires, block instance settings, scene blocks and
 > Quantum modules with their configs, run / stop, 1-Wire sensors, Doorstation detection with a
-> camera snapshot
+> camera snapshot, the settings of an extension (its IP address)
 > (`ComexioClient`), admin page scraping (`aiocomexio.scrape`), config parsing
 > (`aiocomexio.config`, including Quickbus devices such as Multitouch panels and their IOs), KNX
 > DPT tables (`aiocomexio.knx`), Web-IO command builders (`aiocomexio.webio`, with separate
