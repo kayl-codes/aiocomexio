@@ -31,6 +31,9 @@ DOORSTATION_TYPE_ID = 16
 
 _BROADCAST = ipaddress.IPv4Address("255.255.255.255")
 
+# How much of an unusable type id an error message quotes.
+_EXCERPT_LIMIT = 40
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ExtensionInfo:
@@ -98,7 +101,7 @@ def extension_from_inputs(ext_id: int, inputs: Mapping[str, str | None]) -> Exte
     raw_type_id = inputs.get(TYPE_ID_INPUT)
     type_id = _positive_id(raw_type_id)
     if type_id is None:
-        found = "none" if raw_type_id is None else repr(raw_type_id)
+        found = "none" if raw_type_id is None else _excerpt(raw_type_id)
         raise ComexioDataError(
             f"Extension {ext_id} edit form names no extension type (found {found}): unknown id or changed page"
         )
@@ -111,6 +114,13 @@ def extension_from_inputs(ext_id: int, inputs: Mapping[str, str | None]) -> Exte
         serial=_text_or_none(inputs.get(SERIAL_INPUT)),
         location=inputs[LOCATION_INPUT],
     )
+
+
+def _excerpt(value: str) -> str:
+    """repr of value, cut to _EXCERPT_LIMIT characters (with the full length) so a huge field cannot fill an error."""
+    if len(value) <= _EXCERPT_LIMIT:
+        return repr(value)
+    return f"{value[:_EXCERPT_LIMIT]!r}... ({len(value)} characters)"
 
 
 def _text_or_none(value: str | None) -> str | None:

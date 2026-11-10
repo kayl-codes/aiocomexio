@@ -100,6 +100,20 @@ def test_a_type_id_that_is_no_positive_int_is_no_extension_and_the_message_shows
     )
 
 
+@pytest.mark.parametrize("length", [40, 41, 2_000_000])
+def test_the_message_quotes_at_most_the_start_of_a_long_type_id(length: int) -> None:
+    html = _form(type_id="x" * length)
+
+    with pytest.raises(ComexioDataError) as info:
+        parse_extension_form(99, html)
+
+    shown = "'" + "x" * 40 + "'"
+    suffix = "" if length == 40 else f"... ({length} characters)"
+    assert str(info.value) == (
+        f"Extension 99 edit form names no extension type (found {shown}{suffix}): unknown id or changed page"
+    )
+
+
 def test_a_form_without_a_type_id_input_is_an_unknown_id() -> None:
     html = _form(type_id=None)
 
