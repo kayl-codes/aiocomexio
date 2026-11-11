@@ -129,7 +129,8 @@ async def test_a_quick_successful_request_logs_nothing(
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         await api_client.set_marker_value(5, 0)
 
-    assert not [r for r in caplog.records if r.name == LOGGER and "after" in r.getMessage()]
+    # Only the client's own line about the value it read: any diagnostic line, whatever its wording, would be a second.
+    assert [r.getMessage() for r in caplog.records if r.name == LOGGER] == ["Writing marker M5: '1'"]
 
 
 async def test_a_failure_logs_nothing_above_debug_level(
@@ -308,30 +309,39 @@ async def test_the_answer_time_is_set_by_an_answer_and_not_by_a_failure(
     assert _answered_at(api_client) == answered_at
 
 
-@pytest.mark.parametrize(("idle_sec", "logged"), [(_IDLE_LOG_MIN_SEC + 2, True), (_IDLE_LOG_MIN_SEC - 1, False)])
 async def test_the_idle_time_is_the_time_since_the_last_answer(
-    api_client: ComexioClient,
-    comexio: FakeComexio,
-    caplog: pytest.LogCaptureFixture,
-    idle_sec: float,
-    logged: bool,
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
 ) -> None:
+    idle_sec = _IDLE_LOG_MIN_SEC + 2
     comexio.serve_text("GET", API_PATH, "1")
     await api_client.set_marker_value(5, 1)
-    api_client._last_response_at = time.monotonic() - idle_sec
+    stamped_at = time.monotonic()
+    api_client._last_response_at = stamped_at - idle_sec
 
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         await api_client.set_marker_value(5, 0)
+    elapsed = time.monotonic() - stamped_at
 
-    lines = [r.getMessage() for r in caplog.records if "answered after" in r.getMessage()]
-    assert bool(lines) is logged
-    if logged:
-        match = _expected_line("Writing marker M5", "answered", idle=r"(\d+\.\d) s", connection="reused").fullmatch(
-            lines[0]
-        )
-        assert match is not None
-        # A slow runner only adds time between setting the stamp and the request: the value is never below idle_sec.
-        assert idle_sec <= float(match[1]) < idle_sec + 30
+    (line,) = (r.getMessage() for r in caplog.records if "answered after" in r.getMessage())
+    match = _expected_line("Writing marker M5", "answered", idle=r"(\d+\.\d) s", connection="reused").fullmatch(line)
+    assert match is not None
+    # The idle time grows by what passed between the stamp and the request, at most by the time the test measured
+    # (the line shows one decimal, hence the 0.05).
+    assert idle_sec <= float(match[1]) <= idle_sec + elapsed + 0.05
+
+
+@pytest.mark.parametrize(
+    ("idle_sec", "logged"),
+    [(_IDLE_LOG_MIN_SEC + 0.5, True), (_IDLE_LOG_MIN_SEC, True), (_IDLE_LOG_MIN_SEC - 0.5, False)],
+)
+async def test_an_answered_request_is_logged_from_the_idle_threshold_on(
+    api_client: ComexioClient, caplog: pytest.LogCaptureFixture, idle_sec: float, logged: bool
+) -> None:
+    started = 1000.0  # fixed: the idle time is `started` minus the last answer, so no clock and no rounding is in it
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        api_client._log_request("Page", started, started - idle_sec, {CONNECTION_KEY: [CONNECTION_REUSED]}, None)
+
+    assert bool([r for r in caplog.records if r.name == LOGGER]) is logged
 
 
 async def test_a_followed_redirect_is_not_a_second_try_of_aiohttp(
@@ -554,6 +564,7 @@ async def test_the_line_reports_duration_and_idle_time_from_the_clock(
     started = time.monotonic() - 2.0
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         api_client._log_request("Page", started, started - 30.0, {CONNECTION_KEY: [CONNECTION_REUSED]}, None)
+    ceiling = time.monotonic() - started  # the line cannot show more than the time the test measured
 
     (line,) = (r.getMessage() for r in caplog.records if "answered after" in r.getMessage())
     match = re.fullmatch(
@@ -563,7 +574,7 @@ async def test_the_line_reports_duration_and_idle_time_from_the_clock(
     )
     assert match is not None
     # The runner may be slow, never fast: the duration counts from `started`.
-    assert 2.0 <= float(match[1]) < 30.0
+    assert 2.0 <= float(match[1]) <= ceiling + 0.001  # the line is rounded to milliseconds
 
 
 @pytest.mark.parametrize("extra", [-1, 0, 1])
