@@ -2287,11 +2287,21 @@ class ComexioClient:
             failure = err
             raise
         finally:
+            # First, and outside the guard below: the line reads the previous answer time from notes, not from here.
+            self._note_status_answer(failure)
             # No slot at the login gate, nothing sent: a request cancelled in the queue has no line.
             if _STARTED_KEY in notes:
                 self._log_request_safely(what, notes[_STARTED_KEY], notes.get(_PREVIOUS_RESPONSE_KEY), notes, failure)
             # The traceback of the error holds this frame: drop the reference so the two do not keep each other.
             failure = None
+
+    def _note_status_answer(self, error: BaseException | None) -> None:
+        """Move the time of the last answer for a ClientResponseError: a session with raise_for_status raises it while
+        the request is entered (or later, then the time moves to the end), so the server answered although no response
+        came back. A proxy's refusal is not an
+        answer of the server."""
+        if isinstance(error, aiohttp.ClientResponseError) and not isinstance(error, aiohttp.ClientHttpProxyError):
+            self._last_response_at = time.monotonic()
 
     def _log_request_safely(
         self,
@@ -2305,7 +2315,9 @@ class ComexioClient:
             self._log_request(what, started, previous_response_at, notes, error)
         # A diagnostic line must never replace the request's own exception.
         except Exception:
-            _LOGGER.debug("Request diagnostics for %s failed", what, exc_info=True)
+            # A logging handler that raises on the line may raise on this record too.
+            with suppress(Exception):
+                _LOGGER.debug("Request diagnostics for %s failed", what, exc_info=True)
 
     def _log_request(
         self,
@@ -2435,6 +2447,7 @@ class ComexioClient:
                     else _error_page_text(resp, what)
                 )
         except (aiohttp.ClientError, TimeoutError) as err:
+            self._note_status_answer(err)
             raise self._transport_error(what, err) from err
         if _LOGIN_FORM_SUBMIT_MARKER in body:
             raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")

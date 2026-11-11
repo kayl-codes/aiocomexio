@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -366,7 +366,45 @@ async def test_a_failing_debug_line_never_replaces_the_requests_own_exception(
     with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
         await api_client.set_marker_value(5, 0)
 
-    assert "Request diagnostics for Writing marker M5 failed" in caplog.text
+    (message,) = (r.getMessage() for r in caplog.records if "Request diagnostics" in r.getMessage())
+    assert message == "Request diagnostics for Writing marker M5 failed"
+
+
+class _RaisingLogger:
+    """A logger whose handlers raise on every record of the request diagnostics (the line and its fallback)."""
+
+    def __init__(self) -> None:
+        self.attempted: list[str] = []
+
+    def isEnabledFor(self, _level: int) -> bool:
+        return True
+
+    def __getattr__(self, _name: str) -> Callable[..., None]:
+        return lambda *_args, **_kwargs: None  # info, warning, ...: nothing to raise
+
+    def debug(self, message: str, *_args: object, **_kwargs: object) -> None:
+        # Other debug records of the client (the answer's body) are not the diagnostics.
+        if " after " in message or message.startswith("Request diagnostics"):
+            self.attempted.append(message)
+            raise RuntimeError("the handler broke")
+
+
+async def test_a_logger_that_raises_on_both_records_changes_no_result(
+    api_client: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logger = _RaisingLogger()
+    monkeypatch.setattr(client_module, "_LOGGER", logger)
+    comexio.serve("GET", API_PATH, _close_connection)
+    with pytest.raises(ComexioConnectionError):
+        await api_client.set_marker_value(5, 0)
+    # The line and then its fallback were tried, and both raised.
+    assert [m.split(" ")[0] for m in logger.attempted] == ["%s:", "Request"]
+
+    # A successful answer after a pause is logged too: its line and the fallback were tried.
+    comexio.serve_text("GET", API_PATH, "1")
+    api_client._last_response_at = time.monotonic() - 10.0
+    await api_client.set_marker_value(5, 1)
+    assert len(logger.attempted) == 4
 
 
 async def test_a_failing_debug_line_does_not_replace_a_successful_answer(
@@ -454,8 +492,74 @@ async def test_a_response_error_names_its_class_and_status_and_not_the_url(
             await client.set_marker_value(5, 12345)
 
     (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
-    assert line.endswith(": ClientResponseError (status 500)")
-    assert "12345" not in line
+    assert _expected_line(
+        "Writing marker M5",
+        "failed",
+        idle=re.escape("n/a (first request)"),
+        connection="new",
+        error=re.escape("ClientResponseError (status 500)"),
+    ).fullmatch(line)
+    assert "12345" not in line  # the value an API write carries stays out of the line
+
+
+async def test_an_error_status_the_session_raises_still_moves_the_answer_time(
+    comexio: FakeComexio,
+) -> None:
+    async def server_error(_request: web.Request) -> web.StreamResponse:
+        return web.Response(status=500)
+
+    comexio.serve("GET", API_PATH, server_error)
+    comexio.serve("POST", SLOW_PATH, server_error)
+    async with aiohttp.ClientSession(**session_kwargs(), raise_for_status=True) as strict_session:
+        client = ComexioClient(comexio.host, USERNAME, PASSWORD, session=strict_session, api_username="api")
+
+        with pytest.raises(ComexioConnectionError):
+            await client.set_marker_value(5, 0)
+        assert _answered_at(client) is not None
+
+        # An old value, so the move shows on a coarse clock too.
+        client._last_response_at = 1.0
+        with pytest.raises(ComexioConnectionError):
+            await client._request_redirect("POST", SLOW_PATH, what="Form")
+        assert _answered_at(client) != 1.0
+
+
+async def test_a_form_request_that_fails_below_http_is_no_answer(
+    api_client: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("POST", SLOW_PATH, _close_connection)
+
+    with pytest.raises(ComexioConnectionError):
+        await api_client._request_redirect("POST", SLOW_PATH, what="Form")
+
+    assert _answered_at(api_client) is None
+
+
+async def test_a_proxy_refusal_is_no_answer_of_the_server(api_client: ComexioClient) -> None:
+    info = SimpleNamespace(real_url="http://proxy")
+    api_client._note_status_answer(aiohttp.ClientHttpProxyError(info, (), status=407))  # type: ignore[arg-type]
+    assert _answered_at(api_client) is None
+
+    api_client._note_status_answer(aiohttp.ClientResponseError(info, (), status=500))  # type: ignore[arg-type]
+    assert _answered_at(api_client) is not None
+
+
+async def test_the_line_reports_duration_and_idle_time_from_the_clock(
+    api_client: ComexioClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    started = time.monotonic() - 2.0
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        api_client._log_request("Page", started, started - 30.0, {CONNECTION_KEY: [CONNECTION_REUSED]}, None)
+
+    (line,) = (r.getMessage() for r in caplog.records if "answered after" in r.getMessage())
+    match = re.fullmatch(
+        r"Page: answered after (\d+\.\d{3}) s; idle 30\.0 s before it, connection reused, "
+        r"0 other request\(s\) in flight",
+        line,
+    )
+    assert match is not None
+    # The runner may be slow, never fast: the duration counts from `started`.
+    assert 2.0 <= float(match[1]) < 30.0
 
 
 @pytest.mark.parametrize("extra", [-1, 0, 1])
@@ -471,8 +575,10 @@ async def test_a_transport_error_is_cut_above_the_limit_only(
         api_client._log_request("Page", time.monotonic(), None, {}, error)
 
     (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
-    error_text = line.split(" in flight: ", 1)[1]
-    assert error_text == (repr(error) if extra <= 0 else f"{repr(error)[:limit]}…")
+    shown = repr(error) if extra <= 0 else f"{repr(error)[:limit]}…"
+    assert _expected_line(
+        "Page", "failed", idle=re.escape("n/a (first request)"), connection="unknown", error=re.escape(shown)
+    ).fullmatch(line)
 
 
 async def test_a_request_cancelled_before_its_slot_has_no_line(
@@ -589,5 +695,7 @@ async def test_an_invalid_url_error_is_named_by_class_and_not_by_its_url(
         api_client._log_request("Page", time.monotonic(), None, {}, error)
 
     (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
-    assert line.endswith(" in flight: InvalidURL")
+    assert _expected_line(
+        "Page", "failed", idle=re.escape("n/a (first request)"), connection="unknown", error="InvalidURL"
+    ).fullmatch(line)
     assert "12345" not in line
