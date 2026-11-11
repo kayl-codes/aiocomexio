@@ -30,6 +30,7 @@ from aiocomexio import (
 )
 from aiocomexio import client as client_module
 from aiocomexio.client import _IDLE_LOG_MIN_SEC
+from aiocomexio.config import _MAX_LOGGED_ENTRY
 from aiocomexio.session import CONNECTION_KEY, CONNECTION_NEW, CONNECTION_REUSED
 from tests.fake_comexio import PASSWORD, USERNAME, FakeComexio
 
@@ -158,6 +159,39 @@ async def test_a_failure_logs_nothing_above_debug_level(
         await api_client.set_marker_value(5, 0)
 
     assert not [r for r in caplog.records if r.name == LOGGER]
+
+
+async def test_a_label_with_a_line_break_or_excess_length_stays_one_short_line(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A device id is a string out of Comexio's own list or from the caller: it must not start a second log line.
+    comexio.serve("GET", SLOW_PATH, _close_connection)
+    run = "x" * (_MAX_LOGGED_ENTRY + 1)
+    label = f"Deleting Web-IO device 7\nforged: answered after 0.001 s {run}"
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
+        await api_client._request_text("GET", SLOW_PATH, what=label)
+
+    (line,) = (r.getMessage() for r in caplog.records if " after " in r.getMessage())
+    assert line.startswith("Deleting Web-IO device 7\\nforged: answered after 0.001 s xxx")
+    assert "\n" not in line
+    assert run not in line
+    assert "…: failed after " in line
+
+
+async def test_the_record_of_a_failed_line_carries_the_same_cut_label(
+    api_client: ComexioClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    label = f"Deleting Web-IO device 7\nforged {'x' * (_MAX_LOGGED_ENTRY + 1)}"
+    notes = {client_module._STARTED_KEY: time.monotonic()}  # without the previous answer time: the line fails
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        api_client._log_request_safely(label, notes, aiohttp.ClientError("x"))
+
+    (message,) = (r.getMessage() for r in caplog.records if "Request diagnostics" in r.getMessage())
+    assert message.startswith("Request diagnostics for Deleting Web-IO device 7\\nforged xxx")
+    assert "\n" not in message
+    assert message.endswith("… failed")
 
 
 async def test_a_session_without_the_connection_note_says_unknown(

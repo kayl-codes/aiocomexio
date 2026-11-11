@@ -38,7 +38,7 @@ from aiohttp.client_reqrep import ConnectionKey
 from aiohttp.http_exceptions import HttpProcessingError
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from .config import iter_group
+from .config import iter_group, log_excerpt
 from .doorstation import (
     CAMERA_ID_ATTRIBUTE,
     DOORSTATION_ATTRIBUTES,
@@ -2338,7 +2338,7 @@ class ComexioClient:
             line_error.__context__ = None
             # A logging handler that raises on the line may raise on this record too.
             with suppress(Exception):
-                _LOGGER.debug("Request diagnostics for %s failed", what, exc_info=line_error)
+                _LOGGER.debug("Request diagnostics for %s failed", _diagnostic_label(what), exc_info=line_error)
 
     def _log_request(
         self,
@@ -2357,7 +2357,7 @@ class ComexioClient:
         tried = notes.get(CONNECTION_KEY, [])
         _LOGGER.debug(
             "%s: %s after %.3f s; idle %s before it, connection %s%s, %d other request(s) in flight%s",
-            what,
+            _diagnostic_label(what),
             "failed" if error else "answered",
             time.monotonic() - started,
             "n/a (first request)" if idle is None else f"{idle:.1f} s",
@@ -4027,6 +4027,15 @@ def _diagnostic_error_text(error: BaseException) -> str:
     if isinstance(error, (aiohttp.ClientError, TimeoutError)):
         return _bounded(_transport_error_text(error))
     return type(error).__name__
+
+
+def _diagnostic_label(what: str) -> str:
+    """The label of a request for the debug line: cut, control characters escaped.
+
+    Mostly built from constants and numbers, but a device id is the string Comexio's own list gave (or the caller
+    passed), so a line break in it would otherwise start a second log line.
+    """
+    return log_excerpt([what])
 
 
 def _bounded(text: str) -> str:
