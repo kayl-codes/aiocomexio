@@ -2332,10 +2332,13 @@ class ComexioClient:
             # _follow_redirects sets both keys together: a missing one is a bug, reported below as a failed line.
             self._log_request(what, notes[_STARTED_KEY], notes[_PREVIOUS_RESPONSE_KEY], notes, error)
         # A diagnostic line must never replace the request's own exception.
-        except Exception:
+        except Exception as line_error:
+            # Raised while the request's error is in flight, which makes that error, not yet stripped, its context:
+            # cut, or the traceback of this record would print it.
+            line_error.__context__ = None
             # A logging handler that raises on the line may raise on this record too.
             with suppress(Exception):
-                _LOGGER.debug("Request diagnostics for %s failed", what, exc_info=True)
+                _LOGGER.debug("Request diagnostics for %s failed", what, exc_info=line_error)
 
     def _log_request(
         self,
@@ -4065,11 +4068,14 @@ def _raise_from_stripped(error: ComexioError, cause: BaseException) -> NoReturn:
         _strip_request_and_answer(cause, _transport_error_text(cause))
     # Stripping must never replace the request's own error. The classes alone: a message could hold what was to go.
     except Exception as strip_error:
-        _LOGGER.warning(
-            "Could not strip the request from %s (%s): raised without it as the cause or context",
-            type(cause).__name__,
-            type(strip_error).__name__,
-        )
+        # A logging filter or handler that raises on the record must not replace error either: what it raised would
+        # carry the unstripped cause as its context.
+        with suppress(Exception):
+            _LOGGER.warning(
+                "Could not strip the request from %s (%s): raised without it as the cause or context",
+                type(cause).__name__,
+                type(strip_error).__name__,
+            )
     else:
         raise error from cause
     try:

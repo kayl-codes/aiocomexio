@@ -403,11 +403,19 @@ async def test_a_failing_debug_line_never_replaces_the_requests_own_exception(
     monkeypatch.setattr(api_client, "_log_request", broken)
     comexio.serve("GET", API_PATH, _close_connection)
 
-    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError) as raised:
         await api_client.set_marker_value(5, 0)
 
+    _assert_the_dropped_write_of_m5(raised.value)
     (message,) = (r.getMessage() for r in caplog.records if "Request diagnostics" in r.getMessage())
     assert message == "Request diagnostics for Writing marker M5 failed"
+
+
+def _assert_the_dropped_write_of_m5(error: ComexioConnectionError) -> None:
+    """The request's own error, not one a failing log call put in its place: its text and its cause name the drop."""
+    assert str(error).startswith("Writing marker M5 failed: ServerDisconnectedError")
+    assert isinstance(error.__cause__, aiohttp.ServerDisconnectedError)
+    assert error.__context__ is error.__cause__
 
 
 class _RaisingLogger:
@@ -435,8 +443,9 @@ async def test_a_logger_that_raises_on_both_records_changes_no_result(
     logger = _RaisingLogger()
     monkeypatch.setattr(client_module, "_LOGGER", logger)
     comexio.serve("GET", API_PATH, _close_connection)
-    with pytest.raises(ComexioConnectionError):
+    with pytest.raises(ComexioConnectionError) as raised:
         await api_client.set_marker_value(5, 0)
+    _assert_the_dropped_write_of_m5(raised.value)
     # The line and then its fallback were tried, and both raised.
     assert [m.split(" ")[0] for m in logger.attempted] == ["%s:", "Request"]
 
@@ -992,6 +1001,29 @@ async def test_an_answer_that_cannot_be_parsed_leaves_no_raw_byte_in_the_cause(
     assert "secret123" not in "".join(traceback.format_exception(raised.value))
 
 
+async def test_a_failing_debug_line_does_not_log_the_unstripped_error_of_the_request(
+    api_client: ComexioClient,
+    comexio: FakeComexio,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*_args: object) -> None:
+        raise RuntimeError("the line itself broke")
+
+    monkeypatch.setattr(api_client, "_log_request", broken)
+    comexio.serve("GET", API_PATH, _bad_status_line)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
+        await api_client.set_marker_value(5, 0)
+
+    (record,) = (r for r in caplog.records if "Request diagnostics" in r.getMessage())
+    # The record carries the traceback of the line's own failure, without the request's error it was raised under.
+    assert record.exc_info is not None
+    logged = "".join(traceback.format_exception(record.exc_info[1]))
+    assert "the line itself broke" in logged
+    assert "secret123" not in logged + caplog.text
+
+
 def _broken_strip(_error: BaseException) -> None:
     raise TypeError("http://host/api/?value=12345")
 
@@ -1021,6 +1053,32 @@ def test_a_failure_while_stripping_keeps_the_requests_own_error(
             "Could not strip the request from InvalidURL (TypeError): raised without it as the cause or context",
         )
     ]
+
+
+def test_a_warning_that_raises_while_stripping_failed_keeps_the_requests_own_error(
+    api_client: ComexioClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempted: list[object] = []
+
+    def broken(*args: object, **_kwargs: object) -> None:
+        attempted.append(args[0])
+        raise RuntimeError("the record itself broke")
+
+    monkeypatch.setattr(client_module, "_strip_invalid_url", _broken_strip)
+    monkeypatch.setattr(client_module._LOGGER, "warning", broken)
+    error = aiohttp.InvalidURL("http://host/api/?value=12345")
+    built = api_client._transport_error("Page", error)
+
+    try:
+        raise error
+    except aiohttp.InvalidURL as handled:
+        with pytest.raises(ComexioConnectionError) as raised:
+            client_module._raise_from_stripped(built, handled)
+
+    assert raised.value is built
+    assert len(attempted) == 1
+    # What the warning raised is gone with the unstripped error: neither is reachable from the request's error.
+    assert (built.__cause__, built.__context__, built.__suppress_context__) == (None, None, True)
 
 
 async def test_an_error_that_could_not_be_stripped_is_not_chained(
