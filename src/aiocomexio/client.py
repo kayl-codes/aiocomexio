@@ -30,13 +30,15 @@ from io import StringIO
 from itertools import repeat
 from operator import attrgetter, is_
 from types import MappingProxyType
-from typing import Any, NamedTuple, Self, TypeIs
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, Self, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
 import aiohttp
+from aiohttp.client_reqrep import ConnectionKey
+from aiohttp.http_exceptions import HttpProcessingError
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from .config import iter_group
+from .config import iter_group, log_excerpt
 from .doorstation import (
     CAMERA_ID_ATTRIBUTE,
     DOORSTATION_ATTRIBUTES,
@@ -77,9 +79,12 @@ from .scrape import (
     parse_webio_add_page,
     scrape_js_vars,
 )
-from .session import is_local_address
+from .session import CONNECTION_KEY, is_local_address
 from .tls import _HTTPS_DEFAULT_PORT, format_fingerprint, https_address, normalize_fingerprint
 from .webio import CONTENT_TYPE_JSON, WEBIO_PROTOCOL_HTTP
+
+if TYPE_CHECKING:
+    from yarl import URL  # aiohttp's URL type; only named in annotations, so no dependency of its own
 
 __all__ = [
     "ComexioClient",
@@ -127,6 +132,23 @@ _EXTENSION_EDIT_PATH = "/admin/extension/edit/"
 _SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
 _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
 _API_PATH = "/api/"
+# A request that comes after at least this long without any answer gets a debug line even if it succeeds.
+_IDLE_LOG_MIN_SEC = 5.0
+# The error text of the debug line is cut here: a transport error can carry a long message.
+_DIAGNOSTIC_ERROR_MAX_CHARS = 300
+# The ClientResponseError classes whose message is the reason phrase the server (or a proxy) sent. Matched by the
+# exact class: aiohttp's other subclasses (ContentTypeError, WSServerHandshakeError, TooManyRedirects) carry its own
+# message.
+_REASON_PHRASE_ERRORS = (aiohttp.ClientResponseError, aiohttp.ClientHttpProxyError)
+# What the debug line of a request says when the caller's own deadline cancelled it.
+_CALLER_DEADLINE_EXPIRED = "the caller's deadline expired"
+# The "user:password@" of a URL yarl could not parse (an InvalidURL), with or without a scheme, up to the last "@"
+# before the path (a password may hold one); applied to the URL already cut at "?" and "#".
+_URL_USER_INFO_RE = re.compile(r"^([^/]*//)?[^/]*@")
+# Where _follow_redirects leaves the moment its request got a slot at the login gate, and the time of the last
+# answer as it stood then (next to CONNECTION_KEY): what the request itself waited for is not "idle".
+_STARTED_KEY = "started"
+_PREVIOUS_RESPONSE_KEY = "previous_response_at"
 _WEBIO_HOME_PATH = "/admin/web_io/home"
 _WEBIO_ADD_PATH = "/admin/web_io/add"
 _WEBIO_BASE_WINDOW_PATH = "/admin/web_io/baseDeviceWindow/"
@@ -573,7 +595,8 @@ class _LoginGate:
     carry no session cookie and get the login form. A login therefore waits for the requests in
     flight (at most _LOGIN_WAIT_FOR_REQUESTS_SEC), and a request that comes up meanwhile waits until
     the login is done. A waiting login lets no new request start, so a steady stream of requests
-    cannot starve it; the requests the login sends itself pass. A login queued behind another one
+    cannot starve it; the requests the login sends itself pass (they count as running, but a login never
+    waits for them: it waits only for its _InFlight batch). A login queued behind another one
     holds nothing yet: a request can start before it, and it then waits for that request as well.
     A login that gave up waiting leaves the requests it waited for behind, so a later login does not
     wait for them again. A request must not start another one while it holds its slot: behind a
@@ -585,23 +608,36 @@ class _LoginGate:
 
     def __init__(self) -> None:
         self._in_flight = _InFlight()
+        self._running = 0  # every running request, the ones of a batch a login left behind too
         self._login_task: asyncio.Task[Any] | None = None
         self._no_login = asyncio.Event()
         self._no_login.set()
+
+    @property
+    def requests_in_flight(self) -> int:
+        """How many requests are running: also those a login that gave up waiting left behind, and the login's own."""
+        return self._running
 
     @asynccontextmanager
     async def request(self) -> AsyncIterator[None]:
         """Hold one request slot; waits while a login runs or waits."""
         if self._login_task is not None and self._login_task is asyncio.current_task():
-            yield  # one of the login's own requests
+            # One of the login's own requests: it waits for nothing and no login waits for it, but it is running.
+            self._running += 1
+            try:
+                yield
+            finally:
+                self._running -= 1
             return
         while self._login_task is not None:
             await self._no_login.wait()
         in_flight = self._in_flight  # a request counts against the batch it started in
         in_flight.add()
+        self._running += 1
         try:
             yield
         finally:
+            self._running -= 1
             in_flight.remove()
 
     @asynccontextmanager
@@ -697,6 +733,8 @@ class ComexioClient:
             self._ssl = aiohttp.Fingerprint(bytes.fromhex(self._fingerprint))
         self._plain_http_warned = False
         self._gate = _LoginGate()
+        # time.monotonic() of the last request that got an answer; the debug line about a request reads it.
+        self._last_response_at: float | None = None
 
     @property
     def host(self) -> str:
@@ -1094,7 +1132,7 @@ class ComexioClient:
         try:
             async with (
                 deadline,
-                self._response("GET", path, what=what) as resp,
+                self._response("GET", path, what=what, deadline=deadline) as resp,
             ):
                 if resp.status != HTTPStatus.OK:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
@@ -1105,8 +1143,10 @@ class ComexioClient:
             # Only the snapshot's own deadline means no frame came; aiohttp's timeouts (the session's total one,
             # connect, socket read) are transport errors like on every other request.
             if deadline.expired():
-                raise ComexioConnectionError(f"{what}: no complete frame within {_SNAPSHOT_TIMEOUT_SEC} s") from err
-            raise self._transport_error(what, err) from err
+                _raise_from_stripped(
+                    ComexioConnectionError(f"{what}: no complete frame within {_SNAPSHOT_TIMEOUT_SEC} s"), err
+                )
+            _raise_from_stripped(self._transport_error(what, err), err)
 
     async def get_onewire_sensors(self) -> dict[str, OneWireSensor]:
         """The active 1-Wire sensors of the configuration, keyed by address (OT1, OH3, ...).
@@ -2233,7 +2273,7 @@ class ComexioClient:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
                 return await _response_text(resp, what)
         except (aiohttp.ClientError, TimeoutError) as err:
-            raise self._transport_error(what, err) from err
+            _raise_from_stripped(self._transport_error(what, err), err)
 
     async def _request_unread(self, method: str, path: str, *, what: str, **kwargs: Any) -> None:
         """Send one request whose answer, whatever its status or body, is not looked at; only transport errors count."""
@@ -2241,11 +2281,96 @@ class ComexioClient:
             async with self._response(method, path, what=what, **kwargs):
                 return
         except (aiohttp.ClientError, TimeoutError) as err:
-            raise self._transport_error(what, err) from err
+            _raise_from_stripped(self._transport_error(what, err), err)
 
     @asynccontextmanager
     async def _response(
-        self, method: str, path: str, *, what: str, **kwargs: Any
+        self, method: str, path: str, *, what: str, deadline: asyncio.Timeout | None = None, **kwargs: Any
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
+        """The response to one request (see _follow_redirects), with a debug line when it fails or comes after a pause.
+
+        The line says how long the client had been idle, on which connections the request was tried (a reused one,
+        a new one; two entries mean aiohttp tried again itself) and how many other requests were in flight: what
+        tells a kept-alive connection the server closed from a server that refuses a request (#289). Idle time and
+        duration both count from the moment the request got its slot at the login gate. "failed" is any exception
+        out of the request or the caller's block (a status or data error too; the line names its class, and the
+        message only for a transport error). It costs nothing unless the aiocomexio logger is at DEBUG, and a failure
+        of the line itself never replaces the request's own result. A request that bypasses this method
+        (_request_redirect, the function plan forms) gets no line of its own, but its answer moves the time of the
+        last one. `deadline` is the caller's asyncio.timeout around the request and its block: when it expires, the
+        line names a timeout instead of the cancellation it raises in here.
+        """
+        notes: dict[str, Any] = {}
+        failure: BaseException | None = None
+        try:
+            async with self._follow_redirects(method, path, what=what, connection=notes, **kwargs) as resp:
+                yield resp
+        # Only noted for the debug line, always re-raised.
+        except BaseException as err:
+            expired = isinstance(err, asyncio.CancelledError) and deadline is not None and deadline.expired()
+            failure = TimeoutError(_CALLER_DEADLINE_EXPIRED) if expired else err
+            raise
+        finally:
+            # First, and outside the guard below: the line reads the previous answer time from notes, not from here.
+            self._note_status_answer(failure)
+            # No slot at the login gate, nothing sent: a request cancelled in the queue has no line.
+            if _STARTED_KEY in notes:
+                self._log_request_safely(what, notes, failure)
+            # The traceback of the error holds this frame: drop the reference so the two do not keep each other.
+            failure = None
+
+    def _note_status_answer(self, error: BaseException | None) -> None:
+        """Move the time of the last answer for a ClientResponseError: a session with raise_for_status raises it while
+        the request is entered (or later, then the time moves to the end), so the server answered although no response
+        came back. A proxy's refusal is not an
+        answer of the server."""
+        if isinstance(error, aiohttp.ClientResponseError) and not isinstance(error, aiohttp.ClientHttpProxyError):
+            self._last_response_at = time.monotonic()
+
+    def _log_request_safely(self, what: str, notes: dict[str, Any], error: BaseException | None) -> None:
+        try:
+            # _follow_redirects sets both keys together: a missing one is a bug, reported below as a failed line.
+            self._log_request(what, notes[_STARTED_KEY], notes[_PREVIOUS_RESPONSE_KEY], notes, error)
+        # A diagnostic line must never replace the request's own exception.
+        except Exception as line_error:
+            # Raised while the request's error is in flight, which makes that error, not yet stripped, its context:
+            # cut, or the traceback of this record would print it.
+            line_error.__context__ = None
+            # A logging handler that raises on the line may raise on this record too.
+            with suppress(Exception):
+                _LOGGER.debug("Request diagnostics for %s failed", _diagnostic_label(what), exc_info=line_error)
+
+    def _log_request(
+        self,
+        what: str,
+        started: float,
+        previous_response_at: float | None,
+        notes: dict[str, Any],
+        error: BaseException | None,
+    ) -> None:
+        """Debug line for a request that failed, or that came after at least _IDLE_LOG_MIN_SEC without an answer."""
+        if not _LOGGER.isEnabledFor(logging.DEBUG):
+            return
+        idle = None if previous_response_at is None else started - previous_response_at
+        if error is None and (idle is None or idle < _IDLE_LOG_MIN_SEC):
+            return
+        tried = notes.get(CONNECTION_KEY, [])
+        _LOGGER.debug(
+            "%s: %s after %.3f s; idle %s before it, connection %s%s, %d other request(s) in flight%s",
+            _diagnostic_label(what),
+            "failed" if error else "answered",
+            time.monotonic() - started,
+            "n/a (first request)" if idle is None else f"{idle:.1f} s",
+            " → ".join(tried) or ("unknown" if error else "unknown (no connection trace on the session?)"),
+            " (aiohttp tried again)" if len(tried) > 1 else "",
+            # This request has left the login gate by now, so the count is the others only.
+            self._gate.requests_in_flight,
+            "" if error is None else f": {_diagnostic_error_text(error)}",
+        )
+
+    @asynccontextmanager
+    async def _follow_redirects(
+        self, method: str, path: str, *, what: str, connection: dict[str, Any], **kwargs: Any
     ) -> AsyncIterator[aiohttp.ClientResponse]:
         """The response to one request; the client follows redirects itself, a pinned one only within its HTTPS origin.
 
@@ -2257,9 +2382,17 @@ class ComexioClient:
         redirect_target = _unpinned_redirect_target if self._fingerprint is None else _pinned_redirect_target
         kwargs = _unencoded(kwargs)
         async with self._gate.request():
+            connection[_STARTED_KEY] = time.monotonic()
+            connection[_PREVIOUS_RESPONSE_KEY] = self._last_response_at
             url = f"{self._base_url}{path}"
             for _ in range(_MAX_REDIRECTS + 1):
-                async with self._session.request(method, url, ssl=self._ssl, allow_redirects=False, **kwargs) as resp:
+                # The connections of the hop being sent: a followed redirect is no second try of aiohttp.
+                connection.pop(CONNECTION_KEY, None)
+                async with self._session.request(
+                    method, url, ssl=self._ssl, allow_redirects=False, trace_request_ctx=connection, **kwargs
+                ) as resp:
+                    # Headers are in: the server answered (a redirect hop too), whatever the body turns out to be.
+                    self._last_response_at = time.monotonic()
                     if resp.status not in _FOLLOWED_REDIRECT_STATUSES:
                         yield resp
                         return
@@ -2276,7 +2409,11 @@ class ComexioClient:
             raise ComexioResponseError(f"{what} failed: more than {_MAX_REDIRECTS} redirects", status=resp.status)
 
     def _transport_error(self, what: str, err: aiohttp.ClientError | TimeoutError) -> ComexioError:
-        """The ComexioError for a request that failed below HTTP: a foreign certificate or a connection problem."""
+        """The ComexioError for a request that failed below HTTP: a foreign certificate or a connection problem.
+
+        Raised by _raise_from_stripped, which gets it as an argument and only then strips err: the text here is taken
+        from err as aiohttp raised it. An override gets err not yet stripped and must not log it.
+        """
         if isinstance(err, aiohttp.ServerFingerprintMismatch):
             expected, actual = err.expected.hex(), err.got.hex()
             return ComexioCertificateMismatchError(
@@ -2285,7 +2422,7 @@ class ComexioClient:
                 expected=expected,
                 actual=actual,
             )
-        return ComexioConnectionError(f"{what} failed: {err!r}")
+        return ComexioConnectionError(f"{what} failed: {_transport_error_text(err)}")
 
     async def _request_admin_text(self, method: str, path: str, *, what: str, **kwargs: Any) -> str:
         """_request_text for an admin page or action; the login form raises ComexioAuthenticationError.
@@ -2313,6 +2450,7 @@ class ComexioClient:
                     method, f"{self._base_url}{path}", allow_redirects=False, ssl=self._ssl, **_unencoded(kwargs)
                 ) as resp,
             ):
+                self._last_response_at = time.monotonic()  # the server answered: the idle time of a later request
                 if resp.status in _REDIRECT_STATUSES:
                     location = resp.headers.get("Location", "")
                     try:
@@ -2334,7 +2472,8 @@ class ComexioClient:
                     else _error_page_text(resp, what)
                 )
         except (aiohttp.ClientError, TimeoutError) as err:
-            raise self._transport_error(what, err) from err
+            self._note_status_answer(err)
+            _raise_from_stripped(self._transport_error(what, err), err)
         if _LOGIN_FORM_SUBMIT_MARKER in body:
             raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
         if status != HTTPStatus.OK:
@@ -3878,6 +4017,183 @@ def _text_encoding(resp: aiohttp.ClientResponse) -> str:
             if name not in _NOT_A_CHARSET:
                 return name
     return _UTF8
+
+
+def _diagnostic_error_text(error: BaseException) -> str:
+    """A transport error as _transport_error_text, cut to _DIAGNOSTIC_ERROR_MAX_CHARS; any other error by its class.
+
+    A status or data error carries a page excerpt: it is named by class only.
+    """
+    if isinstance(error, (aiohttp.ClientError, TimeoutError)):
+        return _bounded(_transport_error_text(error))
+    return type(error).__name__
+
+
+def _diagnostic_label(what: str) -> str:
+    """The label of a request for the debug line: cut, control characters escaped.
+
+    Mostly built from constants and numbers, but a device id is the string Comexio's own list gave (or the caller
+    passed), so a line break in it would otherwise start a second log line.
+    """
+    return log_excerpt([what])
+
+
+def _bounded(text: str) -> str:
+    """text, cut to _DIAGNOSTIC_ERROR_MAX_CHARS."""
+    return text if len(text) <= _DIAGNOSTIC_ERROR_MAX_CHARS else f"{text[:_DIAGNOSTIC_ERROR_MAX_CHARS]}…"
+
+
+def _transport_error_text(error: BaseException) -> str:
+    """The repr of a transport error, without what it may carry of the request or the answer.
+
+    A ClientResponseError (a session with raise_for_status) carries the request, its URL (whose query holds the value
+    of an API write) and headers (Authorization); an InvalidURL is the URL: named by class (and status) only. A
+    ServerDisconnectedError for a connection dropped in the middle of an answer carries the part aiohttp parsed, its
+    headers (Set-Cookie) included: named by class and status only. A connection error carries the connection key,
+    which holds the proxy and its credentials when the request went through one: shown without them.
+    """
+    if isinstance(error, aiohttp.ClientResponseError):
+        return f"{type(error).__name__} (status {error.status})"
+    if isinstance(error, aiohttp.InvalidURL):
+        return type(error).__name__
+    if _carries_an_answer(error):
+        return f"{type(error).__name__} (in the middle of an answer, status {getattr(error.message, 'code', '?')})"
+    if isinstance(error, aiohttp.ClientConnectorError):
+        # Its repr, with the key in it replaced.
+        return f"{type(error).__name__}({', '.join(repr(_without_connection_key(arg)) for arg in error.args)})"
+    return repr(error)
+
+
+def _raise_from_stripped(error: ComexioError, cause: BaseException) -> NoReturn:
+    """Raise error from cause, once cause is stripped of what _transport_error_text leaves out of its text.
+
+    Called in the except block that caught cause, with error built from cause before (the arguments are evaluated
+    first, so its text comes from cause as aiohttp raised it). cause stays the cause: a traceback prints its message,
+    and a caller may re-raise and log it itself. Only its content changes, its type stays, so _once_more_if_dropped
+    and such a caller still recognise it. Should stripping fail, error goes out with neither a cause nor a context:
+    cause would still show what was to go. Its type is then gone with it, so a dropped connection is not tried again.
+    """
+    try:
+        _strip_request_and_answer(cause, _transport_error_text(cause))
+    # Stripping must never replace the request's own error. The classes alone: a message could hold what was to go.
+    except Exception as strip_error:
+        # A logging filter or handler that raises on the record must not replace error either: what it raised would
+        # carry the unstripped cause as its context.
+        with suppress(Exception):
+            _LOGGER.warning(
+                "Could not strip the request from %s (%s): raised without it as the cause or context",
+                type(cause).__name__,
+                type(strip_error).__name__,
+            )
+    else:
+        raise error from cause
+    try:
+        raise error from None
+    # The caller's except block makes cause the context of any raise in it, `from None` only hides it: cleared, and
+    # re-raised bare, which does not set it again.
+    except ComexioError:
+        error.__context__ = None
+        raise
+
+
+def _strip_request_and_answer(error: BaseException, text: str) -> None:
+    """Remove from a transport error what _transport_error_text left out of `text`."""
+    if isinstance(error, aiohttp.ClientResponseError):
+        _strip_response_error(error)
+    elif isinstance(error, aiohttp.InvalidURL):
+        _strip_invalid_url(error)
+    elif isinstance(error, aiohttp.ClientConnectorError):
+        _strip_connection_key(error)
+    elif _carries_an_answer(error):
+        error.args = (text,)
+        error.message = text
+
+
+def _strip_response_error(error: aiohttp.ClientResponseError) -> None:
+    """Request URL query and headers, the answer's headers, raw bytes and redirects go; status, type and message stay.
+
+    What cannot fail goes first; the request is rebuilt last.
+    """
+    # A parse error of the answer (aiohttp raises it from an HttpProcessingError) carries the raw bytes as its
+    # message: the parser error's class instead, which tells what was wrong. raise_for_status and a proxy's refusal
+    # carry the reason phrase as sent, which could hold anything: the standard phrase of the status instead. Any other
+    # message is aiohttp's own and stays, cut like the text of the debug line.
+    if isinstance(error.__cause__, HttpProcessingError):
+        error.message = type(error.__cause__).__name__
+    elif type(error) in _REASON_PHRASE_ERRORS:
+        error.message = _standard_reason(error.status)
+    elif isinstance(error.message, str):
+        error.message = _bounded(error.message)
+    error.headers = None  # the answer's headers (Set-Cookie)
+    error.history = ()  # the redirects before it, each with its URL
+    _cut_cause(error)
+    info = error.request_info
+    # aiohttp always passes a RequestInfo; anything else (a test double) has nothing of the request to strip.
+    if isinstance(info, aiohttp.RequestInfo):
+        headers = info.headers.copy()
+        headers.clear()  # an empty mapping of the type aiohttp uses (Authorization was in it)
+        # Built anew, not by _replace: older aiohttp versions have no NamedTuple here.
+        info = aiohttp.RequestInfo(
+            _bare_url(info.url), info.method, type(info.headers)(headers), _bare_url(info.real_url)
+        )
+    error.request_info = info
+    error.args = (info, ())
+
+
+def _standard_reason(status: int) -> str:
+    """The standard reason phrase of an HTTP status, empty for a status without one."""
+    try:
+        return HTTPStatus(status).phrase
+    except ValueError:
+        return ""
+
+
+def _strip_invalid_url(error: aiohttp.InvalidURL) -> None:
+    """Its message is the URL: query, fragment and user info go, the rest stays to show what is wrong with it."""
+    url = error.url
+    if isinstance(url, str):
+        bare: str | URL = _URL_USER_INFO_RE.sub(r"\1", re.split(r"[?#]", url, maxsplit=1)[0])
+    else:
+        bare = _bare_url(url)
+    error._url = bare  # what InvalidURL's url and str() read
+    error.args = (bare, *error.args[1:])
+    _cut_cause(error)
+
+
+def _strip_connection_key(error: aiohttp.ClientConnectorError) -> None:
+    """The connection key loses the proxy's credentials; host, port and the OS error stay to show what failed."""
+    key = error.args[0]
+    if isinstance(key, ConnectionKey):
+        error._conn_key = key = _bare_connection_key(key)  # what the error's host, port and str() read
+        error.args = (key, *error.args[1:])
+
+
+def _without_connection_key(arg: object) -> object:
+    """arg for the text of a connection error: a connection key bare (see _bare_connection_key), anything else as is."""
+    return _bare_connection_key(arg) if isinstance(arg, ConnectionKey) else arg
+
+
+def _bare_connection_key(key: ConnectionKey) -> ConnectionKey:
+    """The connection key without the proxy's credentials (proxy_auth, user info in its URL)."""
+    return key._replace(proxy=None if key.proxy is None else _bare_url(key.proxy), proxy_auth=None)
+
+
+def _bare_url(url: "URL") -> "URL":
+    """The URL without query (the value of an API write), fragment and user info."""
+    bare = url.with_query(None).with_fragment(None)
+    return bare.with_user(None) if bare.absolute else bare  # a relative URL has no user info, and yarl refuses it
+
+
+def _cut_cause(error: BaseException) -> None:
+    """aiohttp raises these from the parser's or yarl's error, whose message holds the raw answer or the URL."""
+    error.__cause__ = None
+    error.__context__ = None
+    error.__suppress_context__ = True
+
+
+def _carries_an_answer(error: BaseException) -> TypeIs[aiohttp.ServerDisconnectedError]:
+    """True for a ServerDisconnectedError that holds the parsed part of an answer (headers included), not a text."""
+    return isinstance(error, aiohttp.ServerDisconnectedError) and not isinstance(error.message, str)
 
 
 async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str = "strict") -> str:
