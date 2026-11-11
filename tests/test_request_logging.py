@@ -6,12 +6,14 @@ import re
 import time
 import traceback
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 
 import aiohttp
 import pytest
-from aiohttp import web
+from aiohttp import http_exceptions, web
+from multidict import CIMultiDictProxy
+from yarl import URL
 
 from aiocomexio import (
     ComexioClient,
@@ -336,13 +338,23 @@ async def test_the_idle_time_is_the_time_since_the_last_answer(
     [(_IDLE_LOG_MIN_SEC + 0.5, True), (_IDLE_LOG_MIN_SEC, True), (_IDLE_LOG_MIN_SEC - 0.5, False)],
 )
 async def test_an_answered_request_is_logged_from_the_idle_threshold_on(
-    api_client: ComexioClient, caplog: pytest.LogCaptureFixture, idle_sec: float, logged: bool
+    api_client: ComexioClient,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    idle_sec: float,
+    logged: bool,
 ) -> None:
     started = 1000.0  # fixed: the idle time is `started` minus the last answer, so no clock and no rounding is in it
+    # The client's clock only (the event loop keeps its own): the request took 0.25 s.
+    monkeypatch.setattr(client_module, "time", SimpleNamespace(monotonic=lambda: started + 0.25))
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         api_client._log_request("Page", started, started - idle_sec, {CONNECTION_KEY: [CONNECTION_REUSED]}, None)
 
-    assert bool([r for r in caplog.records if r.name == LOGGER]) is logged
+    line = (
+        f"Page: answered after 0.250 s; idle {idle_sec:.1f} s before it, connection {CONNECTION_REUSED}, "
+        "0 other request(s) in flight"
+    )
+    assert [r.getMessage() for r in caplog.records if r.name == LOGGER] == ([line] if logged else [])
 
 
 async def test_a_followed_redirect_is_not_a_second_try_of_aiohttp(
@@ -496,12 +508,17 @@ async def test_a_status_error_names_its_class_and_not_the_page(
 async def test_a_response_error_names_its_class_and_status_and_not_the_url(
     comexio: FakeComexio, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async def server_error(_request: web.Request) -> web.StreamResponse:
-        return web.Response(status=500)
+    sent: list[str | None] = []
+
+    async def server_error(request: web.Request) -> web.StreamResponse:
+        sent.append(request.headers.get("Authorization"))
+        return web.Response(status=500, headers={"Set-Cookie": "session=secret123"})
 
     comexio.serve("GET", API_PATH, server_error)
     async with aiohttp.ClientSession(**session_kwargs(), raise_for_status=True) as strict_session:
-        client = ComexioClient(comexio.host, USERNAME, PASSWORD, session=strict_session, api_username="api")
+        client = ComexioClient(
+            comexio.host, USERNAME, PASSWORD, session=strict_session, api_username="api", api_password="pw"
+        )
 
         with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError) as raised:
             await client.set_marker_value(5, 12345)
@@ -517,6 +534,38 @@ async def test_a_response_error_names_its_class_and_status_and_not_the_url(
     assert "12345" not in line  # the value an API write carries stays out of the line
     # So does the error the caller gets: its request, URL and Authorization header are not in the message.
     assert str(raised.value) == "Writing marker M5 failed: ClientResponseError (status 500)"
+    # Nor in its cause, which a traceback prints and a caller may re-raise: the request without its query and headers.
+    cause = raised.value.__cause__
+    assert isinstance(cause, aiohttp.ClientResponseError)
+    assert (cause.status, cause.request_info.real_url.path, cause.request_info.real_url.query_string) == (
+        500,
+        API_PATH,
+        "",
+    )
+    # The request did carry the credentials (base64 of "api:pw"); the cause keeps no request or answer header.
+    assert sent == ["Basic YXBpOnB3"]
+    assert (dict(cause.request_info.headers), cause.headers, cause.history) == ({}, None, ())
+    assert (type(cause.request_info.headers), cause.message) == (CIMultiDictProxy, "Internal Server Error")
+    # What a traceback prints of the chain (its source lines show the test's own call, value included), and the repr.
+    shown = "".join(traceback.format_exception_only(cause)) + repr(cause) + repr(cause.args)
+    assert "12345" not in shown
+    assert "YXBpOnB3" not in shown
+    assert "secret123" not in shown
+
+
+def test_a_response_error_without_a_request_info_is_still_stripped_of_the_answer(api_client: ComexioClient) -> None:
+    # Not a RequestInfo (a test double, as some callers build): there is no request to strip, the answer still goes.
+    error = aiohttp.ClientResponseError(
+        SimpleNamespace(),  # type: ignore[arg-type]  # deliberately not a RequestInfo
+        (),
+        status=500,
+        headers={"Set-Cookie": "session=secret123"},  # type: ignore[arg-type]  # any mapping
+    )
+
+    raised = api_client._transport_error("Page", error)
+
+    assert str(raised) == "Page failed: ClientResponseError (status 500)"
+    assert (error.status, error.headers, error.history) == (500, None, ())
 
 
 async def test_an_error_status_the_session_raises_still_moves_the_answer_time(
@@ -758,6 +807,82 @@ async def test_an_invalid_url_error_is_named_by_class_and_not_by_its_url(
     assert "12345" not in line
 
 
+@pytest.mark.parametrize(
+    ("url", "description", "kept"),
+    [
+        ("http://host/api/?value=12345", None, "http://host/api/"),
+        ("http://host/api/?value=12345", "no host", "http://host/api/ - no host"),
+        ("http://api:12345@host/api/#12345", None, "http://host/api/"),
+        ("http://api:pw@12345@host/api/", None, "http://host/api/"),  # an "@" in the password
+        ("api:12345@host:80/api/", None, "host:80/api/"),  # no scheme
+        ("/api/?value=12345#x", None, "/api/"),
+        (URL("http://api:12345@host/api/?value=12345#x"), None, "http://host/api/"),
+        (URL("/api/?value=12345"), None, "/api/"),
+    ],
+)
+def test_an_invalid_url_error_loses_its_query_before_it_becomes_the_cause(
+    api_client: ComexioClient, url: str | URL, description: str | None, kept: str
+) -> None:
+    error = aiohttp.InvalidURL(url, description)  # built here: the client changes it
+    # As aiohttp raises it: from yarl's error, while handling it (so it is both cause and context).
+    try:
+        raise ValueError("yarl's message: http://api:12345@host/api/?value=12345")
+    except ValueError as yarl_error:
+        with suppress(aiohttp.InvalidURL):
+            raise error from yarl_error
+
+    raised = api_client._transport_error("Page", error)
+
+    assert str(raised) == "Page failed: InvalidURL"
+    # The cause keeps its type and URL type, without query, fragment, user info and the error it came from.
+    assert (type(error), type(error.url), str(error)) == (aiohttp.InvalidURL, type(url), kept)
+    assert "12345" not in "".join(traceback.format_exception_only(error)) + repr(error.args)
+    assert (error.__cause__, error.__context__, error.__suppress_context__) == (None, None, True)
+
+
+async def _bad_status_line(request: web.Request) -> web.StreamResponse:
+    assert request.transport is not None
+    request.transport.write(b"HTTP/1.1 2x0 secret123\r\n\r\n")
+    request.transport.close()
+    return web.Response()
+
+
+async def test_an_answer_that_cannot_be_parsed_leaves_no_raw_byte_in_the_cause(
+    api_client: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("GET", API_PATH, _bad_status_line)
+
+    with pytest.raises(ComexioConnectionError) as raised:
+        await api_client.set_marker_value(5, 0)
+
+    cause = raised.value.__cause__
+    # aiohttp puts the raw status line into the message and raises from the parser's error, which holds it too.
+    assert isinstance(cause, aiohttp.ClientResponseError)
+    # The message names the parser's error instead (which one depends on aiohttp's C or Python parser).
+    assert issubclass(getattr(http_exceptions, cause.message), http_exceptions.HttpProcessingError)
+    assert (cause.status, cause.__cause__, cause.__context__) == (400, None, None)
+    assert "secret123" not in "".join(traceback.format_exception(raised.value))
+
+
+def test_a_failure_while_stripping_keeps_the_requests_own_error(
+    api_client: ComexioClient, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_error: BaseException) -> None:
+        raise TypeError("http://host/api/?value=12345")
+
+    monkeypatch.setattr(client_module, "_strip_invalid_url", broken)
+    error = aiohttp.InvalidURL("http://host/api/?value=12345")
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        raised = api_client._transport_error("Page", error)
+
+    assert (type(raised), str(raised)) == (ComexioConnectionError, "Page failed: InvalidURL")
+    # Logged by the classes only: the failure's own message may hold what was to go.
+    assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == LOGGER] == [
+        (logging.WARNING, "Could not strip the request from InvalidURL (TypeError): the error may still show it")
+    ]
+
+
 async def _cut_off_in_the_headers(request: web.Request) -> web.StreamResponse:
     assert request.transport is not None
     request.transport.write(b"HTTP/1.1 200 OK\r\nSet-Cookie: session=secret123\r\n")
@@ -784,7 +909,10 @@ async def test_a_disconnect_in_the_middle_of_an_answer_names_its_status_and_not_
     ).fullmatch(line)
     # The error the caller gets names it the same way, and a traceback of it (its cause included) shows no header.
     assert str(raised.value) == f"Writing marker M5 failed: {shown}"
-    assert isinstance(raised.value.__cause__, aiohttp.ServerDisconnectedError)
+    cause = raised.value.__cause__
+    assert isinstance(cause, aiohttp.ServerDisconnectedError)
+    # The parsed answer in it is replaced by the text: a plain message, which _carries_an_answer no longer matches.
+    assert (cause.message, cause.args) == (shown, (shown,))
     assert "secret123" not in "".join(traceback.format_exception(raised.value))
 
 

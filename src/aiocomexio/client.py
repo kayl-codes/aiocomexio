@@ -30,10 +30,11 @@ from io import StringIO
 from itertools import repeat
 from operator import attrgetter, is_
 from types import MappingProxyType
-from typing import Any, NamedTuple, Self, TypeIs
+from typing import TYPE_CHECKING, Any, NamedTuple, Self, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
 import aiohttp
+from aiohttp.http_exceptions import HttpProcessingError
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from .config import iter_group
@@ -80,6 +81,9 @@ from .scrape import (
 from .session import CONNECTION_KEY, is_local_address
 from .tls import _HTTPS_DEFAULT_PORT, format_fingerprint, https_address, normalize_fingerprint
 from .webio import CONTENT_TYPE_JSON, WEBIO_PROTOCOL_HTTP
+
+if TYPE_CHECKING:
+    from yarl import URL  # aiohttp's URL type; only named in annotations, so no dependency of its own
 
 __all__ = [
     "ComexioClient",
@@ -131,6 +135,9 @@ _API_PATH = "/api/"
 _IDLE_LOG_MIN_SEC = 5.0
 # The error text of the debug line is cut here: a transport error can carry a long message.
 _DIAGNOSTIC_ERROR_MAX_CHARS = 300
+# The "user:password@" of a URL yarl could not parse (an InvalidURL), with or without a scheme, up to the last "@"
+# before the path (a password may hold one); applied to the URL already cut at "?" and "#".
+_URL_USER_INFO_RE = re.compile(r"^([^/]*//)?[^/]*@")
 # Where _follow_redirects leaves the moment its request got a slot at the login gate, and the time of the last
 # answer as it stood then (next to CONNECTION_KEY): what the request itself waited for is not "idle".
 _STARTED_KEY = "started"
@@ -2398,10 +2405,7 @@ class ComexioClient:
                 actual=actual,
             )
         text = _transport_error_text(err)
-        if _carries_an_answer(err):
-            # It stays the cause of the error raised from it, and a traceback prints its message: the answer's headers.
-            err.args = (text,)
-            err.message = text
+        _strip_request_and_answer(err, text)
         return ComexioConnectionError(f"{what} failed: {text}")
 
     async def _request_admin_text(self, method: str, path: str, *, what: str, **kwargs: Any) -> str:
@@ -4025,6 +4029,81 @@ def _transport_error_text(error: BaseException) -> str:
     if _carries_an_answer(error):
         return f"{type(error).__name__} (in the middle of an answer, status {getattr(error.message, 'code', '?')})"
     return repr(error)
+
+
+def _strip_request_and_answer(error: BaseException, text: str) -> None:
+    """Remove from a transport error what _transport_error_text left out of `text`.
+
+    The error stays the cause of the ComexioConnectionError raised from it: a traceback prints the cause's message, and
+    a caller may re-raise and log the cause itself. Only its content changes, its type stays, so _once_more_if_dropped
+    and such a caller still recognise it.
+    """
+    try:
+        if isinstance(error, aiohttp.ClientResponseError):
+            _strip_response_error(error)
+        elif isinstance(error, aiohttp.InvalidURL):
+            _strip_invalid_url(error)
+        elif _carries_an_answer(error):
+            error.args = (text,)
+            error.message = text
+    # Stripping must never replace the request's own error. The classes alone: a message could hold what was to go.
+    except Exception as strip_error:
+        _LOGGER.warning(
+            "Could not strip the request from %s (%s): the error may still show it",
+            type(error).__name__,
+            type(strip_error).__name__,
+        )
+
+
+def _strip_response_error(error: aiohttp.ClientResponseError) -> None:
+    """Request URL query and headers, the answer's headers, raw bytes and redirects go; status, type and message stay.
+
+    What cannot fail goes first; the request is rebuilt last.
+    """
+    # A parse error of the answer (aiohttp raises it from an HttpProcessingError) carries the raw bytes as its
+    # message: the parser error's class instead, which tells what was wrong. Any other message is aiohttp's or the
+    # server's reason phrase and stays.
+    if isinstance(error.__cause__, HttpProcessingError):
+        error.message = type(error.__cause__).__name__
+    error.headers = None  # the answer's headers (Set-Cookie)
+    error.history = ()  # the redirects before it, each with its URL
+    _cut_cause(error)
+    info = error.request_info
+    # aiohttp always passes a RequestInfo; anything else (a test double) has nothing of the request to strip.
+    if isinstance(info, aiohttp.RequestInfo):
+        headers = info.headers.copy()
+        headers.clear()  # an empty mapping of the type aiohttp uses (Authorization was in it)
+        # Built anew, not by _replace: older aiohttp versions have no NamedTuple here.
+        info = aiohttp.RequestInfo(
+            _bare_url(info.url), info.method, type(info.headers)(headers), _bare_url(info.real_url)
+        )
+    error.request_info = info
+    error.args = (info, ())
+
+
+def _strip_invalid_url(error: aiohttp.InvalidURL) -> None:
+    """Its message is the URL: query, fragment and user info go, the rest stays to show what is wrong with it."""
+    url = error.url
+    if isinstance(url, str):
+        bare: str | URL = _URL_USER_INFO_RE.sub(r"\1", re.split(r"[?#]", url, maxsplit=1)[0])
+    else:
+        bare = _bare_url(url)
+    error._url = bare  # what InvalidURL's url and str() read
+    error.args = (bare, *error.args[1:])
+    _cut_cause(error)
+
+
+def _bare_url(url: "URL") -> "URL":
+    """The URL without query (the value of an API write), fragment and user info."""
+    bare = url.with_query(None).with_fragment(None)
+    return bare.with_user(None) if bare.absolute else bare  # a relative URL has no user info, and yarl refuses it
+
+
+def _cut_cause(error: BaseException) -> None:
+    """aiohttp raises these from the parser's or yarl's error, whose message holds the raw answer or the URL."""
+    error.__cause__ = None
+    error.__context__ = None
+    error.__suppress_context__ = True
 
 
 def _carries_an_answer(error: BaseException) -> TypeIs[aiohttp.ServerDisconnectedError]:
