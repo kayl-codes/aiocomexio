@@ -602,7 +602,7 @@ _SENT_REASON = "token=12345 " + "x" * client_module._DIAGNOSTIC_ERROR_MAX_CHARS
         (aiohttp.ClientHttpProxyError, 407, "Proxy Authentication Required"),
         (aiohttp.ClientResponseError, 599, ""),  # a status without a standard phrase
         # aiohttp's own message (it names the content type the server sent): kept, cut like the debug line.
-        (aiohttp.ContentTypeError, 200, _SENT_REASON[: client_module._DIAGNOSTIC_ERROR_MAX_CHARS] + "…"),
+        (aiohttp.ContentTypeError, 200, f"{_SENT_REASON[: client_module._DIAGNOSTIC_ERROR_MAX_CHARS]}…"),
     ],
     ids=["status", "proxy", "unknown-status", "aiohttp-message"],
 )
@@ -667,11 +667,13 @@ async def test_a_connection_error_of_aiohttp_carries_the_key_that_is_stripped() 
     # The tests above build the key themselves: aiohttp's own connector has to raise with that class, else the key
     # would be left as it is without a sign.
     with socket.socket() as probe:
+        # Bound but never listening, and kept open for the whole request: the port is refused, and no other process
+        # can be given it in between (a closed probe would leave a window in which one could start listening there).
         probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]  # closed again before the request: nothing listens there
-    async with aiohttp.ClientSession() as session:
-        with pytest.raises(aiohttp.ClientConnectorError) as raised:
-            await session.get(f"http://127.0.0.1:{port}/api/?value=12345")
+        port = probe.getsockname()[1]
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(aiohttp.ClientConnectorError) as raised:
+                await session.get(f"http://127.0.0.1:{port}/api/?value=12345")
 
     assert isinstance(raised.value.args[0], ConnectionKey)
     assert _stripped_cause(raised.value) is raised.value
