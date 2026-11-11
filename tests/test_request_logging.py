@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+import traceback
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -502,7 +503,7 @@ async def test_a_response_error_names_its_class_and_status_and_not_the_url(
     async with aiohttp.ClientSession(**session_kwargs(), raise_for_status=True) as strict_session:
         client = ComexioClient(comexio.host, USERNAME, PASSWORD, session=strict_session, api_username="api")
 
-        with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
+        with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError) as raised:
             await client.set_marker_value(5, 12345)
 
     (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
@@ -514,6 +515,8 @@ async def test_a_response_error_names_its_class_and_status_and_not_the_url(
         error=re.escape("ClientResponseError (status 500)"),
     ).fullmatch(line)
     assert "12345" not in line  # the value an API write carries stays out of the line
+    # So does the error the caller gets: its request, URL and Authorization header are not in the message.
+    assert str(raised.value) == "Writing marker M5 failed: ClientResponseError (status 500)"
 
 
 async def test_an_error_status_the_session_raises_still_moves_the_answer_time(
@@ -753,3 +756,67 @@ async def test_an_invalid_url_error_is_named_by_class_and_not_by_its_url(
         "Page", "failed", idle=re.escape("n/a (first request)"), connection="unknown", error="InvalidURL"
     ).fullmatch(line)
     assert "12345" not in line
+
+
+async def _cut_off_in_the_headers(request: web.Request) -> web.StreamResponse:
+    assert request.transport is not None
+    request.transport.write(b"HTTP/1.1 200 OK\r\nSet-Cookie: session=secret123\r\n")
+    request.transport.close()
+    return web.Response()
+
+
+async def test_a_disconnect_in_the_middle_of_an_answer_names_its_status_and_not_its_headers(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve("GET", API_PATH, _cut_off_in_the_headers)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError) as raised:
+        await api_client.set_marker_value(5, 0)
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    shown = "ServerDisconnectedError (in the middle of an answer, status 200)"
+    assert _expected_line(
+        "Writing marker M5",
+        "failed",
+        idle=re.escape("n/a (first request)"),
+        connection="new → new (aiohttp tried again)",
+        error=re.escape(shown),
+    ).fullmatch(line)
+    # The error the caller gets names it the same way, and a traceback of it (its cause included) shows no header.
+    assert str(raised.value) == f"Writing marker M5 failed: {shown}"
+    assert isinstance(raised.value.__cause__, aiohttp.ServerDisconnectedError)
+    assert "secret123" not in "".join(traceback.format_exception(raised.value))
+
+
+@pytest.mark.parametrize(
+    ("error", "shown"),
+    [
+        (aiohttp.ServerDisconnectedError(), "ServerDisconnectedError('Server disconnected')"),
+        (aiohttp.ServerDisconnectedError("closed by peer"), "ServerDisconnectedError('closed by peer')"),
+        (
+            aiohttp.ServerDisconnectedError(object()),  # type: ignore[arg-type]  # a message without a status code
+            "ServerDisconnectedError (in the middle of an answer, status ?)",
+        ),
+        (aiohttp.InvalidURL("http://host/api/?value=12345"), "InvalidURL"),
+    ],
+)
+def test_a_transport_error_is_shown_in_full_unless_it_carries_the_request_or_an_answer(
+    error: aiohttp.ClientError, shown: str
+) -> None:
+    assert client_module._transport_error_text(error) == shown
+
+
+async def test_a_missing_note_is_reported_and_not_shown_as_a_first_request(
+    api_client: ComexioClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    notes = {client_module._STARTED_KEY: time.monotonic()}  # without the previous answer time
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        api_client._log_request_safely("Page", notes, aiohttp.ClientError("x"))
+
+    (record,) = (r for r in caplog.records if r.name == LOGGER)
+    assert record.getMessage() == "Request diagnostics for Page failed"
+    assert record.exc_info is not None
+    assert record.exc_info[0] is KeyError
+    assert record.exc_info[1] is not None
+    assert record.exc_info[1].args == (client_module._PREVIOUS_RESPONSE_KEY,)

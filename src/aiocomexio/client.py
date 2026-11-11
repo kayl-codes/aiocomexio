@@ -2297,7 +2297,7 @@ class ComexioClient:
             self._note_status_answer(failure)
             # No slot at the login gate, nothing sent: a request cancelled in the queue has no line.
             if _STARTED_KEY in notes:
-                self._log_request_safely(what, notes[_STARTED_KEY], notes.get(_PREVIOUS_RESPONSE_KEY), notes, failure)
+                self._log_request_safely(what, notes, failure)
             # The traceback of the error holds this frame: drop the reference so the two do not keep each other.
             failure = None
 
@@ -2309,16 +2309,10 @@ class ComexioClient:
         if isinstance(error, aiohttp.ClientResponseError) and not isinstance(error, aiohttp.ClientHttpProxyError):
             self._last_response_at = time.monotonic()
 
-    def _log_request_safely(
-        self,
-        what: str,
-        started: float,
-        previous_response_at: float | None,
-        notes: dict[str, Any],
-        error: BaseException | None,
-    ) -> None:
+    def _log_request_safely(self, what: str, notes: dict[str, Any], error: BaseException | None) -> None:
         try:
-            self._log_request(what, started, previous_response_at, notes, error)
+            # _follow_redirects sets both keys together: a missing one is a bug, reported below as a failed line.
+            self._log_request(what, notes[_STARTED_KEY], notes[_PREVIOUS_RESPONSE_KEY], notes, error)
         # A diagnostic line must never replace the request's own exception.
         except Exception:
             # A logging handler that raises on the line may raise on this record too.
@@ -2403,7 +2397,12 @@ class ComexioClient:
                 expected=expected,
                 actual=actual,
             )
-        return ComexioConnectionError(f"{what} failed: {err!r}")
+        text = _transport_error_text(err)
+        if _carries_an_answer(err):
+            # It stays the cause of the error raised from it, and a traceback prints its message: the answer's headers.
+            err.args = (text,)
+            err.message = text
+        return ComexioConnectionError(f"{what} failed: {text}")
 
     async def _request_admin_text(self, method: str, path: str, *, what: str, **kwargs: Any) -> str:
         """_request_text for an admin page or action; the login form raises ComexioAuthenticationError.
@@ -4001,19 +4000,36 @@ def _text_encoding(resp: aiohttp.ClientResponse) -> str:
 
 
 def _diagnostic_error_text(error: BaseException) -> str:
-    """A transport error in full, cut to _DIAGNOSTIC_ERROR_MAX_CHARS; any other error by its class.
+    """A transport error as _transport_error_text, cut to _DIAGNOSTIC_ERROR_MAX_CHARS; any other error by its class.
 
-    A status or data error carries a page excerpt, and a ClientResponseError (a session with raise_for_status) or an
-    InvalidURL the URL, whose query holds the value of an API write: those are named by class (and status) only.
+    A status or data error carries a page excerpt: it is named by class only.
+    """
+    if isinstance(error, (aiohttp.ClientError, TimeoutError)):
+        text = _transport_error_text(error)
+        return text if len(text) <= _DIAGNOSTIC_ERROR_MAX_CHARS else f"{text[:_DIAGNOSTIC_ERROR_MAX_CHARS]}…"
+    return type(error).__name__
+
+
+def _transport_error_text(error: BaseException) -> str:
+    """The repr of a transport error, without what it may carry of the request or the answer.
+
+    A ClientResponseError (a session with raise_for_status) carries the request, its URL (whose query holds the value
+    of an API write) and headers (Authorization); an InvalidURL is the URL: named by class (and status) only. A
+    ServerDisconnectedError for a connection dropped in the middle of an answer carries the part aiohttp parsed, its
+    headers (Set-Cookie) included: named by class and status only.
     """
     if isinstance(error, aiohttp.ClientResponseError):
         return f"{type(error).__name__} (status {error.status})"
     if isinstance(error, aiohttp.InvalidURL):
-        return type(error).__name__  # its repr is the URL
-    if isinstance(error, (aiohttp.ClientError, TimeoutError)):
-        text = repr(error)
-        return text if len(text) <= _DIAGNOSTIC_ERROR_MAX_CHARS else f"{text[:_DIAGNOSTIC_ERROR_MAX_CHARS]}…"
-    return type(error).__name__
+        return type(error).__name__
+    if _carries_an_answer(error):
+        return f"{type(error).__name__} (in the middle of an answer, status {getattr(error.message, 'code', '?')})"
+    return repr(error)
+
+
+def _carries_an_answer(error: BaseException) -> TypeIs[aiohttp.ServerDisconnectedError]:
+    """True for a ServerDisconnectedError that holds the parsed part of an answer (headers included), not a text."""
+    return isinstance(error, aiohttp.ServerDisconnectedError) and not isinstance(error.message, str)
 
 
 async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str = "strict") -> str:
