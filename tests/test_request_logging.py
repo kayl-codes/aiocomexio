@@ -9,8 +9,8 @@ import socket
 import time
 import traceback
 import warnings
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager, suppress
 from types import SimpleNamespace
 from typing import TypeIs
 
@@ -232,12 +232,25 @@ async def test_session_kwargs_carry_the_connection_note() -> None:
     assert trace_config.on_connection_reuseconn
 
 
+@contextmanager
+def _refused_port() -> Iterator[int]:
+    """A local port that refuses every connection while the block runs.
+
+    Bound but never listening, and held open: no other process can be given the port in between, and a fixed one
+    (such as 1) would be answered by whatever happens to listen there.
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        yield probe.getsockname()[1]
+
+
 async def test_a_connect_that_fails_is_still_a_new_connection(caplog: pytest.LogCaptureFixture) -> None:
     async with aiohttp.ClientSession(**session_kwargs()) as session:
-        client = ComexioClient("127.0.0.1:1", USERNAME, PASSWORD, session=session, api_username="api")
+        with _refused_port() as port:
+            client = ComexioClient(f"127.0.0.1:{port}", USERNAME, PASSWORD, session=session, api_username="api")
 
-        with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
-            await client.set_marker_value(5, 0)
+            with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
+                await client.set_marker_value(5, 0)
 
     (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
     assert _expected_line(
@@ -666,11 +679,7 @@ def test_a_connection_error_through_a_proxy_does_not_show_its_credentials(
 async def test_a_connection_error_of_aiohttp_carries_the_key_that_is_stripped() -> None:
     # The tests above build the key themselves: aiohttp's own connector has to raise with that class, else the key
     # would be left as it is without a sign.
-    with socket.socket() as probe:
-        # Bound but never listening, and kept open for the whole request: the port is refused, and no other process
-        # can be given it in between (a closed probe would leave a window in which one could start listening there).
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    with _refused_port() as port:
         async with aiohttp.ClientSession() as session:
             with pytest.raises(aiohttp.ClientConnectorError) as raised:
                 await session.get(f"http://127.0.0.1:{port}/api/?value=12345")
