@@ -581,7 +581,8 @@ class _LoginGate:
     carry no session cookie and get the login form. A login therefore waits for the requests in
     flight (at most _LOGIN_WAIT_FOR_REQUESTS_SEC), and a request that comes up meanwhile waits until
     the login is done. A waiting login lets no new request start, so a steady stream of requests
-    cannot starve it; the requests the login sends itself pass. A login queued behind another one
+    cannot starve it; the requests the login sends itself pass (they count as running, but a login never
+    waits for them: it waits only for its _InFlight batch). A login queued behind another one
     holds nothing yet: a request can start before it, and it then waits for that request as well.
     A login that gave up waiting leaves the requests it waited for behind, so a later login does not
     wait for them again. A request must not start another one while it holds its slot: behind a
@@ -600,14 +601,19 @@ class _LoginGate:
 
     @property
     def requests_in_flight(self) -> int:
-        """How many requests are running, also those a login that gave up waiting left behind (not its own)."""
+        """How many requests are running: also those a login that gave up waiting left behind, and the login's own."""
         return self._running
 
     @asynccontextmanager
     async def request(self) -> AsyncIterator[None]:
         """Hold one request slot; waits while a login runs or waits."""
         if self._login_task is not None and self._login_task is asyncio.current_task():
-            yield  # one of the login's own requests
+            # One of the login's own requests: it waits for nothing and no login waits for it, but it is running.
+            self._running += 1
+            try:
+                yield
+            finally:
+                self._running -= 1
             return
         while self._login_task is not None:
             await self._no_login.wait()

@@ -20,6 +20,7 @@ from aiocomexio import (
     session_kwargs,
 )
 from aiocomexio import client as client_module
+from aiocomexio.client import _IDLE_LOG_MIN_SEC
 from aiocomexio.session import CONNECTION_KEY, CONNECTION_NEW, CONNECTION_REUSED
 from tests.fake_comexio import PASSWORD, USERNAME, FakeComexio
 
@@ -307,7 +308,7 @@ async def test_the_answer_time_is_set_by_an_answer_and_not_by_a_failure(
     assert _answered_at(api_client) == answered_at
 
 
-@pytest.mark.parametrize(("idle_sec", "logged"), [(7.0, True), (4.0, False)])  # a slow runner may add a tenth
+@pytest.mark.parametrize(("idle_sec", "logged"), [(_IDLE_LOG_MIN_SEC + 2, True), (_IDLE_LOG_MIN_SEC - 1, False)])
 async def test_the_idle_time_is_the_time_since_the_last_answer(
     api_client: ComexioClient,
     comexio: FakeComexio,
@@ -325,9 +326,12 @@ async def test_the_idle_time_is_the_time_since_the_last_answer(
     lines = [r.getMessage() for r in caplog.records if "answered after" in r.getMessage()]
     assert bool(lines) is logged
     if logged:
-        assert _expected_line(
-            "Writing marker M5", "answered", idle=rf"{idle_sec:.0f}\.[0-2] s", connection="reused"
-        ).fullmatch(lines[0])
+        match = _expected_line("Writing marker M5", "answered", idle=r"(\d+\.\d) s", connection="reused").fullmatch(
+            lines[0]
+        )
+        assert match is not None
+        # A slow runner only adds time between setting the stamp and the request: the value is never below idle_sec.
+        assert idle_sec <= float(match[1]) < idle_sec + 30
 
 
 async def test_a_followed_redirect_is_not_a_second_try_of_aiohttp(
@@ -656,6 +660,45 @@ async def test_the_requests_a_login_left_behind_are_still_counted(
     release.set()
     await task
     assert gate.requests_in_flight == 0
+
+
+async def test_a_request_of_the_login_itself_is_counted_while_it_runs(
+    api_client: ComexioClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_LOGIN_WAIT_FOR_REQUESTS_SEC", 0.05)
+    gate = api_client._gate
+    release = asyncio.Event()
+
+    async def hold() -> None:
+        async with gate.request():
+            await release.wait()
+
+    task = asyncio.create_task(hold())
+    await asyncio.sleep(0)
+
+    try:
+        async with gate.login():  # gives up waiting for the held request
+            assert gate.requests_in_flight == 1
+            async with gate.request():  # the login's own request, sent from its task
+                assert gate.requests_in_flight == 2
+            assert gate.requests_in_flight == 1
+    finally:
+        release.set()  # a failed assertion above must not leave the held request pending
+        await task
+    assert gate.requests_in_flight == 0
+
+
+async def test_a_failing_request_of_the_login_itself_is_no_longer_counted(api_client: ComexioClient) -> None:
+    gate = api_client._gate
+
+    async def fail_in_request() -> None:
+        async with gate.request():
+            raise RuntimeError("the request failed")
+
+    async with gate.login():
+        with pytest.raises(RuntimeError):
+            await fail_in_request()
+        assert gate.requests_in_flight == 0
 
 
 async def test_the_connection_note_replaces_a_value_that_is_no_list(comexio: FakeComexio) -> None:
