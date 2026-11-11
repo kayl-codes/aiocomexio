@@ -59,7 +59,7 @@ def session_kwargs(
     *,
     timeout: float = DEFAULT_TIMEOUT_SEC,
     progress_log_interval: float | None = None,
-    trace_configs: Iterable[aiohttp.TraceConfig] = (),
+    trace_configs: Iterable[aiohttp.TraceConfig] | None = None,
 ) -> dict[str, Any]:
     """Keyword arguments for the aiohttp.ClientSession a ComexioClient should use.
 
@@ -76,7 +76,7 @@ def session_kwargs(
     configs = [connection_trace_config()]
     if progress_log_interval is not None:
         configs.append(progress_trace_config(progress_log_interval))
-    configs.extend(trace_configs)
+    configs.extend(trace_configs or ())
     return {
         "timeout": aiohttp.ClientTimeout(total=timeout),
         "cookie_jar": aiohttp.CookieJar(unsafe=True),

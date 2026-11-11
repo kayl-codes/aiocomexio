@@ -307,7 +307,7 @@ async def test_the_answer_time_is_set_by_an_answer_and_not_by_a_failure(
     assert _answered_at(api_client) == answered_at
 
 
-@pytest.mark.parametrize(("idle_sec", "logged"), [(7.0, True), (4.0, False)])
+@pytest.mark.parametrize(("idle_sec", "logged"), [(7.0, True), (4.0, False)])  # a slow runner may add a tenth
 async def test_the_idle_time_is_the_time_since_the_last_answer(
     api_client: ComexioClient,
     comexio: FakeComexio,
@@ -326,7 +326,7 @@ async def test_the_idle_time_is_the_time_since_the_last_answer(
     assert bool(lines) is logged
     if logged:
         assert _expected_line(
-            "Writing marker M5", "answered", idle=re.escape(f"{idle_sec:.1f} s"), connection="reused"
+            "Writing marker M5", "answered", idle=rf"{idle_sec:.0f}\.[0-2] s", connection="reused"
         ).fullmatch(lines[0])
 
 
@@ -458,31 +458,38 @@ async def test_a_response_error_names_its_class_and_status_and_not_the_url(
     assert "12345" not in line
 
 
-async def test_a_long_transport_error_is_cut(api_client: ComexioClient, caplog: pytest.LogCaptureFixture) -> None:
-    error = aiohttp.ClientError("x" * 1000)
+@pytest.mark.parametrize("extra", [-1, 0, 1])
+async def test_a_transport_error_is_cut_above_the_limit_only(
+    api_client: ComexioClient, caplog: pytest.LogCaptureFixture, extra: int
+) -> None:
+    limit = client_module._DIAGNOSTIC_ERROR_MAX_CHARS
+    overhead = len(repr(aiohttp.ClientError("")))
+    error = aiohttp.ClientError("x" * (limit - overhead + extra))
+    assert len(repr(error)) == limit + extra
 
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         api_client._log_request("Page", time.monotonic(), None, {}, error)
 
     (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
     error_text = line.split(" in flight: ", 1)[1]
-    assert error_text == repr(error)[: client_module._DIAGNOSTIC_ERROR_MAX_CHARS] + "…"
+    assert error_text == (repr(error) if extra <= 0 else f"{repr(error)[:limit]}…")
 
 
 async def test_a_request_cancelled_before_its_slot_has_no_line(
     api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
 ) -> None:
     comexio.serve_text("GET", API_PATH, "1")
-    gate_closed = asyncio.Event()
+    gate_closed, entered = asyncio.Event(), asyncio.Event()
 
     @asynccontextmanager
     async def blocked_slot() -> AsyncIterator[None]:
+        entered.set()
         await gate_closed.wait()  # a login that never lets a request start
         yield
 
     api_client._gate.request = blocked_slot  # type: ignore[method-assign]
     task = asyncio.create_task(api_client.set_marker_value(5, 1))
-    await asyncio.sleep(0.05)
+    await entered.wait()
 
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         task.cancel()
@@ -507,17 +514,25 @@ async def test_a_redirect_that_fails_later_still_moved_the_answer_time(
     assert _answered_at(api_client) is not None
 
 
-async def test_a_redirect_form_answer_moves_the_answer_time(api_client: ComexioClient, comexio: FakeComexio) -> None:
+async def test_a_redirect_form_answer_moves_the_answer_time(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
     async def redirect(_request: web.Request) -> web.StreamResponse:
         return web.Response(status=302, headers={"Location": MOVED_PATH})
 
     comexio.serve("POST", SLOW_PATH, redirect)
 
-    assert await api_client._request_redirect("POST", SLOW_PATH, what="Form") == MOVED_PATH
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        assert await api_client._request_redirect("POST", SLOW_PATH, what="Form") == MOVED_PATH
+
     assert _answered_at(api_client) is not None
+    assert not [r for r in caplog.records if r.name == LOGGER]
 
 
-async def test_the_requests_a_login_left_behind_are_still_counted(api_client: ComexioClient) -> None:
+async def test_the_requests_a_login_left_behind_are_still_counted(
+    api_client: ComexioClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_LOGIN_WAIT_FOR_REQUESTS_SEC", 0.05)
     gate = api_client._gate
     release = asyncio.Event()
 
@@ -529,9 +544,9 @@ async def test_the_requests_a_login_left_behind_are_still_counted(api_client: Co
     await asyncio.sleep(0)
     assert gate.requests_in_flight == 1
 
-    gate._in_flight = client_module._InFlight()  # what a login that gave up waiting does
+    async with gate.login():  # gives up waiting for the held request after 0.05 s
+        assert gate.requests_in_flight == 1
 
-    assert gate.requests_in_flight == 1
     release.set()
     await task
     assert gate.requests_in_flight == 0
@@ -557,4 +572,22 @@ async def test_session_kwargs_append_the_callers_trace_configs() -> None:
 
     assert len(configs) == 3
     assert configs[0].on_connection_reuseconn
+    assert configs[1].on_request_start
     assert configs[2] is own
+    assert session_kwargs(trace_configs=[own])["trace_configs"][1:] == [own]
+    assert len(session_kwargs(trace_configs=None)["trace_configs"]) == 1
+    async with aiohttp.ClientSession(**session_kwargs(trace_configs=[own])):
+        pass  # no TypeError for a duplicate keyword
+
+
+async def test_an_invalid_url_error_is_named_by_class_and_not_by_its_url(
+    api_client: ComexioClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    error = aiohttp.InvalidURL("http://host/api/?value=12345")
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        api_client._log_request("Page", time.monotonic(), None, {}, error)
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    assert line.endswith(" in flight: InvalidURL")
+    assert "12345" not in line
