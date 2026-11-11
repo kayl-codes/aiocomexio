@@ -26,8 +26,9 @@ DEFAULT_TIMEOUT_SEC = 120
 DEFAULT_PROGRESS_LOG_INTERVAL_SEC = 10
 
 # Where connection_trace_config() leaves its findings in a request's trace_request_ctx dict (a list, one entry per
-# connection the request was tried on), and the two values.
-CONNECTION_KEY = "connection"
+# connection the request was tried on), and the two values. The key carries the library's name so it cannot collide with
+# something a caller keeps in its own trace_request_ctx.
+CONNECTION_KEY = "aiocomexio.connection"
 CONNECTION_REUSED = "reused"
 CONNECTION_NEW = "new"
 
