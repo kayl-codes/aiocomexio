@@ -129,6 +129,8 @@ _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
 _API_PATH = "/api/"
 # A request that comes after at least this long without any answer gets a debug line even if it succeeds.
 _IDLE_LOG_MIN_SEC = 5.0
+# The error text of the debug line is cut here: a transport error can carry a long message.
+_DIAGNOSTIC_ERROR_MAX_CHARS = 300
 # Where _follow_redirects leaves the moment its request got a slot at the login gate, and the time of the last
 # answer as it stood then (next to CONNECTION_KEY): what the request itself waited for is not "idle".
 _STARTED_KEY = "started"
@@ -591,14 +593,15 @@ class _LoginGate:
 
     def __init__(self) -> None:
         self._in_flight = _InFlight()
+        self._running = 0  # every running request, the ones of a batch a login left behind too
         self._login_task: asyncio.Task[Any] | None = None
         self._no_login = asyncio.Event()
         self._no_login.set()
 
     @property
     def requests_in_flight(self) -> int:
-        """How many requests of the current batch are running (the login's own requests are not counted)."""
-        return self._in_flight.count
+        """How many requests are running, also those a login that gave up waiting left behind (not its own)."""
+        return self._running
 
     @asynccontextmanager
     async def request(self) -> AsyncIterator[None]:
@@ -610,9 +613,11 @@ class _LoginGate:
             await self._no_login.wait()
         in_flight = self._in_flight  # a request counts against the batch it started in
         in_flight.add()
+        self._running += 1
         try:
             yield
         finally:
+            self._running -= 1
             in_flight.remove()
 
     @asynccontextmanager
@@ -2269,28 +2274,21 @@ class ComexioClient:
         out of the request or the caller's block (a status or data error too; the line names its class, and the
         message only for a transport error). It costs nothing unless the aiocomexio logger is at DEBUG, and a failure
         of the line itself never replaces the request's own result. A request that bypasses this method
-        (_request_redirect) is not noted, and does not move the time of the last answer.
+        (_request_redirect, the function plan forms) gets no line of its own, but its answer moves the time of the
+        last one.
         """
-        previous_response_at = self._last_response_at
-        started = time.monotonic()
         notes: dict[str, Any] = {}
         failure: BaseException | None = None
         try:
             async with self._follow_redirects(method, path, what=what, connection=notes, **kwargs) as resp:
-                # Headers are in: the server answered, whatever the body turns out to be.
-                self._last_response_at = time.monotonic()
                 yield resp
         except BaseException as err:  # noqa: BLE001 - only noted for the debug line, always re-raised
             failure = err
             raise
         finally:
-            self._log_request_safely(
-                what,
-                notes.get(_STARTED_KEY, started),
-                notes.get(_PREVIOUS_RESPONSE_KEY, previous_response_at),
-                notes,
-                failure,
-            )
+            # No slot at the login gate, nothing sent: a request cancelled in the queue has no line.
+            if _STARTED_KEY in notes:
+                self._log_request_safely(what, notes[_STARTED_KEY], notes[_PREVIOUS_RESPONSE_KEY], notes, failure)
             # The traceback of the error holds this frame: drop the reference so the two do not keep each other.
             failure = None
 
@@ -2358,6 +2356,8 @@ class ComexioClient:
                 async with self._session.request(
                     method, url, ssl=self._ssl, allow_redirects=False, trace_request_ctx=connection, **kwargs
                 ) as resp:
+                    # Headers are in: the server answered (a redirect hop too), whatever the body turns out to be.
+                    self._last_response_at = time.monotonic()
                     if resp.status not in _FOLLOWED_REDIRECT_STATUSES:
                         yield resp
                         return
@@ -2411,6 +2411,7 @@ class ComexioClient:
                     method, f"{self._base_url}{path}", allow_redirects=False, ssl=self._ssl, **_unencoded(kwargs)
                 ) as resp,
             ):
+                self._last_response_at = time.monotonic()  # the server answered: the idle time of a later request
                 if resp.status in _REDIRECT_STATUSES:
                     location = resp.headers.get("Location", "")
                     try:
@@ -3979,8 +3980,17 @@ def _text_encoding(resp: aiohttp.ClientResponse) -> str:
 
 
 def _diagnostic_error_text(error: BaseException) -> str:
-    """A transport error in full; any other (a status or data error carries a page excerpt or the URL) by class."""
-    return repr(error) if isinstance(error, (aiohttp.ClientError, TimeoutError)) else type(error).__name__
+    """A transport error in full, cut to _DIAGNOSTIC_ERROR_MAX_CHARS; any other error by its class.
+
+    A status or data error carries a page excerpt, and a ClientResponseError (a session with raise_for_status) the
+    URL, whose query holds the value of an API write: those are named by class (and status) only.
+    """
+    if isinstance(error, aiohttp.ClientResponseError):
+        return f"{type(error).__name__} (status {error.status})"
+    if isinstance(error, (aiohttp.ClientError, TimeoutError)):
+        text = repr(error)
+        return text if len(text) <= _DIAGNOSTIC_ERROR_MAX_CHARS else f"{text[:_DIAGNOSTIC_ERROR_MAX_CHARS]}…"
+    return type(error).__name__
 
 
 async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str = "strict") -> str:
