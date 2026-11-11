@@ -2282,7 +2282,8 @@ class ComexioClient:
         try:
             async with self._follow_redirects(method, path, what=what, connection=notes, **kwargs) as resp:
                 yield resp
-        except BaseException as err:  # noqa: BLE001 - only noted for the debug line, always re-raised
+        # Only noted for the debug line, always re-raised.
+        except BaseException as err:
             failure = err
             raise
         finally:
@@ -2302,7 +2303,8 @@ class ComexioClient:
     ) -> None:
         try:
             self._log_request(what, started, previous_response_at, notes, error)
-        except Exception:  # noqa: BLE001 - a diagnostic line must never replace the request's own exception
+        # A diagnostic line must never replace the request's own exception.
+        except Exception:
             _LOGGER.debug("Request diagnostics for %s failed", what, exc_info=True)
 
     def _log_request(
