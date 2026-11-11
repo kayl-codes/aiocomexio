@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Self, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
 import aiohttp
+from aiohttp.client_reqrep import ConnectionKey
 from aiohttp.http_exceptions import HttpProcessingError
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
@@ -1136,8 +1137,10 @@ class ComexioClient:
             # Only the snapshot's own deadline means no frame came; aiohttp's timeouts (the session's total one,
             # connect, socket read) are transport errors like on every other request.
             if deadline.expired():
-                raise ComexioConnectionError(f"{what}: no complete frame within {_SNAPSHOT_TIMEOUT_SEC} s") from err
-            raise self._transport_error(what, err) from err
+                raise ComexioConnectionError(
+                    f"{what}: no complete frame within {_SNAPSHOT_TIMEOUT_SEC} s"
+                ) from _stripped_cause(err)
+            raise self._transport_error(what, err) from _stripped_cause(err)
 
     async def get_onewire_sensors(self) -> dict[str, OneWireSensor]:
         """The active 1-Wire sensors of the configuration, keyed by address (OT1, OH3, ...).
@@ -2264,7 +2267,7 @@ class ComexioClient:
                     raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
                 return await _response_text(resp, what)
         except (aiohttp.ClientError, TimeoutError) as err:
-            raise self._transport_error(what, err) from err
+            raise self._transport_error(what, err) from _stripped_cause(err)
 
     async def _request_unread(self, method: str, path: str, *, what: str, **kwargs: Any) -> None:
         """Send one request whose answer, whatever its status or body, is not looked at; only transport errors count."""
@@ -2272,7 +2275,7 @@ class ComexioClient:
             async with self._response(method, path, what=what, **kwargs):
                 return
         except (aiohttp.ClientError, TimeoutError) as err:
-            raise self._transport_error(what, err) from err
+            raise self._transport_error(what, err) from _stripped_cause(err)
 
     @asynccontextmanager
     async def _response(
@@ -2395,7 +2398,11 @@ class ComexioClient:
             raise ComexioResponseError(f"{what} failed: more than {_MAX_REDIRECTS} redirects", status=resp.status)
 
     def _transport_error(self, what: str, err: aiohttp.ClientError | TimeoutError) -> ComexioError:
-        """The ComexioError for a request that failed below HTTP: a foreign certificate or a connection problem."""
+        """The ComexioError for a request that failed below HTTP: a foreign certificate or a connection problem.
+
+        Raised `from _stripped_cause(err)`, which is evaluated after this (left to right) and changes err: the text
+        here is taken from err as aiohttp raised it. An override gets err not yet stripped and must not log it.
+        """
         if isinstance(err, aiohttp.ServerFingerprintMismatch):
             expected, actual = err.expected.hex(), err.got.hex()
             return ComexioCertificateMismatchError(
@@ -2404,9 +2411,7 @@ class ComexioClient:
                 expected=expected,
                 actual=actual,
             )
-        text = _transport_error_text(err)
-        _strip_request_and_answer(err, text)
-        return ComexioConnectionError(f"{what} failed: {text}")
+        return ComexioConnectionError(f"{what} failed: {_transport_error_text(err)}")
 
     async def _request_admin_text(self, method: str, path: str, *, what: str, **kwargs: Any) -> str:
         """_request_text for an admin page or action; the login form raises ComexioAuthenticationError.
@@ -2457,7 +2462,7 @@ class ComexioClient:
                 )
         except (aiohttp.ClientError, TimeoutError) as err:
             self._note_status_answer(err)
-            raise self._transport_error(what, err) from err
+            raise self._transport_error(what, err) from _stripped_cause(err)
         if _LOGIN_FORM_SUBMIT_MARKER in body:
             raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
         if status != HTTPStatus.OK:
@@ -4009,9 +4014,13 @@ def _diagnostic_error_text(error: BaseException) -> str:
     A status or data error carries a page excerpt: it is named by class only.
     """
     if isinstance(error, (aiohttp.ClientError, TimeoutError)):
-        text = _transport_error_text(error)
-        return text if len(text) <= _DIAGNOSTIC_ERROR_MAX_CHARS else f"{text[:_DIAGNOSTIC_ERROR_MAX_CHARS]}…"
+        return _bounded(_transport_error_text(error))
     return type(error).__name__
+
+
+def _bounded(text: str) -> str:
+    """text, cut to _DIAGNOSTIC_ERROR_MAX_CHARS."""
+    return text if len(text) <= _DIAGNOSTIC_ERROR_MAX_CHARS else f"{text[:_DIAGNOSTIC_ERROR_MAX_CHARS]}…"
 
 
 def _transport_error_text(error: BaseException) -> str:
@@ -4020,7 +4029,8 @@ def _transport_error_text(error: BaseException) -> str:
     A ClientResponseError (a session with raise_for_status) carries the request, its URL (whose query holds the value
     of an API write) and headers (Authorization); an InvalidURL is the URL: named by class (and status) only. A
     ServerDisconnectedError for a connection dropped in the middle of an answer carries the part aiohttp parsed, its
-    headers (Set-Cookie) included: named by class and status only.
+    headers (Set-Cookie) included: named by class and status only. A connection error carries the connection key,
+    which holds the proxy and its credentials when the request went through one: shown without them.
     """
     if isinstance(error, aiohttp.ClientResponseError):
         return f"{type(error).__name__} (status {error.status})"
@@ -4028,31 +4038,45 @@ def _transport_error_text(error: BaseException) -> str:
         return type(error).__name__
     if _carries_an_answer(error):
         return f"{type(error).__name__} (in the middle of an answer, status {getattr(error.message, 'code', '?')})"
+    if isinstance(error, aiohttp.ClientConnectorError):
+        # Its repr, with the key in it replaced.
+        return f"{type(error).__name__}({', '.join(repr(_without_connection_key(arg)) for arg in error.args)})"
     return repr(error)
 
 
-def _strip_request_and_answer(error: BaseException, text: str) -> None:
-    """Remove from a transport error what _transport_error_text left out of `text`.
+def _stripped_cause(error: BaseException) -> BaseException | None:
+    """error, stripped of what _transport_error_text leaves out, to raise the ComexioError from; None if that fails.
 
     The error stays the cause of the ComexioConnectionError raised from it: a traceback prints the cause's message, and
     a caller may re-raise and log the cause itself. Only its content changes, its type stays, so _once_more_if_dropped
-    and such a caller still recognise it.
+    and such a caller still recognise it. Should stripping fail, the ComexioError goes out without a cause: the error
+    would still show what was to go. Its type is then gone with it, so a dropped connection is not tried once more.
     """
+    text = _transport_error_text(error)
     try:
-        if isinstance(error, aiohttp.ClientResponseError):
-            _strip_response_error(error)
-        elif isinstance(error, aiohttp.InvalidURL):
-            _strip_invalid_url(error)
-        elif _carries_an_answer(error):
-            error.args = (text,)
-            error.message = text
+        _strip_request_and_answer(error, text)
     # Stripping must never replace the request's own error. The classes alone: a message could hold what was to go.
     except Exception as strip_error:
         _LOGGER.warning(
-            "Could not strip the request from %s (%s): the error may still show it",
+            "Could not strip the request from %s (%s): raised without it as the cause",
             type(error).__name__,
             type(strip_error).__name__,
         )
+        return None
+    return error
+
+
+def _strip_request_and_answer(error: BaseException, text: str) -> None:
+    """Remove from a transport error what _transport_error_text left out of `text`."""
+    if isinstance(error, aiohttp.ClientResponseError):
+        _strip_response_error(error)
+    elif isinstance(error, aiohttp.InvalidURL):
+        _strip_invalid_url(error)
+    elif isinstance(error, aiohttp.ClientConnectorError):
+        _strip_connection_key(error)
+    elif _carries_an_answer(error):
+        error.args = (text,)
+        error.message = text
 
 
 def _strip_response_error(error: aiohttp.ClientResponseError) -> None:
@@ -4062,9 +4086,11 @@ def _strip_response_error(error: aiohttp.ClientResponseError) -> None:
     """
     # A parse error of the answer (aiohttp raises it from an HttpProcessingError) carries the raw bytes as its
     # message: the parser error's class instead, which tells what was wrong. Any other message is aiohttp's or the
-    # server's reason phrase and stays.
+    # server's reason phrase and stays, cut like the text of the debug line.
     if isinstance(error.__cause__, HttpProcessingError):
         error.message = type(error.__cause__).__name__
+    elif isinstance(error.message, str):
+        error.message = _bounded(error.message)
     error.headers = None  # the answer's headers (Set-Cookie)
     error.history = ()  # the redirects before it, each with its URL
     _cut_cause(error)
@@ -4091,6 +4117,24 @@ def _strip_invalid_url(error: aiohttp.InvalidURL) -> None:
     error._url = bare  # what InvalidURL's url and str() read
     error.args = (bare, *error.args[1:])
     _cut_cause(error)
+
+
+def _strip_connection_key(error: aiohttp.ClientConnectorError) -> None:
+    """The connection key loses the proxy's credentials; host, port and the OS error stay to show what failed."""
+    key = error.args[0]
+    if isinstance(key, ConnectionKey):
+        error._conn_key = key = _bare_connection_key(key)  # what the error's host, port and str() read
+        error.args = (key, *error.args[1:])
+
+
+def _without_connection_key(arg: object) -> object:
+    """arg for the text of a connection error: a connection key bare (see _bare_connection_key), anything else as is."""
+    return _bare_connection_key(arg) if isinstance(arg, ConnectionKey) else arg
+
+
+def _bare_connection_key(key: ConnectionKey) -> ConnectionKey:
+    """The connection key without the proxy's credentials (proxy_auth, user info in its URL)."""
+    return key._replace(proxy=None if key.proxy is None else _bare_url(key.proxy), proxy_auth=None)
 
 
 def _bare_url(url: "URL") -> "URL":

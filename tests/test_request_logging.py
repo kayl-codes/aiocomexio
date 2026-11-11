@@ -1,10 +1,14 @@
 """The debug line about a failed or late request (#289): idle time, connection, requests in flight."""
 
+import ast
 import asyncio
 import logging
+import pathlib
 import re
+import socket
 import time
 import traceback
+import warnings
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
@@ -12,6 +16,7 @@ from types import SimpleNamespace
 import aiohttp
 import pytest
 from aiohttp import http_exceptions, web
+from aiohttp.client_reqrep import ConnectionKey
 from multidict import CIMultiDictProxy
 from yarl import URL
 
@@ -565,7 +570,92 @@ def test_a_response_error_without_a_request_info_is_still_stripped_of_the_answer
     raised = api_client._transport_error("Page", error)
 
     assert str(raised) == "Page failed: ClientResponseError (status 500)"
+    assert client_module._stripped_cause(error) is error
     assert (error.status, error.headers, error.history) == (500, None, ())
+
+
+def test_a_long_reason_phrase_is_cut_before_the_error_becomes_the_cause() -> None:
+    error = aiohttp.ClientResponseError(
+        SimpleNamespace(),  # type: ignore[arg-type]  # no request needed here
+        (),
+        status=502,
+        message="x" * (client_module._DIAGNOSTIC_ERROR_MAX_CHARS + 50),
+    )
+
+    assert client_module._stripped_cause(error) is error
+    assert error.message == "x" * client_module._DIAGNOSTIC_ERROR_MAX_CHARS + "…"
+
+
+def _connection_key(*, through_proxy: bool = True) -> ConnectionKey:
+    """The connection key of a request, through a proxy that needs credentials or direct (whatever fields it has)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)  # BasicAuth, deprecated in newer aiohttp
+        auth = aiohttp.BasicAuth("proxyuser", "12345")
+    key = ConnectionKey._make([None] * len(ConnectionKey._fields))._replace(
+        host="comexio", port=443, is_ssl=True, ssl=True
+    )
+    return key._replace(proxy=URL("http://proxyuser:12345@proxy:3128"), proxy_auth=auth) if through_proxy else key
+
+
+_REFUSED = OSError(111, "Connection refused")
+
+
+@pytest.mark.parametrize(
+    ("error", "proxy"),
+    [
+        (aiohttp.ClientConnectorError(_connection_key(), _REFUSED), URL("http://proxy:3128")),
+        (aiohttp.ClientConnectorSSLError(_connection_key(), OSError(1, "handshake failed")), URL("http://proxy:3128")),
+        (aiohttp.ClientConnectorCertificateError(_connection_key(), ValueError("bad cert")), URL("http://proxy:3128")),
+        (aiohttp.ClientConnectorDNSError(_connection_key(), OSError(-2, "Name unknown")), URL("http://proxy:3128")),
+        (aiohttp.ClientProxyConnectionError(_connection_key(), _REFUSED), URL("http://proxy:3128")),
+        (aiohttp.ClientConnectorError(_connection_key(through_proxy=False), _REFUSED), None),
+    ],
+    ids=["connect", "tls", "certificate", "dns", "proxy", "no-proxy"],
+)
+def test_a_connection_error_through_a_proxy_does_not_show_its_credentials(
+    api_client: ComexioClient, error: aiohttp.ClientConnectorError, proxy: URL | None
+) -> None:
+    raised = api_client._transport_error("Page", error)
+    diagnostic = client_module._diagnostic_error_text(error)
+
+    assert client_module._stripped_cause(error) is error
+    assert str(raised).startswith(f"Page failed: {type(error).__name__}(ConnectionKey(host='comexio', port=443")
+    # The error keeps what tells where it failed; the proxy stays, without its user info.
+    assert (error.host, error.port, error.args[0].proxy, error.args[0].proxy_auth) == ("comexio", 443, proxy, None)
+    shown = str(raised) + diagnostic + "".join(traceback.format_exception_only(error)) + repr(error)
+    assert "12345" not in shown
+    assert "proxyuser" not in shown
+
+
+async def test_a_connection_error_of_aiohttp_carries_the_key_that_is_stripped() -> None:
+    # The tests above build the key themselves: aiohttp's own connector has to raise with that class, else the key
+    # would be left as it is without a sign.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]  # closed again before the request: nothing listens there
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(aiohttp.ClientConnectorError) as raised:
+            await session.get(f"http://127.0.0.1:{port}/api/?value=12345")
+
+    assert isinstance(raised.value.args[0], ConnectionKey)
+    assert client_module._stripped_cause(raised.value) is raised.value
+    assert (raised.value.host, raised.value.port, raised.value.args[0].proxy_auth) == ("127.0.0.1", port, None)
+
+
+def test_every_transport_error_is_raised_from_its_stripped_cause() -> None:
+    # Stripping is not part of _transport_error (a consumer overrides it): each raise has to ask for it itself.
+    tree = ast.parse(pathlib.Path(client_module.__file__).read_text(encoding="utf-8"))
+    raises = [
+        (ast.unparse(node.exc.args[1]), None if node.cause is None else ast.unparse(node.cause))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and isinstance(node.exc.func, ast.Attribute)
+        and node.exc.func.attr == "_transport_error"
+    ]
+
+    assert raises
+    assert [cause for _err, cause in raises] == [f"_stripped_cause({err})" for err, _cause in raises]
 
 
 async def test_an_error_status_the_session_raises_still_moves_the_answer_time(
@@ -834,6 +924,7 @@ def test_an_invalid_url_error_loses_its_query_before_it_becomes_the_cause(
     raised = api_client._transport_error("Page", error)
 
     assert str(raised) == "Page failed: InvalidURL"
+    assert client_module._stripped_cause(error) is error
     # The cause keeps its type and URL type, without query, fragment, user info and the error it came from.
     assert (type(error), type(error.url), str(error)) == (aiohttp.InvalidURL, type(url), kept)
     assert "12345" not in "".join(traceback.format_exception_only(error)) + repr(error.args)
@@ -864,23 +955,43 @@ async def test_an_answer_that_cannot_be_parsed_leaves_no_raw_byte_in_the_cause(
     assert "secret123" not in "".join(traceback.format_exception(raised.value))
 
 
+def _broken_strip(_error: BaseException) -> None:
+    raise TypeError("http://host/api/?value=12345")
+
+
 def test_a_failure_while_stripping_keeps_the_requests_own_error(
     api_client: ComexioClient, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def broken(_error: BaseException) -> None:
-        raise TypeError("http://host/api/?value=12345")
-
-    monkeypatch.setattr(client_module, "_strip_invalid_url", broken)
+    monkeypatch.setattr(client_module, "_strip_invalid_url", _broken_strip)
     error = aiohttp.InvalidURL("http://host/api/?value=12345")
 
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         raised = api_client._transport_error("Page", error)
+        cause = client_module._stripped_cause(error)
 
-    assert (type(raised), str(raised)) == (ComexioConnectionError, "Page failed: InvalidURL")
+    assert (type(raised), str(raised), cause) == (ComexioConnectionError, "Page failed: InvalidURL", None)
     # Logged by the classes only: the failure's own message may hold what was to go.
     assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == LOGGER] == [
-        (logging.WARNING, "Could not strip the request from InvalidURL (TypeError): the error may still show it")
+        (logging.WARNING, "Could not strip the request from InvalidURL (TypeError): raised without it as the cause")
     ]
+
+
+async def test_an_error_that_could_not_be_stripped_is_not_chained(
+    api_client: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_strip_response_error", _broken_strip)
+    comexio.serve("GET", API_PATH, _bad_status_line)
+
+    with pytest.raises(ComexioConnectionError) as raised:
+        await api_client.set_marker_value(5, 0)
+
+    assert (str(raised.value), raised.value.__cause__, raised.value.__suppress_context__) == (
+        "Writing marker M5 failed: ClientResponseError (status 400)",
+        None,
+        True,
+    )
+    # A traceback does not show the unstripped error (its message is the raw status line).
+    assert "secret123" not in "".join(traceback.format_exception(raised.value))
 
 
 async def _cut_off_in_the_headers(request: web.Request) -> web.StreamResponse:
