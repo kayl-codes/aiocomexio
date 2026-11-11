@@ -572,6 +572,23 @@ async def test_snapshot_of_a_silent_stream_times_out(
         await logged_in.get_doorstation_snapshot(7)
 
     assert str(info.value) == "Doorstation camera 7 snapshot: no complete frame within 0.05 s"
+    # Raised from the deadline's own timeout, as every transport error is raised from its cause.
+    assert isinstance(info.value.__cause__, TimeoutError)
+
+
+async def test_the_debug_line_of_a_snapshot_that_timed_out_names_the_timeout(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The snapshot's deadline cancels the request: the line says so instead of naming the cancellation.
+    monkeypatch.setattr(client_module, "_SNAPSHOT_TIMEOUT_SEC", 0.05)
+    comexio.serve("GET", STREAM_PATH, _stream(_part(FRAME[:50])))
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.client"), pytest.raises(ComexioConnectionError):
+        await logged_in.get_doorstation_snapshot(7)
+
+    (line,) = (r.getMessage() for r in caplog.records if " failed after " in r.getMessage())
+    assert line.startswith("Doorstation camera 7 snapshot: failed after ")
+    assert line.endswith(""": TimeoutError("the caller's deadline expired")""")
 
 
 async def test_snapshot_on_expired_session_raises_authentication_error(
@@ -1335,15 +1352,22 @@ async def test_snapshot_of_a_server_that_sends_no_headers_times_out(
     assert str(info.value) == "Doorstation camera 7 snapshot: no complete frame within 0.05 s"
 
 
-async def test_a_cancelled_snapshot_stays_cancelled(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+async def test_a_cancelled_snapshot_stays_cancelled(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
     comexio.serve("GET", STREAM_PATH, _stream(_part(FRAME[:50])))
-    task = asyncio.create_task(logged_in.get_doorstation_snapshot(7))
-    await asyncio.sleep(0.05)
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.client"):
+        task = asyncio.create_task(logged_in.get_doorstation_snapshot(7))
+        await asyncio.sleep(0.05)
 
-    task.cancel()
+        task.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        await task
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    # Cancelled from outside before its own deadline: the debug line names the cancellation, not a timeout.
+    (line,) = (r.getMessage() for r in caplog.records if " failed after " in r.getMessage())
+    assert line.endswith(": CancelledError")
 
 
 @pytest.mark.parametrize(
