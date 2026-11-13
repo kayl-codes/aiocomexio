@@ -9,6 +9,7 @@ import pytest
 from aiohttp import web
 
 from aiocomexio import (
+    ACCESS_FORBIDDEN,
     ACCESS_READ,
     ACCESS_READ_WRITE,
     ACCESS_SELECTION,
@@ -391,7 +392,11 @@ def test_a_switch_that_is_no_checkbox_is_a_changed_page(input_id: str) -> None:
 
 @pytest.mark.parametrize("select_id", ["in_output", "one_wire"])
 def test_the_single_selection_exists_for_the_markers_only(select_id: str) -> None:
-    html = _select(FIXTURE, select_id, "4")
+    # The fixture offers the option 4 for the markers only: add it to the select under test.
+    html = re.sub(
+        rf'(<select id="{select_id}".*?)</select>', r'\1<option value="4">x</option></select>', FIXTURE, count=1
+    )
+    html = _select(html, select_id, "4")
 
     with pytest.raises(ComexioDataError, match=select_id):
         _settings(html)
@@ -485,11 +490,97 @@ def test_a_changed_page_raises_data_error(old: str, new: str, message: str) -> N
     assert str(info.value) == message
 
 
-def test_a_select_without_a_selected_option_is_a_changed_page() -> None:
+def test_a_select_without_a_selected_option_shows_its_first_enabled_one() -> None:
+    # As a browser shows it: in_output starts with "Verbieten" (0).
     html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' id="in_output_3"')
 
-    with pytest.raises(ComexioDataError):
+    assert _settings(html).in_output == ACCESS_FORBIDDEN
+
+
+def test_a_disabled_first_option_is_skipped_when_none_is_selected() -> None:
+    html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' id="in_output_3"')
+    html = html.replace('<option value="0" id="in_output_1">', '<option value="0" disabled id="in_output_1">')
+
+    assert _settings(html).in_output == ACCESS_READ
+
+
+def test_a_selected_disabled_option_still_counts() -> None:
+    html = _select(FIXTURE, "in_output", "1").replace(
+        '<option value="1" selected="selected"', '<option value="1" disabled selected="selected"'
+    )
+
+    assert _settings(html).in_output == ACCESS_READ
+
+
+def test_a_select_without_any_enabled_option_is_a_changed_page() -> None:
+    html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' disabled id="in_output_3"')
+    html = html.replace('<option value="0" id="in_output_1">', '<option value="0" disabled id="in_output_1">')
+    html = html.replace('<option value="1" id="in_output_2">', '<option value="1" disabled id="in_output_2">')
+
+    with pytest.raises(ComexioDataError, match="in_output"):
         _settings(html)
+
+
+def test_a_page_cut_off_inside_a_select_does_not_count_its_value() -> None:
+    # The select of the markers never closes: what it showed so far says nothing about its value.
+    cut = FIXTURE.index('<option value="3" selected="selected" id="flag_3">') + len(
+        '<option value="3" selected="selected" id="flag_3">'
+    )
+
+    with pytest.raises(ComexioDataError, match="flag"):
+        _settings(FIXTURE[:cut])
+
+
+def test_the_marker_right_bits_are_exported_from_the_package_root() -> None:
+    import aiocomexio
+
+    assert (aiocomexio.RIGHT_READ, aiocomexio.RIGHT_WRITE) == (1, 2)
+    assert {"RIGHT_READ", "RIGHT_WRITE"} <= set(aiocomexio.__all__)
+
+
+def test_the_marker_rights_cannot_be_changed_through_the_settings() -> None:
+    rights = _settings().marker_rights
+
+    assert rights is not None
+    with pytest.raises(TypeError):
+        rights[1] = 3  # type: ignore[index]
+    assert dataclasses.asdict(_settings())["marker_rights"] == dict(rights)
+    assert repr(dict(rights)) in repr(rights)
+
+
+@pytest.mark.parametrize(
+    ("user", "password"),
+    [
+        pytest.param("", "pw", id="empty-user"),
+        pytest.param("a:b", "pw", id="colon-in-user"),
+        pytest.param("us\u20acr", "pw", id="user-beyond-latin1"),
+        pytest.param("user", "p\u20acw", id="password-beyond-latin1"),
+    ],
+)
+def test_configured_credentials_the_client_cannot_send_are_a_login_blocker(user: str, password: str) -> None:
+    # The page asks for the same credentials, but the client sends no Authorization header for them.
+    html = FIXTURE.replace('value="api-user"', f'value="{user}"').replace(PAGE_PASSWORD, password)
+
+    settings = _settings(html, user=user, password=password)
+
+    assert settings.username_matches is True
+    assert settings.password_matches is True
+    assert settings.credentials_usable is False
+    assert settings.write_blockers(WRITE_TARGET_MARKER, 1) == (
+        "the API requires a login and the configured API credentials cannot be sent "
+        "(empty user, ':' in the user, or characters outside ISO-8859-1)",
+    )
+    assert "configured credentials cannot be sent" in settings.summary()
+    assert not user or user not in settings.summary()
+
+
+def test_credentials_the_client_cannot_send_are_no_blocker_without_a_login() -> None:
+    html = FIXTURE.replace(' id="use_login" name="use_login" checked="checked"', ' id="use_login" name="use_login"')
+
+    settings = _settings(html, user="", password="")
+
+    assert settings.credentials_usable is False
+    assert settings.write_blockers(WRITE_TARGET_MARKER, 1) == ()
 
 
 def test_the_first_input_of_an_id_counts() -> None:

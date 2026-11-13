@@ -15,7 +15,7 @@ result has only that verdict.
 import hmac
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -71,10 +71,40 @@ _MAX_PORT = 65535
 # Longest id of a marker in the list; a longer key is not an id.
 _MAX_ID_DIGITS = 9
 _UTF8 = "utf-8"
+# What the client encodes the Basic Auth credentials in (ComexioClient._basic_auth_header).
+_BASIC_AUTH_ENCODING = "iso-8859-1"
 
 _MSG_INACTIVE = "the API is switched off (access: inactive)"
+_MSG_CREDENTIALS_UNUSABLE = (
+    "the API requires a login and the configured API credentials cannot be sent "
+    "(empty user, ':' in the user, or characters outside ISO-8859-1)"
+)
 _MSG_USER_DIFFERS = "the API requires a login and its user differs from the configured API user"
 _MSG_CREDENTIAL_DIFFERS = "the API requires a login and its password differs from the configured API password"
+
+
+class _MarkerRights(Mapping[int, int]):
+    """The marker list as a read-only mapping: a caller of the frozen ApiSettings cannot change what it reports.
+
+    A class of its own, not a MappingProxyType: dataclasses.asdict() deep-copies it, which a mappingproxy refuses.
+    """
+
+    __slots__ = ("_rights",)
+
+    def __init__(self, rights: Mapping[int, int]) -> None:
+        self._rights = dict(rights)
+
+    def __getitem__(self, marker_id: int) -> int:
+        return self._rights[marker_id]
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._rights)
+
+    def __len__(self) -> int:
+        return len(self._rights)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self._rights!r})"
 
 
 @dataclass(slots=True)
@@ -115,6 +145,8 @@ class ApiSettings:
     flag: int
     one_wire: int
     marker_rights: Mapping[int, int] | None
+    # False if the configured API credentials give no Authorization header (see _credentials_usable).
+    credentials_usable: bool = True
 
     def write_blockers(self, target: str, marker_id: int | None = None) -> tuple[str, ...]:
         """The settings that stop /api/ writing the target, each as a sentence; none: the settings allow it.
@@ -140,6 +172,8 @@ class ApiSettings:
     def _login_blockers(self) -> list[str]:
         if not self.login_required:
             return []
+        if not self.credentials_usable:
+            return [_MSG_CREDENTIALS_UNUSABLE]
         if not self.username_matches:
             return [_MSG_USER_DIFFERS]
         return [] if self.password_matches else [_MSG_CREDENTIAL_DIFFERS]
@@ -160,7 +194,9 @@ class ApiSettings:
             "active" if self.active else "inactive",
             _tcp_summary(self),
         ]
-        if self.login_required:
+        if self.login_required and not self.credentials_usable:
+            parts.append("login required (configured credentials cannot be sent)")
+        elif self.login_required:
             parts.append(
                 f"login required (user {'matches' if self.username_matches else 'differs'}, "
                 f"password {'matches' if self.password_matches else 'differs'})"
@@ -210,6 +246,7 @@ def api_settings_from_fields(fields: ApiPageFields, *, api_username: str, api_pa
         username=username,
         username_matches=not login_required or _same(username, api_username),
         password_matches=not login_required or _same(password, api_password),
+        credentials_usable=_credentials_usable(api_username, api_password),
         in_output=_access(fields, IN_OUTPUT_SELECT, _PLAIN_ACCESS),
         flag=_access(fields, FLAG_SELECT, (*_PLAIN_ACCESS, ACCESS_SELECTION)),
         one_wire=_access(fields, ONE_WIRE_SELECT, _PLAIN_ACCESS),
@@ -266,7 +303,18 @@ def _same(page_value: str, configured: str) -> bool:
     return hmac.compare_digest(page_value.encode(_UTF8, "surrogatepass"), configured.encode(_UTF8, "surrogatepass"))
 
 
-def _marker_rights(raw: str | None) -> dict[int, int] | None:
+def _credentials_usable(username: str, password: str) -> bool:
+    """Whether the client sends these as a Basic Auth header: it sends none for an empty user and refuses the rest."""
+    if not username or ":" in username:
+        return False
+    try:
+        f"{username}:{password}".encode(_BASIC_AUTH_ENCODING)
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _marker_rights(raw: str | None) -> Mapping[int, int] | None:
     """The marker list of api_special_2 as {id: bits}, read as the page's own script reads it; None if unreadable.
 
     The script swaps the single quotes for double ones and parses JSON. An id without a marker is `null` and left
@@ -294,4 +342,4 @@ def _marker_rights(raw: str | None) -> dict[int, int] | None:
             _LOGGER.debug("API page: the marker list has a value that is no access")
             return None
         rights[int(key)] = value
-    return rights
+    return _MarkerRights(rights)

@@ -3560,6 +3560,9 @@ class _ApiFormParser(_FormParser):
         self._in_api_form = False
         self._select_id: str | None = None
         self._selects_seen: set[str] = set()
+        # The open select's last selected option, and its first enabled one (what a browser shows if none is selected).
+        self._chosen: str | None = None
+        self._first_enabled: str | None = None
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag == "form":
@@ -3571,15 +3574,24 @@ class _ApiFormParser(_FormParser):
         elif tag == "input":
             self._input(attributes)
         elif tag == "select":
-            select_id = attributes.get("id")
-            # The first select of an id counts, like the first input.
-            if select_id in API_SELECT_IDS and select_id not in self._selects_seen:
-                self._selects_seen.add(select_id)
-                self._select_id = select_id
-            else:
-                self._select_id = None
-        elif tag == "option" and self._select_id is not None and "selected" in attributes:
-            self.fields.selected[self._select_id] = attributes.get("value", "")
+            self._select_start(attributes.get("id"))
+        elif tag == "option" and self._select_id is not None:
+            self._option(attributes)
+
+    def _select_start(self, select_id: str | None) -> None:
+        # The first select of an id counts, like the first input.
+        if select_id in API_SELECT_IDS and select_id not in self._selects_seen:
+            self._selects_seen.add(select_id)
+            self._select_id = select_id
+        else:
+            self._select_id = None
+
+    def _option(self, attributes: dict[str, str]) -> None:
+        value = attributes.get("value", "")
+        if "selected" in attributes:
+            self._chosen = value
+        if self._first_enabled is None and "disabled" not in attributes:
+            self._first_enabled = value
 
     def handle_form_endtag(self, tag: str) -> None:
         if tag == "form":
@@ -3592,7 +3604,12 @@ class _ApiFormParser(_FormParser):
             self.fields.inputs.setdefault(input_id, attributes)
 
     def handle_select_end(self) -> None:
-        self._select_id = None
+        # Only a select that ended counts: a page cut off inside it says nothing about its value.
+        if self._select_id is not None:
+            choice = self._chosen if self._chosen is not None else self._first_enabled
+            if choice is not None:
+                self.fields.selected[self._select_id] = choice
+        self._select_id = self._chosen = self._first_enabled = None
 
 
 def parse_api_settings(html: str, *, api_username: str, api_password: str) -> ApiSettings:
