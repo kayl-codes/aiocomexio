@@ -992,11 +992,13 @@ async def test_get_api_settings_with_require_https_refuses_plain_http_before_any
     comexio.serve("GET", API_PATH, _admin_page(FIXTURE))
     async with aiohttp.ClientSession(**session_kwargs()) as session:
         client = await _client(comexio, session) if logged_in else _client_without_login(comexio, session)
+        received_before = list(comexio.received)
 
         with pytest.raises(ComexioInsecureTransportError) as info:
             await client.get_api_settings(require_https=True)
 
-    assert comexio.received_at("GET", API_PATH) == []
+    # Not only the page: no login or other request either (the login of the logged-in case came before the snapshot).
+    assert comexio.received == received_before
     assert str(info.value) == (
         "API settings page not read: the client talks plain HTTP and the page holds the API password in clear "
         "text (require_https=True; give the client a certificate fingerprint to use HTTPS)"
