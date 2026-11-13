@@ -19,7 +19,10 @@ from aiocomexio import (
     ApiSettings,
     ComexioAuthenticationError,
     ComexioClient,
+    ComexioConnectionError,
     ComexioDataError,
+    ComexioError,
+    ComexioInsecureTransportError,
     ComexioResponseError,
     session_kwargs,
 )
@@ -938,6 +941,12 @@ async def _client(comexio: FakeComexio, session: aiohttp.ClientSession) -> Comex
     return client
 
 
+def _client_without_login(comexio: FakeComexio, session: aiohttp.ClientSession) -> ComexioClient:
+    return ComexioClient(
+        comexio.host, USERNAME, PASSWORD, session=session, api_username=PAGE_USER, api_password=PAGE_PASSWORD
+    )
+
+
 async def test_get_api_settings_reads_the_api_page_with_the_admin_session(comexio: FakeComexio) -> None:
     comexio.serve("GET", API_PATH, _admin_page(FIXTURE))
     async with aiohttp.ClientSession(**session_kwargs()) as session:
@@ -959,6 +968,44 @@ async def test_get_api_settings_compares_with_the_api_credentials_of_the_client(
         settings = await client.get_api_settings()
 
     assert (settings.username_matches, settings.password_matches) == (False, False)
+
+
+async def test_get_api_settings_over_plain_http_reads_the_page_by_default_and_with_require_https_false(
+    comexio: FakeComexio,
+) -> None:
+    comexio.serve("GET", API_PATH, _admin_page(FIXTURE))
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session)
+
+        by_default = await client.get_api_settings()
+        explicit = await client.get_api_settings(require_https=False)
+
+    assert by_default == explicit
+    assert by_default.active is True
+    assert len(comexio.received_at("GET", API_PATH)) == 2
+
+
+@pytest.mark.parametrize("logged_in", [True, False], ids=["logged-in", "no-login"])
+async def test_get_api_settings_with_require_https_refuses_plain_http_before_any_request(
+    comexio: FakeComexio, logged_in: bool
+) -> None:
+    comexio.serve("GET", API_PATH, _admin_page(FIXTURE))
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session) if logged_in else _client_without_login(comexio, session)
+        received_before = list(comexio.received)
+
+        with pytest.raises(ComexioInsecureTransportError) as info:
+            await client.get_api_settings(require_https=True)
+
+    # Not only the page: no login or other request either (the login of the logged-in case came before the snapshot).
+    assert comexio.received == received_before
+    assert str(info.value) == (
+        "API settings page not read: the client talks plain HTTP and the page holds the API password in clear "
+        "text (require_https=True; give the client a certificate fingerprint to use HTTPS)"
+    )
+    # A client-side refusal that retrying cannot help: neither a dropped connection nor a rejected login.
+    assert isinstance(info.value, ComexioError)
+    assert not isinstance(info.value, (ComexioConnectionError, ComexioAuthenticationError))
 
 
 async def test_get_api_settings_sends_no_api_credential_to_comexio(comexio: FakeComexio) -> None:

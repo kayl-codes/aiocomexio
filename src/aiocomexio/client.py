@@ -64,6 +64,7 @@ from .exceptions import (
     ComexioCreatedWithoutIdError,
     ComexioDataError,
     ComexioError,
+    ComexioInsecureTransportError,
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
@@ -1121,7 +1122,7 @@ class ComexioClient:
         )
         return parse_extension_form(ext_id, html)
 
-    async def get_api_settings(self) -> ApiSettings:
+    async def get_api_settings(self, *, require_https: bool = False) -> ApiSettings:
         """The API settings of the IO-Server (switch, login, access per data type), read from its API page.
 
         One request with the admin session to /admin/api/home; see api_settings.ApiSettings. The page holds the API
@@ -1129,7 +1130,17 @@ class ComexioClient:
         the result has only the verdict (ApiSettings.password_matches), and nothing here logs it. For a write that
         failed this tells whether the settings explain it (ApiSettings.write_blockers). A page without the settings
         this reads raises ComexioDataError, the login form ComexioAuthenticationError.
+
+        The page comes over the transport this client uses, so over plain HTTP anyone listening on the way sees the
+        password in it (a write over /api/ sends it as Basic Auth the same way). With require_https=True a client
+        without a pinned certificate raises ComexioInsecureTransportError before any request; the default False
+        reads the page over whatever the client uses.
         """
+        if require_https and self._fingerprint is None:
+            raise ComexioInsecureTransportError(
+                "API settings page not read: the client talks plain HTTP and the page holds the API password in clear "
+                "text (require_https=True; give the client a certificate fingerprint to use HTTPS)"
+            )
         html = await self._request_admin_text("GET", _API_SETTINGS_PATH, what="API settings page")
         return parse_api_settings(html, api_username=self._api_username, api_password=self._api_password)
 
