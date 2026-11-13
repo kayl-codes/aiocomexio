@@ -512,6 +512,65 @@ def test_a_selected_disabled_option_still_counts() -> None:
     assert _settings(html).in_output == ACCESS_READ
 
 
+def test_an_option_of_a_disabled_optgroup_is_skipped_when_none_is_selected() -> None:
+    html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' id="in_output_3"')
+    html = html.replace(
+        '<option value="0" id="in_output_1">Verbieten</option>',
+        '<optgroup disabled><option value="0" id="in_output_1">Verbieten</option></optgroup>',
+    )
+
+    assert _settings(html).in_output == ACCESS_READ
+
+
+def test_the_disabled_optgroup_ends_with_its_end_tag() -> None:
+    html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' id="in_output_3"')
+    html = html.replace(
+        '<option value="0" id="in_output_1">Verbieten</option>',
+        '<optgroup disabled><option value="0" id="in_output_1">Verbieten</option>',
+    )
+    # Without the reset at </optgroup>, the options after it would still be disabled and the page unreadable.
+    html = html.replace('<option value="1" id="in_output_2">', '</optgroup><option value="1" id="in_output_2">')
+
+    assert _settings(html).in_output == ACCESS_READ
+
+
+def test_a_selected_option_of_a_disabled_optgroup_still_counts() -> None:
+    html = FIXTURE.replace(
+        '<option value="3" selected="selected" id="in_output_3">',
+        '<optgroup disabled><option value="3" selected="selected" id="in_output_3">',
+    )
+
+    assert _settings(html).in_output == ACCESS_READ_WRITE
+
+
+def test_a_disabled_optgroup_does_not_reach_the_next_select() -> None:
+    # An optgroup the page never closes must not disable the first option of the select after it.
+    html = FIXTURE.replace(
+        '<option value="0" id="in_output_1">Verbieten</option>',
+        '<optgroup disabled><option value="0" id="in_output_1">Verbieten</option>',
+    )
+    html = html.replace(' selected="selected" id="flag_3"', ' id="flag_3"')
+
+    assert _settings(html).flag == ACCESS_FORBIDDEN
+
+
+def test_a_multiple_select_has_no_single_value() -> None:
+    html = FIXTURE.replace(
+        '<select id="in_output" name="in_output"', '<select multiple id="in_output" name="in_output"'
+    )
+
+    with pytest.raises(ComexioDataError, match="no selected option for in_output"):
+        _settings(html)
+
+
+def test_a_multiple_select_without_a_selected_option_has_no_single_value() -> None:
+    html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' id="in_output_3"')
+    html = html.replace('<select id="in_output" name="in_output"', '<select multiple id="in_output" name="in_output"')
+
+    with pytest.raises(ComexioDataError, match="no selected option for in_output"):
+        _settings(html)
+
+
 def test_a_select_without_any_enabled_option_is_a_changed_page() -> None:
     html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' disabled id="in_output_3"')
     html = html.replace('<option value="0" id="in_output_1">', '<option value="0" disabled id="in_output_1">')

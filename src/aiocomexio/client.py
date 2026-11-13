@@ -3551,7 +3551,8 @@ class _ApiFormParser(_FormParser):
     Only the fields of the form apiform count (a page without it has none, and the settings are not read). The
     checked api_active radio counts (the last one, as a browser keeps one checked per group), the first input of an id
     (compared exactly), the first select of an id and its selected option (the last one, a browser shows one).
-    Everything else on the page is ignored.
+    An option of a disabled <optgroup> is disabled, and a select that allows several selected options has no single
+    value (it does not count). Everything else on the page is ignored.
     """
 
     def __init__(self) -> None:
@@ -3563,6 +3564,8 @@ class _ApiFormParser(_FormParser):
         # The open select's last selected option, and its first enabled one (what a browser shows if none is selected).
         self._chosen: str | None = None
         self._first_enabled: str | None = None
+        self._multiple = False  # the open select allows several selected options
+        self._group_disabled = False  # the open <optgroup> is disabled
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if tag == "form":
@@ -3574,15 +3577,19 @@ class _ApiFormParser(_FormParser):
         elif tag == "input":
             self._input(attributes)
         elif tag == "select":
-            self._select_start(attributes.get("id"))
+            self._select_start(attributes)
         elif tag == "option" and self._select_id is not None:
             self._option(attributes)
+        elif tag == "optgroup" and self._select_id is not None:
+            self._group_disabled = "disabled" in attributes
 
-    def _select_start(self, select_id: str | None) -> None:
+    def _select_start(self, attributes: dict[str, str]) -> None:
         # The first select of an id counts, like the first input.
+        select_id = attributes.get("id")
         if select_id in API_SELECT_IDS and select_id not in self._selects_seen:
             self._selects_seen.add(select_id)
             self._select_id = select_id
+            self._multiple = "multiple" in attributes
         else:
             self._select_id = None
 
@@ -3590,12 +3597,14 @@ class _ApiFormParser(_FormParser):
         value = attributes.get("value", "")
         if "selected" in attributes:
             self._chosen = value
-        if self._first_enabled is None and "disabled" not in attributes:
+        if self._first_enabled is None and "disabled" not in attributes and not self._group_disabled:
             self._first_enabled = value
 
     def handle_form_endtag(self, tag: str) -> None:
         if tag == "form":
             self._in_api_form = False
+        elif tag == "optgroup":
+            self._group_disabled = False
 
     def _input(self, attributes: dict[str, str]) -> None:
         if attributes.get("name") == ACTIVE_RADIO and "checked" in attributes:
@@ -3604,12 +3613,14 @@ class _ApiFormParser(_FormParser):
             self.fields.inputs.setdefault(input_id, attributes)
 
     def handle_select_end(self) -> None:
-        # Only a select that ended counts: a page cut off inside it says nothing about its value.
-        if self._select_id is not None:
+        # Only a select that ended counts: a page cut off inside it says nothing about its value, and a select that
+        # allows several selected options has none.
+        if self._select_id is not None and not self._multiple:
             choice = self._chosen if self._chosen is not None else self._first_enabled
             if choice is not None:
                 self.fields.selected[self._select_id] = choice
         self._select_id = self._chosen = self._first_enabled = None
+        self._multiple = self._group_disabled = False
 
 
 def parse_api_settings(html: str, *, api_username: str, api_password: str) -> ApiSettings:
