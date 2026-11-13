@@ -79,6 +79,10 @@ _MSG_CREDENTIALS_UNUSABLE = (
     "the API requires a login and the configured API credentials cannot be sent "
     "(empty user, ':' in the user, or characters outside ISO-8859-1)"
 )
+_MSG_CREDENTIALS_REFUSED = (
+    "the configured API credentials cannot be sent (':' in the user, or characters outside ISO-8859-1), "
+    "so the client refuses every /api/ write"
+)
 _MSG_USER_DIFFERS = "the API requires a login and its user differs from the configured API user"
 _MSG_CREDENTIAL_DIFFERS = "the API requires a login and its password differs from the configured API password"
 
@@ -147,6 +151,9 @@ class ApiSettings:
     marker_rights: Mapping[int, int] | None
     # False if the configured API credentials give no Authorization header (see _credentials_usable).
     credentials_usable: bool = True
+    # True if the client refuses to build the header for them (a user it cannot encode): it refuses every /api/ write
+    # then, whether the page asks for a login or not. An empty user is no refusal, the client sends no header.
+    credentials_refused: bool = False
 
     def write_blockers(self, target: str, marker_id: int | None = None) -> tuple[str, ...]:
         """The settings that stop /api/ writing the target, each as a sentence; none: the settings allow it.
@@ -171,7 +178,7 @@ class ApiSettings:
 
     def _login_blockers(self) -> list[str]:
         if not self.login_required:
-            return []
+            return [_MSG_CREDENTIALS_REFUSED] if self.credentials_refused else []
         if not self.credentials_usable:
             return [_MSG_CREDENTIALS_UNUSABLE]
         if not self.username_matches:
@@ -202,7 +209,7 @@ class ApiSettings:
                 f"password {'matches' if self.password_matches else 'differs'})"
             )
         else:
-            parts.append("no login")
+            parts.append("no login, configured credentials cannot be sent" if self.credentials_refused else "no login")
         parts.append(
             f"IOs {_ACCESS_NAMES.get(self.in_output, self.in_output)}, "
             f"markers {_ACCESS_NAMES.get(self.flag, self.flag)}, "
@@ -247,6 +254,7 @@ def api_settings_from_fields(fields: ApiPageFields, *, api_username: str, api_pa
         username_matches=not login_required or _same(username, api_username),
         password_matches=not login_required or _same(password, api_password),
         credentials_usable=_credentials_usable(api_username, api_password),
+        credentials_refused=bool(api_username) and not _credentials_usable(api_username, api_password),
         in_output=_access(fields, IN_OUTPUT_SELECT, _PLAIN_ACCESS),
         flag=_access(fields, FLAG_SELECT, (*_PLAIN_ACCESS, ACCESS_SELECTION)),
         one_wire=_access(fields, ONE_WIRE_SELECT, _PLAIN_ACCESS),

@@ -3558,7 +3558,8 @@ def _is_list_box(attributes: dict[str, str]) -> bool:
 class _ApiFormParser(_FormParser):
     """The fields of the API settings page the client reads (see api_settings), read as a browser does.
 
-    Only the fields of the form apiform count (a page without it has none, and the settings are not read). The
+    Only the fields of the first form apiform count (a page without it has none, and the settings are not read; a
+    second form of the id is ignored, as a browser's getElementById ignores it). The
     checked api_active radio counts (the last one, as a browser keeps one checked per group; an input of another type
     is no switch), the first input of an id
     (compared exactly), the first select of an id and its selected option (the last one, a browser shows one).
@@ -3571,6 +3572,7 @@ class _ApiFormParser(_FormParser):
         super().__init__()
         self.fields = ApiPageFields()
         self._in_api_form = False
+        self._api_form_seen = False  # the first form apiform was met; a later one does not count
         self._select_id: str | None = None
         self._selects_seen: set[str] = set()
         # The open select's last selected option, and its first enabled one (what a browser shows if none is selected).
@@ -3584,7 +3586,8 @@ class _ApiFormParser(_FormParser):
         if tag == "form":
             # A form inside a form is ignored by a browser: the outer one stays open.
             if not self._start_ignored:
-                self._in_api_form = attributes.get("id") == API_FORM_ID
+                self._in_api_form = attributes.get("id") == API_FORM_ID and not self._api_form_seen
+                self._api_form_seen = self._api_form_seen or self._in_api_form
         elif not self._in_api_form:
             return
         elif tag == "input":

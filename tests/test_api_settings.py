@@ -778,6 +778,74 @@ def test_credentials_the_client_cannot_send_are_no_blocker_without_a_login() -> 
     assert settings.write_blockers(WRITE_TARGET_MARKER, 1) == ()
 
 
+@pytest.mark.parametrize(
+    ("user", "password"),
+    [
+        pytest.param("sentinel:user", "pw", id="colon-in-user"),
+        pytest.param("sentinel-us\u20acr", "pw", id="user-beyond-latin1"),
+        pytest.param("sentinel-user", "p\u20acw", id="password-beyond-latin1"),
+    ],
+)
+def test_credentials_the_client_refuses_to_send_are_a_blocker_without_a_login_too(user: str, password: str) -> None:
+    # _api_set builds the header for every non-empty user, so such a write fails before the request, login or not.
+    html = FIXTURE.replace(' id="use_login" name="use_login" checked="checked"', ' id="use_login" name="use_login"')
+
+    settings = _settings(html, user=user, password=password)
+
+    assert settings.login_required is False
+    assert settings.credentials_refused is True
+    assert settings.write_blockers(WRITE_TARGET_MARKER, 1) == (
+        "the configured API credentials cannot be sent (':' in the user, or characters outside ISO-8859-1), "
+        "so the client refuses every /api/ write",
+    )
+    assert "no login, configured credentials cannot be sent" in settings.summary()
+    assert user not in settings.summary()
+
+
+@pytest.mark.parametrize(
+    ("user", "password"),
+    [
+        pytest.param("api-user", PAGE_PASSWORD, id="plain"),
+        pytest.param("api-user", "pa:ss", id="colon-in-password"),
+        pytest.param("\u00fc-user", "pw", id="latin1-user"),
+    ],
+)
+def test_sendable_credentials_are_not_refused(user: str, password: str) -> None:
+    html = FIXTURE.replace(' id="use_login" name="use_login" checked="checked"', ' id="use_login" name="use_login"')
+
+    settings = _settings(html, user=user, password=password)
+
+    assert settings.credentials_refused is False
+    assert settings.write_blockers(WRITE_TARGET_MARKER, 1) == ()
+
+
+def test_an_api_form_nested_in_another_form_does_not_hide_the_real_one() -> None:
+    # A browser ignores a form start tag inside a form, so the decoy is no API form and must not use up "the first".
+    decoy = (
+        '<form id="outer"><form id="apiform"><input type="radio" name="api_active" checked="checked" value="inactive">'
+        '<input type="text" id="username" value="decoy"></form>'
+    )
+
+    settings = _settings(f"{decoy}{FIXTURE}")
+
+    assert settings == _settings()
+    assert settings.active is True
+
+
+def test_a_second_form_with_the_id_of_the_api_form_is_ignored() -> None:
+    # The first form counts, a later one of the same id does not even with a differing switch (no mixed settings).
+    assert 'name="api_active" checked="checked" value="active"' in FIXTURE
+    second = (
+        '<form id="apiform"><input type="radio" name="api_active" checked="checked" value="inactive">'
+        '<input type="text" id="username" value="other"></form>'
+    )
+
+    settings = _settings(FIXTURE.replace("</form>", f"</form>{second}", 1))
+
+    assert settings == _settings()
+    assert settings.active is True
+
+
 def test_the_first_input_of_an_id_counts() -> None:
     html = FIXTURE.replace(
         '<input type="text" id="username" name="username" value="api-user" />',
