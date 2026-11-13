@@ -493,6 +493,11 @@ def test_a_page_without_the_form_raises_data_error(html: str) -> None:
             "API page: the api_active choice is 'maybe', expected active or inactive",
         ),
         (
+            'name="api_active" checked="checked" value="active"',
+            'name="api_active" checked="checked" value=""',
+            "API page: the api_active choice is '', expected active or inactive",
+        ),
+        (
             'type="radio" name="api_active" checked="checked" value="active"',
             'type="checkbox" name="api_active" checked="checked" value="active"',
             "API page: the api_active choice is None, expected active or inactive",
@@ -517,6 +522,20 @@ def test_a_changed_page_raises_data_error(old: str, new: str, message: str) -> N
         _settings(html)
 
     assert str(info.value) == message
+
+
+def test_an_unknown_api_switch_value_is_capped_in_the_error() -> None:
+    long_value = "x" * 1000
+    assert 'name="api_active" checked="checked" value="active"' in FIXTURE
+    html = FIXTURE.replace(
+        'name="api_active" checked="checked" value="active"',
+        f'name="api_active" checked="checked" value="{long_value}"',
+    )
+
+    with pytest.raises(ComexioDataError) as info:
+        _settings(html)
+
+    assert str(info.value) == f"API page: the api_active choice is {long_value[:20]!r}, expected active or inactive"
 
 
 def test_a_select_without_a_selected_option_shows_its_first_enabled_one() -> None:

@@ -259,7 +259,8 @@ def _active(choice: str | None) -> bool:
         return True
     if choice == INACTIVE_VALUE:
         return False
-    raise ComexioDataError(f"API page: the {ACTIVE_RADIO} choice is {choice!r}, expected active or inactive")
+    shown = choice if choice is None else choice[:20]  # page text, capped like the access values
+    raise ComexioDataError(f"API page: the {ACTIVE_RADIO} choice is {shown!r}, expected active or inactive")
 
 
 def _input(fields: ApiPageFields, input_id: str) -> Mapping[str, str]:
