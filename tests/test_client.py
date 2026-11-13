@@ -5,6 +5,7 @@ import codecs
 import gzip
 import json
 import logging
+import traceback
 from collections.abc import Buffer, Iterator
 from datetime import timedelta
 from http import HTTPStatus
@@ -764,6 +765,58 @@ async def test_request_text_answer_one_byte_over_the_cap_raises_data_error(
 
     with pytest.raises(ComexioDataError, match=f"page: response is longer than {_SMALL_CAP} bytes"):
         await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+
+def _data_locals_of_response_text_frame(error: BaseException) -> dict[str, bytes]:
+    """The locals of the _response_text frame in the traceback of the error that hold bytes, by name."""
+    frames = [frame for frame, _ in traceback.walk_tb(error.__traceback__) if frame.f_code.co_name == "_response_text"]
+    assert len(frames) == 1
+    return {
+        name: bytes(value)
+        for name, value in frames[0].f_locals.items()
+        if isinstance(value, bytes | bytearray) and value
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type", "message"),
+    [
+        pytest.param(b"x" * (_SMALL_CAP + 1), "text/html; charset=utf-8", "response is longer than", id="over the cap"),
+        pytest.param(b"x" * 10 + b"\xff", "text/html; charset=ascii", "response is not valid ascii", id="undecodable"),
+    ],
+)
+async def test_response_text_failure_leaves_no_body_in_the_frame_locals(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+    content_type: str,
+    message: str,
+) -> None:
+    monkeypatch.setattr(client_module, "_RESPONSE_MAX_BYTES", _SMALL_CAP)
+    _serve_bytes(comexio, body, content_type)
+
+    with pytest.raises(ComexioDataError, match=message) as caught:
+        await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+    # The frame stays in the traceback with its locals: a page with a secret in it would stay in reach.
+    assert _data_locals_of_response_text_frame(caught.value) == {}
+
+
+async def test_response_text_body_check_sees_the_body_of_a_frame_that_does_not_empty_it(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The positive control of the test above: an error raised after the body was read leaves it in the frame.
+    def failing(_resp: object) -> str:
+        raise ComexioDataError("no encoding")
+
+    monkeypatch.setattr(client_module, "_text_encoding", failing)
+    _serve_bytes(comexio, b"secret page")
+
+    with pytest.raises(ComexioDataError, match="no encoding") as caught:
+        await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+    assert _data_locals_of_response_text_frame(caught.value) == {"body": b"secret page"}
 
 
 @pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])

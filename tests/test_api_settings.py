@@ -40,6 +40,10 @@ PAGE_USER = "api-user"
 PAGE_PASSWORD = "s3cret-api-pw"  # nosec B105
 SELECTION = "access to markers is single selection"
 MARKER_LIST = "{'1':0,'2':0,'3':0,'4':0,'5':0,'6':null,'7':0,'8':null}"
+# The page without the switch: the parser fails on it, with the page and the password input in its frames.
+NO_SWITCH_PAGE = FIXTURE.replace('name="api_active"', 'name="other_switch"')
+NO_SWITCH_MESSAGE = "API page: the api_active choice is None, expected active or inactive"
+NEEDLE = "needle"
 
 
 def _select(html: str, select_id: str, value: str) -> str:
@@ -490,7 +494,7 @@ def test_a_page_without_the_form_raises_data_error(html: str) -> None:
         (
             'name="api_active" checked="checked" value="active"',
             'name="api_active" value="active"',
-            "API page: the api_active choice is None, expected active or inactive",
+            NO_SWITCH_MESSAGE,
         ),
         (
             'name="api_active" checked="checked" value="active"',
@@ -505,7 +509,7 @@ def test_a_page_without_the_form_raises_data_error(html: str) -> None:
         (
             'type="radio" name="api_active" checked="checked" value="active"',
             'type="checkbox" name="api_active" checked="checked" value="active"',
-            "API page: the api_active choice is None, expected active or inactive",
+            NO_SWITCH_MESSAGE,
         ),
         ('id="use_login"', 'id="use_login_x"', "API page has no use_login input: changed page"),
         ('id="use_tcp"', 'id="use_tcp_x"', "API page has no use_tcp input: changed page"),
@@ -1063,12 +1067,10 @@ async def _read_failing(comexio: FakeComexio, page: str) -> tuple[ComexioClient,
 
 
 async def test_a_failed_read_leaves_no_page_in_the_locals_of_its_frames(comexio: FakeComexio) -> None:
-    # A page without the switch fails in the parser, which holds the page and the password input.
-    page = FIXTURE.replace('name="api_active"', 'name="other_switch"')
-    assert PAGE_PASSWORD in page
-    client, error = await _read_failing(comexio, page)
+    assert PAGE_PASSWORD in NO_SWITCH_PAGE
+    client, error = await _read_failing(comexio, NO_SWITCH_PAGE)
 
-    assert str(error) == "API page: the api_active choice is None, expected active or inactive"
+    assert str(error) == NO_SWITCH_MESSAGE
     visited, holders = _frames_holding(error, PAGE_PASSWORD, ignore=(client,))
     assert "parse_api_settings" in visited
     assert holders == []
@@ -1194,8 +1196,7 @@ def test_clear_frames_leaves_the_error_it_is_told_to_keep() -> None:
 async def test_a_read_inside_an_except_block_leaves_the_frames_of_the_error_being_handled(
     comexio: FakeComexio,
 ) -> None:
-    page = FIXTURE.replace('name="api_active"', 'name="other_switch"')
-    comexio.serve("GET", API_PATH, _admin_page(page))
+    comexio.serve("GET", API_PATH, _admin_page(NO_SWITCH_PAGE))
     handled = _caught_holding("caller-secret")
     async with aiohttp.ClientSession(**session_kwargs()) as session:
         client = await _client(comexio, session)
@@ -1210,28 +1211,20 @@ async def test_a_read_inside_an_except_block_leaves_the_frames_of_the_error_bein
     assert _frames_holding(info.value, PAGE_PASSWORD, ignore=(client,))[1] == []
 
 
-@pytest.mark.parametrize(
-    ("body", "frame"),
-    [
-        pytest.param(
-            FIXTURE.replace('name="api_active"', 'name="other_switch"').encode(), "parse_api_settings", id="parser"
-        ),
-        pytest.param(FIXTURE.encode() + b"\xff", "_response_text", id="decode"),
-    ],
-)
 async def test_without_the_clearing_the_frames_check_finds_the_page(
-    comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, body: bytes, frame: str
+    comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The positive control of the checks above: they must see the page in the frame once nothing empties it.
+    # (The body of an undecodable answer is emptied by _response_text itself: its control is in test_client.py.)
     monkeypatch.setattr("aiocomexio.client._clear_frames", lambda *args, **kwargs: None)
-    _serve_admin_bytes(comexio, body)
+    _serve_admin_bytes(comexio, NO_SWITCH_PAGE.encode())
     async with aiohttp.ClientSession(**session_kwargs()) as session:
         client = await _client(comexio, session)
 
         with pytest.raises(ComexioDataError) as info:
             await client.get_api_settings()
 
-    assert frame in _frames_holding(info.value, PAGE_PASSWORD, ignore=(client,))[1]
+    assert "parse_api_settings" in _frames_holding(info.value, PAGE_PASSWORD, ignore=(client,))[1]
 
 
 async def test_a_clearing_that_fails_does_not_replace_the_error(
@@ -1241,15 +1234,32 @@ async def test_a_clearing_that_fails_does_not_replace_the_error(
         raise ValueError("clearing failed")
 
     monkeypatch.setattr(traceback, "clear_frames", failing)
-    page = FIXTURE.replace('name="api_active"', 'name="other_switch"')
-    comexio.serve("GET", API_PATH, _admin_page(page))
+    comexio.serve("GET", API_PATH, _admin_page(NO_SWITCH_PAGE))
     async with aiohttp.ClientSession(**session_kwargs()) as session:
         client = await _client(comexio, session)
 
         with pytest.raises(ComexioDataError) as info:
             await client.get_api_settings()
 
-    assert str(info.value) == "API page: the api_active choice is None, expected active or inactive"
+    assert str(info.value) == NO_SWITCH_MESSAGE
+
+
+async def test_an_error_status_does_not_carry_the_page_in_the_error(comexio: FakeComexio) -> None:
+    # An error page at this address may hold the page of the settings (and the password in it) as well.
+    async def handler(_request: web.Request) -> web.Response:
+        return web.Response(text=FIXTURE, status=500, content_type="text/html")
+
+    comexio.serve("GET", API_PATH, handler)
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session)
+
+        with pytest.raises(ComexioResponseError) as info:
+            await client.get_api_settings()
+
+    assert str(info.value) == "API settings page failed: HTTP 500"
+    assert info.value.status == 500
+    assert info.value.body is None
+    assert _frames_holding(info.value, PAGE_PASSWORD, ignore=(client,))[1] == []
 
 
 class _Slotted:
@@ -1262,23 +1272,23 @@ class _Slotted:
 @pytest.mark.parametrize(
     "holder",
     [
-        pytest.param("a needle here", id="text"),
-        pytest.param(b"a needle here", id="bytes"),
-        pytest.param(bytearray(b"a needle here"), id="bytearray"),
-        pytest.param(["x", ("y", "needle")], id="nested containers"),
-        pytest.param({"key": ["needle"]}, id="dict value"),
-        pytest.param({"needle": 1}, id="dict key"),
-        pytest.param(ValueError("needle"), id="exception args"),
-        pytest.param(_Slotted("needle"), id="slots"),
-        pytest.param(_Slotted(ValueError("needle")), id="slots holding an exception"),
+        pytest.param(f"a {NEEDLE} here", id="text"),
+        pytest.param(f"a {NEEDLE} here".encode(), id="bytes"),
+        pytest.param(bytearray(f"a {NEEDLE} here".encode()), id="bytearray"),
+        pytest.param(["x", ("y", NEEDLE)], id="nested containers"),
+        pytest.param({"key": [NEEDLE]}, id="dict value"),
+        pytest.param({NEEDLE: 1}, id="dict key"),
+        pytest.param(ValueError(NEEDLE), id="exception args"),
+        pytest.param(_Slotted(NEEDLE), id="slots"),
+        pytest.param(_Slotted(ValueError(NEEDLE)), id="slots holding an exception"),
     ],
 )
 def test_holds_finds_the_needle_in_every_shape(holder: object) -> None:
-    assert _holds(holder, "needle")
+    assert _holds(holder, NEEDLE)
 
 
 def test_holds_finds_nothing_that_is_not_there() -> None:
-    assert not _holds(_Slotted(["other", ValueError("other")]), "needle")
+    assert not _holds(_Slotted(["other", ValueError("other")]), NEEDLE)
 
 
 async def test_get_api_settings_sends_no_api_credential_to_comexio(comexio: FakeComexio) -> None:

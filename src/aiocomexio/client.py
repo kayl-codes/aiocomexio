@@ -1131,7 +1131,9 @@ class ComexioClient:
         password in clear text: it is compared with the API password this client was created with and not kept, so
         the result has only the verdict (ApiSettings.password_matches), and nothing here logs it. For a write that
         failed this tells whether the settings explain it (ApiSettings.write_blockers). A page without the settings
-        this reads raises ComexioDataError, the login form ComexioAuthenticationError.
+        this reads raises ComexioDataError, the login form ComexioAuthenticationError. An error status raises
+        ComexioResponseError without the text of its page (body is None): the page of an error status at this
+        address is not known to be free of the password.
 
         The page comes over the transport this client uses, so over plain HTTP anyone listening on the way sees the
         password in it (a write over /api/ sends it as Basic Auth the same way). With require_https=True a client
@@ -1153,7 +1155,7 @@ class ComexioClient:
         try:
             # The page goes on as an argument, so no local of this frame holds it (a running frame cannot be emptied).
             return parse_api_settings(
-                await self._request_admin_text("GET", _API_SETTINGS_PATH, what="API settings page"),
+                await self._request_admin_text("GET", _API_SETTINGS_PATH, what="API settings page", error_body=False),
                 api_username=self._api_username,
                 api_password=self._api_password,
             )
@@ -2315,13 +2317,19 @@ class ComexioClient:
         path: str,
         *,
         what: str,
+        error_body: bool = True,
         **kwargs: Any,
     ) -> str:
-        """Body of one request as text, with transport errors and error statuses mapped to ComexioError."""
+        """Body of one request as text, with transport errors and error statuses mapped to ComexioError.
+
+        error_body=False leaves the page of an error status out of the error (message and ComexioResponseError.body):
+        for a page that may hold a secret, which an error page of the same address may hold too.
+        """
         try:
             async with self._response(method, path, what=what, **kwargs) as resp:
                 if resp.status != HTTPStatus.OK:
-                    raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
+                    page = _collapse_error_body(await _error_page_text(resp, what)) if error_body else None
+                    raise _status_error(what, resp.status, page)
                 return await _response_text(resp, what)
         except (aiohttp.ClientError, TimeoutError) as err:
             _raise_from_stripped(self._transport_error(what, err), err)
@@ -4392,6 +4400,8 @@ async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str
     while (left := _RESPONSE_MAX_BYTES + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
         body += chunk
     if len(body) > _RESPONSE_MAX_BYTES:
+        body.clear()  # the frame stays in the traceback of the error with its locals: the last chunk too
+        chunk = b""
         raise ComexioDataError(f"{what}: response is longer than {_RESPONSE_MAX_BYTES} bytes")
     encoding = _text_encoding(resp)
     detail = ""
@@ -4402,7 +4412,10 @@ async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str
     except UnicodeError:  # a codec may raise a plain UnicodeError, which has no position
         pass
     # Raised outside the handlers, so it has neither cause nor context: the UnicodeDecodeError holds the whole body
-    # (its object attribute), and a page with a password in it would travel on inside the exception.
+    # (its object attribute), and a page with a password in it would travel on inside the exception. The frame
+    # stays in the traceback with its locals, so the body is emptied too (the last chunk is empty here: the read
+    # ended on an empty one).
+    body.clear()
     raise ComexioDataError(f"{what}: response is not valid {encoding}{detail}")
 
 
