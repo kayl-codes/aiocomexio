@@ -2,6 +2,16 @@
 
 from importlib.metadata import version
 
+from .api_settings import (
+    ACCESS_FORBIDDEN,
+    ACCESS_READ,
+    ACCESS_READ_WRITE,
+    ACCESS_SELECTION,
+    WRITE_TARGET_IO,
+    WRITE_TARGET_KNX,
+    WRITE_TARGET_MARKER,
+    ApiSettings,
+)
 from .client import (
     ComexioClient,
     CreatedFunctionPlan,
@@ -34,6 +44,11 @@ from .tls import fetch_certificate_fingerprint, format_fingerprint, normalize_fi
 __version__ = version("aiocomexio")
 
 __all__ = [
+    "ACCESS_FORBIDDEN",
+    "ACCESS_READ",
+    "ACCESS_READ_WRITE",
+    "ACCESS_SELECTION",
+    "ApiSettings",
     "ComexioAuthenticationError",
     "ComexioCertificateMismatchError",
     "ComexioClient",
@@ -55,6 +70,9 @@ __all__ = [
     "RawConfig",
     "SystemInfo",
     "TimeServerSettings",
+    "WRITE_TARGET_IO",
+    "WRITE_TARGET_KNX",
+    "WRITE_TARGET_MARKER",
     "WebioBaseInfo",
     "WebioCommandForm",
     "__version__",

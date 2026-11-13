@@ -38,6 +38,15 @@ from aiohttp.client_reqrep import ConnectionKey
 from aiohttp.http_exceptions import HttpProcessingError
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+from .api_settings import (
+    ACTIVE_RADIO,
+    API_FORM_ID,
+    API_INPUT_IDS,
+    API_SELECT_IDS,
+    ApiPageFields,
+    ApiSettings,
+    api_settings_from_fields,
+)
 from .config import iter_group, log_excerpt
 from .doorstation import (
     CAMERA_ID_ATTRIBUTE,
@@ -129,6 +138,7 @@ _EXTENSION_COUNTER_ID_PREFIX = "number_of_"
 _EXTENSION_COUNTER_CLASS_RE = re.compile(rf"{_ANY_TYPE_COUNTER}\d+(?:_\d+)*", re.ASCII)
 _EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
 _EXTENSION_EDIT_PATH = "/admin/extension/edit/"
+_API_SETTINGS_PATH = "/admin/api/home"
 _SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
 _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
 _API_PATH = "/api/"
@@ -1110,6 +1120,18 @@ class ComexioClient:
             params={"id": str(ext_id), "json_return": "true"},
         )
         return parse_extension_form(ext_id, html)
+
+    async def get_api_settings(self) -> ApiSettings:
+        """The API settings of the IO-Server (switch, login, access per data type), read from its API page.
+
+        One request with the admin session to /admin/api/home; see api_settings.ApiSettings. The page holds the API
+        password in clear text: it is compared with the API password this client was created with and not kept, so
+        the result has only the verdict (ApiSettings.password_matches), and nothing here logs it. For a write that
+        failed this tells whether the settings explain it (ApiSettings.write_blockers). A page without the settings
+        this reads raises ComexioDataError, the login form ComexioAuthenticationError.
+        """
+        html = await self._request_admin_text("GET", _API_SETTINGS_PATH, what="API settings page")
+        return parse_api_settings(html, api_username=self._api_username, api_password=self._api_password)
 
     def doorstation_stream_url(self, camera_id: int) -> str:
         """URL of the MJPEG stream of a Doorstation camera on the IO-Server (Doorstation.camera_id)."""
@@ -3521,6 +3543,67 @@ def parse_extension_form(ext_id: int, html: str) -> ExtensionInfo:
     parser.feed(html)
     parser.close()
     return extension_from_inputs(ext_id, parser.inputs)
+
+
+class _ApiFormParser(_FormParser):
+    """The fields of the API settings page the client reads (see api_settings), read as a browser does.
+
+    Only the fields of the form apiform count (a page without it has none, and the settings are not read). The
+    checked api_active radio counts (the last one, as a browser keeps one checked per group), the first input of an id
+    (compared exactly), the first select of an id and its selected option (the last one, a browser shows one).
+    Everything else on the page is ignored.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fields = ApiPageFields()
+        self._in_api_form = False
+        self._select_id: str | None = None
+        self._selects_seen: set[str] = set()
+
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        if tag == "form":
+            # A form inside a form is ignored by a browser: the outer one stays open.
+            if not self._start_ignored:
+                self._in_api_form = attributes.get("id") == API_FORM_ID
+        elif not self._in_api_form:
+            return
+        elif tag == "input":
+            self._input(attributes)
+        elif tag == "select":
+            select_id = attributes.get("id")
+            # The first select of an id counts, like the first input.
+            if select_id in API_SELECT_IDS and select_id not in self._selects_seen:
+                self._selects_seen.add(select_id)
+                self._select_id = select_id
+            else:
+                self._select_id = None
+        elif tag == "option" and self._select_id is not None and "selected" in attributes:
+            self.fields.selected[self._select_id] = attributes.get("value", "")
+
+    def handle_form_endtag(self, tag: str) -> None:
+        if tag == "form":
+            self._in_api_form = False
+
+    def _input(self, attributes: dict[str, str]) -> None:
+        if attributes.get("name") == ACTIVE_RADIO and "checked" in attributes:
+            self.fields.active_choice = attributes.get("value", "")
+        if (input_id := attributes.get("id", "")) in API_INPUT_IDS:
+            self.fields.inputs.setdefault(input_id, attributes)
+
+    def handle_select_end(self) -> None:
+        self._select_id = None
+
+
+def parse_api_settings(html: str, *, api_username: str, api_password: str) -> ApiSettings:
+    """The ApiSettings of the API page html, with the login compared to api_username and api_password.
+
+    See api_settings.api_settings_from_fields; the password is compared and not kept.
+    """
+    parser = _ApiFormParser()
+    parser.feed(html)
+    parser.close()
+    return api_settings_from_fields(parser.fields, api_username=api_username, api_password=api_password)
 
 
 async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
