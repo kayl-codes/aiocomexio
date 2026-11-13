@@ -34,6 +34,7 @@ from .exceptions import (
     ComexioCreatedWithoutIdError,
     ComexioDataError,
     ComexioError,
+    ComexioInsecureTransportError,
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "ComexioCreatedWithoutIdError",
     "ComexioDataError",
     "ComexioError",
+    "ComexioInsecureTransportError",
     "ComexioRequestRejectedError",
     "ComexioResponseError",
     "CreatedFunctionPlan",

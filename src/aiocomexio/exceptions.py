@@ -40,6 +40,14 @@ class ComexioAuthenticationError(ComexioError):
     """The server rejected the admin credentials."""
 
 
+class ComexioInsecureTransportError(ComexioError):
+    """A call that asked for HTTPS only was refused because the client talks plain HTTP.
+
+    Raised before any request goes out (see ComexioClient.get_api_settings, require_https). Retrying cannot help:
+    the client needs a pinned certificate (fingerprint=) to talk HTTPS.
+    """
+
+
 class ComexioResponseError(ComexioError):
     """The server answered with an HTTP error status.
 

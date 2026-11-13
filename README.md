@@ -55,7 +55,9 @@ Every call either returns data or raises a `ComexioError` subclass
 (`ComexioAuthenticationError`, `ComexioConnectionError`, `ComexioResponseError`,
 `ComexioDataError`, `ComexioRequestRejectedError` for a write the server refused,
 `ComexioCreatedWithoutIdError` for a create the server confirmed but whose id could not be read
-back — the object exists, do not create it again). One exception: the value setters raise a
+back — the object exists, do not create it again, and `ComexioInsecureTransportError` for
+`get_api_settings(require_https=True)` on a client without a pinned certificate, raised before any
+request). One exception: the value setters raise a
 plain `ValueError`, which is not a `ComexioError`, for a non-finite float (`nan`, `inf`) before
 sending anything — catch it separately if your values can be non-finite.
 

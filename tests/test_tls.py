@@ -33,6 +33,7 @@ from aiocomexio import (
 )
 from aiocomexio.client import _origin, _same_origin_or_https
 from aiocomexio.tls import https_address
+from tests.common import load_fixture
 from tests.fake_comexio import ADMIN_PATH, LOGIN_PATH, PASSWORD, USERNAME, FakeComexio
 
 # Synthetic: a fingerprint no test certificate has.
@@ -354,6 +355,23 @@ async def test_pinned_client_writes_values_with_basic_auth_over_https(
     (request,) = tls_comexio.received_at("GET", _API_PATH)
     assert request.query == {"action": "set", "value": "21.5", "marker": "M5"}
     assert request.authorization == f"Basic {base64.b64encode(b'api:api-secret').decode()}"
+
+
+@pytest.mark.parametrize("require_https", [False, True])
+async def test_pinned_client_reads_the_api_settings_over_https(
+    tls_comexio: FakeComexio,
+    tls_session: aiohttp.ClientSession,
+    certificate: SelfSignedCertificate,
+    require_https: bool,
+) -> None:
+    tls_comexio.serve_text("GET", "/admin/api/home", load_fixture("api_settings_page.html"))
+    client = _pinned_client(tls_comexio, tls_session, certificate.fingerprint)
+    await client.login()
+
+    settings = await client.get_api_settings(require_https=require_https)
+
+    assert settings.active is True
+    assert len(tls_comexio.received_at("GET", "/admin/api/home")) == 1
 
 
 _MISMATCH_CALLS: dict[str, tuple[str, Callable[[ComexioClient], Awaitable[Any]]]] = {
