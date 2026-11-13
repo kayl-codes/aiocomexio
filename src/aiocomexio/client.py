@@ -3545,14 +3545,25 @@ def parse_extension_form(ext_id: int, html: str) -> ExtensionInfo:
     return extension_from_inputs(ext_id, parser.inputs)
 
 
+_SELECT_SIZE = re.compile(r"[ \t\n\f\r]*\+?([0-9]+)")  # the leading digits of a size, as a browser reads them
+
+
+def _is_list_box(attributes: dict[str, str]) -> bool:
+    """Whether the select is shown as a list (a size of 2 or more), not as a drop-down that shows its first option."""
+    found = _SELECT_SIZE.match(attributes.get("size", ""))
+    return found is not None and found.group(1).lstrip("0") not in ("", "1")
+
+
 class _ApiFormParser(_FormParser):
     """The fields of the API settings page the client reads (see api_settings), read as a browser does.
 
     Only the fields of the form apiform count (a page without it has none, and the settings are not read). The
-    checked api_active radio counts (the last one, as a browser keeps one checked per group), the first input of an id
+    checked api_active radio counts (the last one, as a browser keeps one checked per group; an input of another type
+    is no switch), the first input of an id
     (compared exactly), the first select of an id and its selected option (the last one, a browser shows one).
-    An option of a disabled <optgroup> is disabled, and a select that allows several selected options has no single
-    value (it does not count). Everything else on the page is ignored.
+    An option of a disabled <optgroup> is disabled, a select that allows several selected options has no single
+    value (it does not count), and a select shown as a list (size 2 or more) shows no option unless one is selected.
+    Everything else on the page is ignored.
     """
 
     def __init__(self) -> None:
@@ -3565,6 +3576,7 @@ class _ApiFormParser(_FormParser):
         self._chosen: str | None = None
         self._first_enabled: str | None = None
         self._multiple = False  # the open select allows several selected options
+        self._list_box = False  # the open select is shown as a list (size 2 or more)
         self._group_disabled = False  # the open <optgroup> is disabled
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
@@ -3590,6 +3602,7 @@ class _ApiFormParser(_FormParser):
             self._selects_seen.add(select_id)
             self._select_id = select_id
             self._multiple = "multiple" in attributes
+            self._list_box = _is_list_box(attributes)
         else:
             self._select_id = None
 
@@ -3607,20 +3620,28 @@ class _ApiFormParser(_FormParser):
             self._group_disabled = False
 
     def _input(self, attributes: dict[str, str]) -> None:
-        if attributes.get("name") == ACTIVE_RADIO and "checked" in attributes:
+        if (
+            attributes.get("name") == ACTIVE_RADIO
+            and attributes.get("type", "").lower() == "radio"
+            and "checked" in attributes
+        ):
             self.fields.active_choice = attributes.get("value", "")
         if (input_id := attributes.get("id", "")) in API_INPUT_IDS:
             self.fields.inputs.setdefault(input_id, attributes)
 
+    def _shown_option(self) -> str | None:
+        """The value a browser shows: the selected option, else the first enabled one (a list box shows none)."""
+        if self._chosen is not None:
+            return self._chosen
+        return None if self._list_box else self._first_enabled
+
     def handle_select_end(self) -> None:
         # Only a select that ended counts: a page cut off inside it says nothing about its value, and a select that
         # allows several selected options has none.
-        if self._select_id is not None and not self._multiple:
-            choice = self._chosen if self._chosen is not None else self._first_enabled
-            if choice is not None:
-                self.fields.selected[self._select_id] = choice
+        if self._select_id is not None and not self._multiple and (choice := self._shown_option()) is not None:
+            self.fields.selected[self._select_id] = choice
         self._select_id = self._chosen = self._first_enabled = None
-        self._multiple = self._group_disabled = False
+        self._multiple = self._list_box = self._group_disabled = False
 
 
 def parse_api_settings(html: str, *, api_username: str, api_password: str) -> ApiSettings:

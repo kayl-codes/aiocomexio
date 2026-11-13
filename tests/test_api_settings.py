@@ -148,7 +148,25 @@ def test_the_tcp_interface_is_read_whatever_the_api_says() -> None:
     assert settings.write_blockers(WRITE_TARGET_MARKER, 1) == ()
 
 
-@pytest.mark.parametrize("port", ["", "0", "65536", "-1", "15 74", "abc", "1574.0", "٣٠٠٠", "9" * 40])
+@pytest.mark.parametrize(
+    "port",
+    [
+        "",
+        "0",
+        "65536",
+        "-1",
+        "15 74",
+        "abc",
+        "1574.0",
+        "٣٠٠٠",
+        "9" * 40,
+        "0" * 40,
+        "065536",
+        "0065536",
+        " 1574",
+        "0" * 5000 + "0",
+    ],
+)
 def test_a_port_that_is_no_port_is_none(port: str) -> None:
     html = FIXTURE.replace('name="tcp_port" value="1574"', f'name="tcp_port" value="{port}"')
 
@@ -271,6 +289,7 @@ def test_the_marker_list_is_read_as_the_script_of_the_page_reads_it() -> None:
         pytest.param("[" * 100000, id="nested-too-deep"),
     ],
 )
+@pytest.mark.usefixtures("garbage_collected")
 def test_a_malformed_marker_list_has_no_rights(marker_list: str, caplog: pytest.LogCaptureFixture) -> None:
     html = _markers(FIXTURE, marker_list.replace('"', "&quot;"))
 
@@ -326,7 +345,9 @@ def test_an_inactive_api_and_a_wrong_password_are_named_in_this_order() -> None:
     )
 
 
-@pytest.mark.parametrize(("port", "expected"), [("1", 1), ("65535", 65535), ("01574", 1574)])
+@pytest.mark.parametrize(
+    ("port", "expected"), [("1", 1), ("65535", 65535), ("01574", 1574), ("00001574", 1574), ("0" * 5000 + "1574", 1574)]
+)
 def test_a_port_at_the_edge_of_the_range_is_read(port: str, expected: int) -> None:
     html = FIXTURE.replace('name="tcp_port" value="1574"', f'name="tcp_port" value="{port}"')
 
@@ -469,6 +490,11 @@ def test_a_page_without_the_form_raises_data_error(html: str) -> None:
             'name="api_active" checked="checked" value="maybe"',
             "API page: the api_active choice is 'maybe', expected active or inactive",
         ),
+        (
+            'type="radio" name="api_active" checked="checked" value="active"',
+            'type="checkbox" name="api_active" checked="checked" value="active"',
+            "API page: the api_active choice is None, expected active or inactive",
+        ),
         ('id="use_login"', 'id="use_login_x"', "API page has no use_login input: changed page"),
         ('id="use_tcp"', 'id="use_tcp_x"', "API page has no use_tcp input: changed page"),
         ('id="username"', 'id="username_x"', "API page has no username input: changed page"),
@@ -552,6 +578,94 @@ def test_a_disabled_optgroup_does_not_reach_the_next_select() -> None:
     html = html.replace(' selected="selected" id="flag_3"', ' id="flag_3"')
 
     assert _settings(html).flag == ACCESS_FORBIDDEN
+
+
+def test_the_type_of_the_api_switch_is_read_without_regard_to_case() -> None:
+    html = FIXTURE.replace('type="radio" name="api_active"', 'type="RADIO" name="api_active"')
+
+    assert _settings(html).active is True
+
+
+def test_a_checked_input_of_another_type_does_not_replace_the_api_switch() -> None:
+    html = FIXTURE.replace(
+        '<input type="radio" name="api_active" value="inactive"',
+        '<input type="checkbox" name="api_active" checked="checked" value="inactive"',
+    )
+
+    assert _settings(html).active is True
+
+
+def test_a_list_box_without_a_selected_option_shows_none() -> None:
+    # A drop-down shows its first enabled option, a list box (size 2 or more) shows none.
+    html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' id="in_output_3"')
+    html = html.replace('<select id="in_output" name="in_output"', '<select size="3" id="in_output" name="in_output"')
+
+    with pytest.raises(ComexioDataError, match="no selected option for in_output"):
+        _settings(html)
+
+
+def test_a_list_box_with_a_selected_option_still_counts() -> None:
+    html = FIXTURE.replace(
+        '<select id="in_output" name="in_output"', '<select size="3" id="in_output" name="in_output"'
+    )
+
+    assert _settings(html).in_output == ACCESS_READ_WRITE
+
+
+@pytest.mark.parametrize("size", ["1", "01", "0", "", "abc", "-2", " 1 ", "٣", "1px", "-3", "\u00a03", "\u20033"])
+def test_a_select_that_is_no_list_box_shows_its_first_enabled_option(size: str) -> None:
+    html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' id="in_output_3"')
+    html = html.replace(
+        '<select id="in_output" name="in_output"', f'<select size="{size}" id="in_output" name="in_output"'
+    )
+
+    assert _settings(html).in_output == ACCESS_FORBIDDEN
+
+
+@pytest.mark.parametrize("size", [" 3 ", "+3", "3px", "2abc", "\t3", "0003", "99999999999999999999"])
+def test_a_select_with_a_size_of_two_or_more_is_a_list_box(size: str) -> None:
+    # A browser reads the leading digits of the size: "3px" is 3, "+3" is 3.
+    html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' id="in_output_3"')
+    html = html.replace(
+        '<select id="in_output" name="in_output"', f'<select size="{size}" id="in_output" name="in_output"'
+    )
+
+    with pytest.raises(ComexioDataError, match="no selected option for in_output"):
+        _settings(html)
+
+
+def test_the_size_attribute_is_read_without_regard_to_the_case_of_its_name() -> None:
+    html = FIXTURE.replace(' selected="selected" id="in_output_3"', ' id="in_output_3"')
+    html = html.replace('<select id="in_output" name="in_output"', '<select SIZE="3" id="in_output" name="in_output"')
+
+    with pytest.raises(ComexioDataError, match="no selected option for in_output"):
+        _settings(html)
+
+
+def test_a_selected_disabled_option_of_a_list_box_still_counts() -> None:
+    html = _select(FIXTURE, "in_output", "1").replace(
+        '<option value="1" selected="selected"', '<option value="1" disabled selected="selected"'
+    )
+    html = html.replace('<select id="in_output" name="in_output"', '<select size="3" id="in_output" name="in_output"')
+
+    assert _settings(html).in_output == ACCESS_READ
+
+
+def test_a_checked_input_without_a_type_is_no_switch() -> None:
+    # An input without a type is a text field for a browser.
+    html = FIXTURE.replace(
+        'type="radio" name="api_active" checked="checked" value="active"',
+        'name="api_active" checked="checked" value="active"',
+    )
+
+    with pytest.raises(ComexioDataError, match="the api_active choice is None"):
+        _settings(html)
+
+
+def test_the_type_attribute_of_the_api_switch_is_read_without_regard_to_the_case_of_its_name() -> None:
+    html = FIXTURE.replace('type="radio" name="api_active"', 'TYPE="radio" name="api_active"')
+
+    assert _settings(html).active is True
 
 
 def test_a_multiple_select_has_no_single_value() -> None:

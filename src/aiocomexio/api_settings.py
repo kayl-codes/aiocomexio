@@ -292,9 +292,12 @@ def _access(fields: ApiPageFields, select_id: str, allowed: tuple[int, ...]) -> 
 
 def _port(text: str | None) -> int | None:
     """The TCP port of the field, None for anything but a whole number of 1 to 65535."""
-    if text is None or not text.isascii() or not text.isdigit() or len(text) > len(str(_MAX_PORT)):
+    if text is None or not text.isascii() or not text.isdigit():
         return None
-    port = int(text)
+    digits = text.lstrip("0")  # leading zeros do not make the number longer (and the bound keeps int() cheap)
+    if len(digits) > len(str(_MAX_PORT)):
+        return None
+    port = int(digits or "0")
     return port if 1 <= port <= _MAX_PORT else None
 
 
