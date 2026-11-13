@@ -1006,8 +1006,11 @@ async def test_request_text_undecodable_answer_names_the_declared_codec(
 ) -> None:
     _serve_bytes(comexio, b"\xff", "text/html; charset=ascii")
 
-    with pytest.raises(ComexioDataError, match="page: response is not valid ascii"):
+    with pytest.raises(ComexioDataError, match="page: response is not valid ascii") as caught:
         await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
+
+    # The UnicodeDecodeError holds the whole body: it is not chained to the error.
+    assert (caught.value.__cause__, caught.value.__context__) == (None, None)
 
 
 @pytest.mark.parametrize("method", ["_request_text", "_request_redirect"])
