@@ -324,8 +324,10 @@ def test_an_empty_marker_list_releases_no_marker() -> None:
 
 
 def test_an_unknown_write_target_is_an_error_not_a_free_pass() -> None:
+    settings = _settings()
+
     with pytest.raises(ValueError, match="unknown write target"):
-        _settings().write_blockers("Marker")
+        settings.write_blockers("Marker")
 
 
 def test_a_knx_object_is_stopped_by_the_login_only() -> None:
@@ -509,9 +511,10 @@ def test_a_page_without_the_form_raises_data_error(html: str) -> None:
 )
 def test_a_changed_page_raises_data_error(old: str, new: str, message: str) -> None:
     assert old in FIXTURE
+    html = FIXTURE.replace(old, new)
 
     with pytest.raises(ComexioDataError) as info:
-        _settings(FIXTURE.replace(old, new))
+        _settings(html)
 
     assert str(info.value) == message
 

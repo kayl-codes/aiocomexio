@@ -3545,7 +3545,8 @@ def parse_extension_form(ext_id: int, html: str) -> ExtensionInfo:
     return extension_from_inputs(ext_id, parser.inputs)
 
 
-_SELECT_SIZE = re.compile(r"[ \t\n\f\r]*\+?([0-9]+)")  # the leading digits of a size, as a browser reads them
+# The leading digits of a size, as a browser reads them (ASCII digits only: \d alone would take any Unicode digit).
+_SELECT_SIZE = re.compile(r"[ \t\n\f\r]*\+?(\d+)", re.ASCII)
 
 
 def _is_list_box(attributes: dict[str, str]) -> bool:
