@@ -1193,6 +1193,108 @@ def test_clear_frames_leaves_the_error_it_is_told_to_keep() -> None:
     assert "_fail_holding" in _frames_holding(older, "old-secret", module=__name__)[1]
 
 
+CLIENT_LOGGER = "aiocomexio.client"
+NOT_CLEARED = "could not be cleared"
+
+
+class _FakeFrame:
+    """A frame whose clear() raises failure, if one is given; otherwise it only notes that it was emptied."""
+
+    def __init__(self, failure: BaseException | None = None) -> None:
+        self.failure = failure
+        self.cleared = False
+
+    def clear(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+        self.cleared = True
+
+
+def _clear_walking(
+    monkeypatch: pytest.MonkeyPatch, root: ValueError, frames: dict[ValueError, list[_FakeFrame]]
+) -> None:
+    """_clear_frames(root), where the traceback of each error in frames walks the fake frames given for it.
+
+    A real frame cannot be made to fail in clear() (a C method), so the walk over the traceback is replaced, for this
+    call only. That the real walk hands the frames on is shown by the tests with real tracebacks (test_clear_frames_*).
+    """
+    frames_of = {id(error.__traceback__): its_frames for error, its_frames in frames.items()}
+    with monkeypatch.context() as patch:
+        patch.setattr(traceback, "walk_tb", lambda tb: ((frame, 0) for frame in frames_of.get(id(tb), [])))
+        _clear_frames(root)
+
+
+def test_a_failure_emptying_a_frame_does_not_spare_the_rest_of_the_chain(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # root -(context)-> middle -(cause)-> deep; a frame fails first in the traceback of middle and of deep
+    root, middle, deep = _caught_holding("root"), _caught_holding("middle"), _caught_holding("deep")
+    root.__context__ = middle
+    middle.__cause__ = deep
+    plan = {
+        root: [_FakeFrame()],
+        middle: [_FakeFrame(ValueError("failed on middle-secret")), _FakeFrame()],
+        deep: [_FakeFrame(ValueError("failed on deep-secret")), _FakeFrame()],
+    }
+
+    with caplog.at_level(logging.WARNING, logger=CLIENT_LOGGER):
+        _clear_walking(monkeypatch, root, plan)
+
+    # every frame that can be emptied is: the rest of the traceback and the rest of the chain are walked on
+    assert [frame.cleared for frames in plan.values() for frame in frames] == [True, False, True, False, True]
+    assert [(record.levelno, record.name) for record in caplog.records] == [(logging.WARNING, CLIENT_LOGGER)] * 2
+    assert all(f"{NOT_CLEARED} (ValueError)" in record.getMessage() for record in caplog.records)
+    assert "secret" not in caplog.text  # the class of the failure only: its message may carry a local
+
+
+def test_a_frame_that_still_runs_is_left_alone_without_a_note(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    error = _caught_holding("error")
+    plan = {error: [_FakeFrame(RuntimeError("cannot clear an executing frame")), _FakeFrame()]}
+
+    with caplog.at_level(logging.WARNING, logger=CLIENT_LOGGER):
+        _clear_walking(monkeypatch, error, plan)
+
+    assert plan[error][1].cleared
+    assert caplog.records == []
+
+
+def test_an_interrupt_while_emptying_a_frame_goes_on_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = _caught_holding("error")
+    plan = {error: [_FakeFrame(KeyboardInterrupt())]}
+
+    with pytest.raises(KeyboardInterrupt):
+        _clear_walking(monkeypatch, error, plan)
+
+
+class _RaisingFilter(logging.Filter):
+    """A filter that raises, which (unlike a handler: Handler.handleError swallows) reaches the caller of warning()."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        self.calls += 1
+        raise OSError("the filter is broken")
+
+
+def test_a_logger_that_raises_does_not_end_the_emptying(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = _caught_holding("error")
+    plan = {error: [_FakeFrame(ValueError("failed")), _FakeFrame()]}
+    logger = logging.getLogger(CLIENT_LOGGER)
+    broken = _RaisingFilter()
+    logger.addFilter(broken)
+    try:
+        _clear_walking(monkeypatch, error, plan)
+    finally:
+        logger.removeFilter(broken)
+
+    assert plan[error][1].cleared
+    assert broken.calls == 1  # the note was attempted, through the real logger
+
+
 async def test_a_read_inside_an_except_block_leaves_the_frames_of_the_error_being_handled(
     comexio: FakeComexio,
 ) -> None:
@@ -1228,20 +1330,47 @@ async def test_without_the_clearing_the_frames_check_finds_the_page(
 
 
 async def test_a_clearing_that_fails_does_not_replace_the_error(
-    comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+    comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    def failing(_tb: object) -> None:
+    def failing(*_args: object, **_kwargs: object) -> None:
         raise ValueError("clearing failed")
 
-    monkeypatch.setattr(traceback, "clear_frames", failing)
+    monkeypatch.setattr("aiocomexio.client._clear_frames", failing)
     comexio.serve("GET", API_PATH, _admin_page(NO_SWITCH_PAGE))
     async with aiohttp.ClientSession(**session_kwargs()) as session:
         client = await _client(comexio, session)
 
-        with pytest.raises(ComexioDataError) as info:
+        with caplog.at_level(logging.WARNING, logger=CLIENT_LOGGER), pytest.raises(ComexioDataError) as info:
             await client.get_api_settings()
 
     assert str(info.value) == NO_SWITCH_MESSAGE
+    assert f"{NOT_CLEARED} (ValueError)" in caplog.text  # the failure is noted, not lost
+
+
+class _Abort(BaseException):  # not an Exception, like a KeyboardInterrupt, but safe to raise inside the event loop
+    pass
+
+
+async def test_an_abort_while_clearing_is_not_swallowed(comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch) -> None:
+    def aborting(*_args: object, **_kwargs: object) -> None:
+        raise _Abort
+
+    monkeypatch.setattr("aiocomexio.client._clear_frames", aborting)
+    comexio.serve("GET", API_PATH, _admin_page(NO_SWITCH_PAGE))
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session)
+
+        with pytest.raises(_Abort):  # by design: only an Exception of the clearing is taken
+            await client.get_api_settings()
+
+
+async def test_a_failed_read_notes_no_clearing_failure(comexio: FakeComexio, caplog: pytest.LogCaptureFixture) -> None:
+    # The frame of get_api_settings still runs when its error is handled, so clearing it raises RuntimeError: that is
+    # no failure to note (a version of Python that raised something else would log a warning on every failed read).
+    with caplog.at_level(logging.WARNING, logger=CLIENT_LOGGER):
+        await _read_failing(comexio, NO_SWITCH_PAGE)
+
+    assert NOT_CLEARED not in caplog.text
 
 
 async def test_an_error_status_does_not_carry_the_page_in_the_error(comexio: FakeComexio) -> None:

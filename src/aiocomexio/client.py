@@ -31,7 +31,7 @@ from http import HTTPStatus
 from io import StringIO
 from itertools import repeat
 from operator import attrgetter, is_
-from types import MappingProxyType
+from types import FrameType, MappingProxyType
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, Self, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
@@ -1160,8 +1160,10 @@ class ComexioClient:
                 api_password=self._api_password,
             )
         except BaseException as err:  # an abort too: a cancelled read holds the part of the page it has read
-            with suppress(Exception):  # the hygiene never replaces the error it is about
+            try:
                 _clear_frames(err, keep=outer)
+            except Exception as failure:  # defence in depth: the hygiene never replaces the error it is about
+                _note_clearing_failed(failure)
             raise
 
     def doorstation_stream_url(self, camera_id: int) -> str:
@@ -3699,8 +3701,10 @@ def parse_api_settings(html: str, *, api_username: str, api_password: str) -> Ap
 def _clear_frames(error: BaseException, *, keep: BaseException | None = None) -> None:
     """Empty the local variables of the frames error, its causes and its contexts passed through.
 
-    A frame that still runs (the caller's own) keeps its locals; traceback.clear_frames skips it. keep is an error
-    that is not ours (the one a caller is handling): neither it nor what only it leads to is touched.
+    A frame that still runs (the caller's own) keeps its locals. keep is an error that is not ours (the one a caller
+    is handling): neither it nor what only it leads to is touched. A frame that cannot be emptied is noted
+    (_note_clearing_failed) and the walk goes on with the rest of its traceback and of the chain. Only an Exception
+    is taken: a KeyboardInterrupt or SystemExit during the clearing goes on up.
     """
     pending = [error]
     seen = {id(keep)}
@@ -3709,8 +3713,32 @@ def _clear_frames(error: BaseException, *, keep: BaseException | None = None) ->
         if id(current) in seen:
             continue
         seen.add(id(current))
-        traceback.clear_frames(current.__traceback__)
+        for frame, _ in traceback.walk_tb(current.__traceback__):
+            _clear_frame(frame)
         pending.extend(linked for linked in (current.__cause__, current.__context__) if linked is not None)
+
+
+def _clear_frame(frame: FrameType) -> None:
+    """Empty the local variables of one frame, as traceback.clear_frames does; best effort, never raises."""
+    try:
+        frame.clear()
+    except RuntimeError:
+        pass  # the frame still runs (the caller's own): it keeps its locals
+    except Exception as failure:  # one frame failing must not spare the rest of the chain
+        _note_clearing_failed(failure)
+
+
+def _note_clearing_failed(failure: Exception) -> None:
+    """Log that the frames of one error could not be emptied, by the class of the failure only.
+
+    Nothing of the failure beyond its class goes in: its message could carry a local of the frame it was about. A log
+    handler that raises does not end the clearing (the hygiene never replaces the error it is about).
+    """
+    with suppress(Exception):
+        _LOGGER.warning(
+            "A traceback of a failed API settings read could not be cleared (%s); the page may still be in its locals",
+            type(failure).__name__,
+        )
 
 
 async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
