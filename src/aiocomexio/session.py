@@ -10,6 +10,7 @@ import ipaddress
 import logging
 import math
 import re
+import sys
 from collections.abc import Iterable
 from contextlib import suppress
 from types import SimpleNamespace
@@ -99,9 +100,11 @@ def connector_kwargs(*, keepalive_timeout: float = DEFAULT_KEEPALIVE_TIMEOUT_SEC
     an idle connection is kept, in seconds; the default, DEFAULT_KEEPALIVE_TIMEOUT_SEC, is shorter than the time
     after which Comexio closes one. Raises ValueError for a value that is not a positive, finite number (aiohttp reads
     0 as "keep nothing", which would open a new connection for every request, and infinity as "keep for ever", which
-    is the very connection Comexio has closed).
+    is the very connection Comexio has closed). An int too large for a float counts as infinity.
     """
-    if not math.isfinite(keepalive_timeout) or keepalive_timeout <= 0:
+    # A comparison, not math.isfinite: that raises OverflowError for an int above the float range. Here such an
+    # int, NaN and infinity all fall outside 0 < x <= sys.float_info.max and take the ValueError below.
+    if not 0 < keepalive_timeout <= sys.float_info.max:
         raise ValueError(f"keepalive timeout must be positive and finite, got {keepalive_timeout}")
     return {"keepalive_timeout": keepalive_timeout}
 

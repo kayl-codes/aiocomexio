@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 
 import aiohttp
 import pytest
@@ -65,11 +66,24 @@ def test_default_keepalive_is_shorter_than_comexios_idle_close() -> None:
     assert connector_kwargs() == {"keepalive_timeout": DEFAULT_KEEPALIVE_TIMEOUT_SEC}
 
 
-def test_connector_kwargs_takes_another_keepalive() -> None:
-    assert connector_kwargs(keepalive_timeout=1.5) == {"keepalive_timeout": 1.5}
+@pytest.mark.parametrize("timeout", [1.5, 10**300, sys.float_info.max, int(sys.float_info.max)])
+def test_connector_kwargs_takes_another_keepalive(timeout: float) -> None:
+    assert connector_kwargs(keepalive_timeout=timeout) == {"keepalive_timeout": timeout}
 
 
-@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        0,
+        -1,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        pytest.param(10**400, id="int-beyond-the-float-range"),
+        pytest.param(2**1024, id="first-int-above-the-float-range"),
+        pytest.param(-(10**400), id="negative-int-beyond-the-float-range"),
+    ],
+)
 def test_connector_kwargs_rejects_non_positive_keepalive(timeout: float) -> None:
     with pytest.raises(ValueError, match="positive"):
         connector_kwargs(keepalive_timeout=timeout)
