@@ -17,7 +17,9 @@ import logging
 import math
 import re
 import secrets
+import sys
 import time
+import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -29,7 +31,7 @@ from http import HTTPStatus
 from io import StringIO
 from itertools import repeat
 from operator import attrgetter, is_
-from types import MappingProxyType
+from types import FrameType, MappingProxyType
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, Self, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
@@ -1129,20 +1131,40 @@ class ComexioClient:
         password in clear text: it is compared with the API password this client was created with and not kept, so
         the result has only the verdict (ApiSettings.password_matches), and nothing here logs it. For a write that
         failed this tells whether the settings explain it (ApiSettings.write_blockers). A page without the settings
-        this reads raises ComexioDataError, the login form ComexioAuthenticationError.
+        this reads raises ComexioDataError, the login form ComexioAuthenticationError. An error status raises
+        ComexioResponseError without the text of its page (body is None): the page of an error status at this
+        address is not known to be free of the password.
 
         The page comes over the transport this client uses, so over plain HTTP anyone listening on the way sees the
         password in it (a write over /api/ sends it as Basic Auth the same way). With require_https=True a client
         without a pinned certificate raises ComexioInsecureTransportError before any request; the default False
         reads the page over whatever the client uses.
+
+        An error raised on the way (a page without the settings, an undecodable answer, a cancelled read) leaves
+        with the local variables of the library's frames in its traceback emptied: they would hold the page, so a
+        tool that records the locals of a traceback would keep the password of the page. The error of a caller that
+        calls from an except block is left alone. This covers the page, not the client: the running frame keeps
+        self, and with it the credentials the client was built with, and the caller's own frames keep their locals.
         """
         if require_https and self._fingerprint is None:
             raise ComexioInsecureTransportError(
                 "API settings page not read: the client talks plain HTTP and the page holds the API password in clear "
                 "text (require_https=True; give the client a certificate fingerprint to use HTTPS)"
             )
-        html = await self._request_admin_text("GET", _API_SETTINGS_PATH, what="API settings page")
-        return parse_api_settings(html, api_username=self._api_username, api_password=self._api_password)
+        outer = sys.exception()  # the error a caller is handling, if it calls from an except block: not ours
+        try:
+            # The page goes on as an argument, so no local of this frame holds it (a running frame cannot be emptied).
+            return parse_api_settings(
+                await self._request_admin_text("GET", _API_SETTINGS_PATH, what="API settings page", error_body=False),
+                api_username=self._api_username,
+                api_password=self._api_password,
+            )
+        except BaseException as err:  # an abort too: a cancelled read holds the part of the page it has read
+            try:
+                _clear_frames(err, keep=outer)
+            except Exception as failure:  # defence in depth: the hygiene never replaces the error it is about
+                _note_clearing_failed(failure)
+            raise
 
     def doorstation_stream_url(self, camera_id: int) -> str:
         """URL of the MJPEG stream of a Doorstation camera on the IO-Server (Doorstation.camera_id)."""
@@ -2297,13 +2319,19 @@ class ComexioClient:
         path: str,
         *,
         what: str,
+        error_body: bool = True,
         **kwargs: Any,
     ) -> str:
-        """Body of one request as text, with transport errors and error statuses mapped to ComexioError."""
+        """Body of one request as text, with transport errors and error statuses mapped to ComexioError.
+
+        error_body=False leaves the page of an error status out of the error (message and ComexioResponseError.body):
+        for a page that may hold a secret, which an error page of the same address may hold too.
+        """
         try:
             async with self._response(method, path, what=what, **kwargs) as resp:
                 if resp.status != HTTPStatus.OK:
-                    raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
+                    page = _collapse_error_body(await _error_page_text(resp, what)) if error_body else None
+                    raise _status_error(what, resp.status, page)
                 return await _response_text(resp, what)
         except (aiohttp.ClientError, TimeoutError) as err:
             _raise_from_stripped(self._transport_error(what, err), err)
@@ -3670,6 +3698,49 @@ def parse_api_settings(html: str, *, api_username: str, api_password: str) -> Ap
     return api_settings_from_fields(parser.fields, api_username=api_username, api_password=api_password)
 
 
+def _clear_frames(error: BaseException, *, keep: BaseException | None = None) -> None:
+    """Empty the local variables of the frames error, its causes and its contexts passed through.
+
+    A frame that still runs (the caller's own) keeps its locals. keep is an error that is not ours (the one a caller
+    is handling): neither it nor what only it leads to is touched. A frame that cannot be emptied is noted
+    (_note_clearing_failed) and the walk goes on with the rest of its traceback and of the chain. Only an Exception
+    is taken: a KeyboardInterrupt or SystemExit during the clearing goes on up.
+    """
+    pending = [error]
+    seen = {id(keep)}
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        for frame, _ in traceback.walk_tb(current.__traceback__):
+            _clear_frame(frame)
+        pending.extend(linked for linked in (current.__cause__, current.__context__) if linked is not None)
+
+
+def _clear_frame(frame: FrameType) -> None:
+    """Empty the local variables of one frame, as traceback.clear_frames does; best effort, never raises."""
+    try:
+        frame.clear()
+    except RuntimeError:
+        pass  # the frame still runs (the caller's own): it keeps its locals
+    except Exception as failure:  # one frame failing must not spare the rest of the chain
+        _note_clearing_failed(failure)
+
+
+def _note_clearing_failed(failure: Exception) -> None:
+    """Log that the frames of one error could not be emptied, by the class of the failure only.
+
+    Nothing of the failure beyond its class goes in: its message could carry a local of the frame it was about. A log
+    handler that raises does not end the clearing (the hygiene never replaces the error it is about).
+    """
+    with suppress(Exception):
+        _LOGGER.warning(
+            "A traceback of a failed API settings read could not be cleared (%s); the page may still be in its locals",
+            type(failure).__name__,
+        )
+
+
 async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
     """The first complete JPEG of a stream response; see ComexioClient.get_doorstation_snapshot."""
     received = bytearray()
@@ -4357,12 +4428,23 @@ async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str
     while (left := _RESPONSE_MAX_BYTES + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
         body += chunk
     if len(body) > _RESPONSE_MAX_BYTES:
+        body.clear()  # the frame stays in the traceback of the error with its locals: the last chunk too
+        chunk = b""
         raise ComexioDataError(f"{what}: response is longer than {_RESPONSE_MAX_BYTES} bytes")
     encoding = _text_encoding(resp)
+    detail = ""
     try:
         return body.decode(encoding, errors=errors)
-    except UnicodeError as err:  # not only UnicodeDecodeError: a codec may raise a plain UnicodeError
-        raise ComexioDataError(f"{what}: response is not valid {encoding}") from err
+    except UnicodeDecodeError as err:
+        detail = f" (byte {err.start}: {err.reason})"
+    except UnicodeError:  # a codec may raise a plain UnicodeError, which has no position
+        pass
+    # Raised outside the handlers, so it has neither cause nor context: the UnicodeDecodeError holds the whole body
+    # (its object attribute), and a page with a password in it would travel on inside the exception. The frame
+    # stays in the traceback with its locals, so the body is emptied too (the last chunk is empty here: the read
+    # ended on an empty one).
+    body.clear()
+    raise ComexioDataError(f"{what}: response is not valid {encoding}{detail}")
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:

@@ -1,8 +1,10 @@
 """API settings page: switch, login and access per data type of /api/ (get_api_settings)."""
 
+import asyncio
 import dataclasses
 import logging
 import re
+import traceback
 
 import aiohttp
 import pytest
@@ -27,7 +29,7 @@ from aiocomexio import (
     session_kwargs,
 )
 from aiocomexio.api_settings import ApiPageFields
-from aiocomexio.client import _ApiFormParser, parse_api_settings
+from aiocomexio.client import _ApiFormParser, _clear_frames, parse_api_settings
 from tests.common import load_fixture
 from tests.fake_comexio import LOGIN_PAGE, PASSWORD, SESSION_COOKIE, SESSION_VALUE, USERNAME, FakeComexio, Handler
 
@@ -36,8 +38,13 @@ FIXTURE = load_fixture("api_settings_page.html")
 # The user and the password the fixture carries in its login rows: synthetic, like everything in the fixture.
 PAGE_USER = "api-user"
 PAGE_PASSWORD = "s3cret-api-pw"  # nosec B105
+RESPONSE_TEXT_FRAME = "_response_text"  # the frame that reads and decodes the body of the settings page
 SELECTION = "access to markers is single selection"
 MARKER_LIST = "{'1':0,'2':0,'3':0,'4':0,'5':0,'6':null,'7':0,'8':null}"
+# The page without the switch: the parser fails on it, with the page and the password input in its frames.
+NO_SWITCH_PAGE = FIXTURE.replace('name="api_active"', 'name="other_switch"')
+NO_SWITCH_MESSAGE = "API page: the api_active choice is None, expected active or inactive"
+NEEDLE = "needle"
 
 
 def _select(html: str, select_id: str, value: str) -> str:
@@ -488,7 +495,7 @@ def test_a_page_without_the_form_raises_data_error(html: str) -> None:
         (
             'name="api_active" checked="checked" value="active"',
             'name="api_active" value="active"',
-            "API page: the api_active choice is None, expected active or inactive",
+            NO_SWITCH_MESSAGE,
         ),
         (
             'name="api_active" checked="checked" value="active"',
@@ -503,7 +510,7 @@ def test_a_page_without_the_form_raises_data_error(html: str) -> None:
         (
             'type="radio" name="api_active" checked="checked" value="active"',
             'type="checkbox" name="api_active" checked="checked" value="active"',
-            "API page: the api_active choice is None, expected active or inactive",
+            NO_SWITCH_MESSAGE,
         ),
         ('id="use_login"', 'id="use_login_x"', "API page has no use_login input: changed page"),
         ('id="use_tcp"', 'id="use_tcp_x"', "API page has no use_tcp input: changed page"),
@@ -1006,6 +1013,419 @@ async def test_get_api_settings_with_require_https_refuses_plain_http_before_any
     # A client-side refusal that retrying cannot help: neither a dropped connection nor a rejected login.
     assert isinstance(info.value, ComexioError)
     assert not isinstance(info.value, (ComexioConnectionError, ComexioAuthenticationError))
+
+
+def _holds(value: object, needle: str, depth: int = 3) -> bool:
+    """Whether value is needle's text or, up to depth levels down, a container or object that holds it."""
+    if isinstance(value, str):
+        return needle in value
+    if isinstance(value, bytes | bytearray):
+        return needle.encode() in value
+    if depth == 0:
+        return False
+    if isinstance(value, dict):
+        inner = [*value.keys(), *value.values()]
+    elif isinstance(value, list | tuple | set | frozenset):
+        inner = list(value)
+    elif isinstance(value, BaseException):
+        inner = list(value.args)
+    else:
+        slots = (name for cls in type(value).__mro__ for name in getattr(cls, "__slots__", ()))
+        inner = [*getattr(value, "__dict__", {}).values(), *(getattr(value, name, None) for name in slots)]
+    return any(_holds(item, needle, depth - 1) for item in inner)
+
+
+def _frames_holding(
+    error: BaseException, needle: str, *, module: str = "aiocomexio", ignore: tuple[object, ...] = ()
+) -> tuple[list[str], list[str]]:
+    """The functions of module in the traceback of error, and those among them whose locals hold needle.
+
+    ignore: objects that hold needle by design (the client holds the credentials it was built with).
+    """
+    skipped = {id(thing) for thing in ignore}
+    visited: list[str] = []
+    holders: list[str] = []
+    for frame, _ in traceback.walk_tb(error.__traceback__):
+        if not str(frame.f_globals.get("__name__", "")).startswith(module):
+            continue
+        visited.append(frame.f_code.co_name)
+        if any(id(value) not in skipped and _holds(value, needle) for value in frame.f_locals.values()):
+            holders.append(frame.f_code.co_name)
+    return visited, holders
+
+
+async def _read_failing(comexio: FakeComexio, page: str) -> tuple[ComexioClient, ComexioDataError]:
+    """The client and the error get_api_settings raises when the API page is page."""
+    comexio.serve("GET", API_PATH, _admin_page(page))
+    session = aiohttp.ClientSession(**session_kwargs())
+    try:
+        client = await _client(comexio, session)
+        with pytest.raises(ComexioDataError) as info:
+            await client.get_api_settings()
+    finally:
+        await session.close()
+    return client, info.value
+
+
+async def test_a_failed_read_leaves_no_page_in_the_locals_of_its_frames(comexio: FakeComexio) -> None:
+    assert PAGE_PASSWORD in NO_SWITCH_PAGE
+    client, error = await _read_failing(comexio, NO_SWITCH_PAGE)
+
+    assert str(error) == NO_SWITCH_MESSAGE
+    visited, holders = _frames_holding(error, PAGE_PASSWORD, ignore=(client,))
+    assert "parse_api_settings" in visited
+    assert holders == []
+    # ignore=(client,) hides the client from the check: it must hold the password only as its own credential.
+    assert [name for name, value in vars(client).items() if _holds(value, PAGE_PASSWORD)] == ["_api_password"]
+
+
+async def test_a_read_that_fails_after_the_password_leaves_no_page_in_the_locals_of_its_frames(
+    comexio: FakeComexio,
+) -> None:
+    # The password input is read into a local of api_settings_from_fields before this select is checked.
+    page = FIXTURE.replace('id="in_output"', 'id="in_output_other"')
+    assert PAGE_PASSWORD in page
+    client, error = await _read_failing(comexio, page)
+
+    assert str(error) == "API page has no selected option for in_output: changed page"
+    visited, holders = _frames_holding(error, PAGE_PASSWORD, ignore=(client,))
+    assert "api_settings_from_fields" in visited
+    assert holders == []
+
+
+def _serve_admin_bytes(comexio: FakeComexio, body: bytes) -> None:
+    async def handler(request: web.Request) -> web.Response:
+        logged_in = request.cookies.get(SESSION_COOKIE) == SESSION_VALUE
+        return web.Response(body=body if logged_in else LOGIN_PAGE.encode(), content_type="text/html")
+
+    comexio.serve("GET", API_PATH, handler)
+
+
+async def test_an_undecodable_answer_leaves_no_page_in_its_frames_or_in_the_error(comexio: FakeComexio) -> None:
+    body = FIXTURE.encode() + b"\xff"
+    _serve_admin_bytes(comexio, body)
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session)
+
+        with pytest.raises(ComexioDataError) as info:
+            await client.get_api_settings()
+
+    error = info.value
+    # The position and the reason are all that is kept of the UnicodeDecodeError.
+    assert str(error) == f"API settings page: response is not valid utf-8 (byte {len(body) - 1}: invalid start byte)"
+    # The UnicodeDecodeError holds the whole body in its object: it is not chained to the error.
+    assert (error.__cause__, error.__context__) == (None, None)
+    visited, holders = _frames_holding(error, PAGE_PASSWORD, ignore=(client,))
+    assert RESPONSE_TEXT_FRAME in visited
+    assert holders == []
+
+
+@pytest.mark.parametrize("chunk_size", [1, 50, None], ids=["byte-wise", "50-bytes", "as-delivered"])
+async def test_a_read_cancelled_midway_leaves_no_page_in_the_locals_of_its_frames(
+    comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, chunk_size: int | None
+) -> None:
+    comexio.serve("GET", API_PATH, _admin_page(FIXTURE))
+    real_read = aiohttp.StreamReader.read
+    read_so_far = bytearray()
+    reads: list[int] = []
+
+    async def read_then_cancel(self: aiohttp.StreamReader, n: int = -1) -> bytes:
+        # The answer is cut into chunks of chunk_size (the password may straddle a boundary): the abort comes at the
+        # first read after the password was read.
+        if PAGE_PASSWORD.encode() in read_so_far:
+            raise asyncio.CancelledError
+        reads.append(n)
+        chunk = await real_read(self, n if chunk_size is None else chunk_size)
+        read_so_far.extend(chunk)
+        return chunk
+
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session)
+        monkeypatch.setattr(aiohttp.StreamReader, "read", read_then_cancel)
+
+        with pytest.raises(asyncio.CancelledError) as info:
+            await client.get_api_settings()
+
+    if chunk_size is not None:
+        assert len(reads) > 1  # the chunked cases really read the page in pieces
+    visited, holders = _frames_holding(info.value, PAGE_PASSWORD, ignore=(client,))
+    assert RESPONSE_TEXT_FRAME in visited
+    assert holders == []
+
+
+def _fail_holding(secret: str) -> None:
+    held = f"{secret}!"
+    raise ValueError(held)
+
+
+def _caught_holding(secret: str) -> ValueError:
+    """An error whose traceback has a finished frame holding secret."""
+    try:
+        _fail_holding(secret)
+    except ValueError as err:
+        return err
+    raise AssertionError
+
+
+def test_clear_frames_follows_causes_and_contexts_and_ends_on_a_cycle() -> None:
+    first, second = _caught_holding("first-secret"), _caught_holding("second-secret")
+    first.__context__ = second
+    second.__cause__ = first  # a cycle: a walk that does not remember what it saw never ends
+    assert "_fail_holding" in _frames_holding(second, "second-secret", module=__name__)[1]
+
+    _clear_frames(first)
+
+    assert _frames_holding(first, "first-secret", module=__name__)[1] == []
+    assert _frames_holding(second, "second-secret", module=__name__)[1] == []
+
+
+def test_clear_frames_reaches_the_frames_of_a_cause() -> None:
+    cause = _caught_holding("cause-secret")
+    error = ValueError("raised from the cause")
+    error.__cause__ = cause
+
+    _clear_frames(error)
+
+    assert _frames_holding(cause, "cause-secret", module=__name__)[1] == []
+
+
+def test_clear_frames_leaves_the_error_it_is_told_to_keep() -> None:
+    kept, other, older = _caught_holding("kept-secret"), _caught_holding("other-secret"), _caught_holding("old-secret")
+    other.__context__ = kept
+    kept.__context__ = older
+
+    _clear_frames(other, keep=kept)
+
+    assert _frames_holding(other, "other-secret", module=__name__)[1] == []
+    assert "_fail_holding" in _frames_holding(kept, "kept-secret", module=__name__)[1]
+    assert "_fail_holding" in _frames_holding(older, "old-secret", module=__name__)[1]
+
+
+CLIENT_LOGGER = "aiocomexio.client"
+NOT_CLEARED = "could not be cleared"
+
+
+class _FakeFrame:
+    """A frame whose clear() raises failure, if one is given; otherwise it only notes that it was emptied."""
+
+    def __init__(self, failure: BaseException | None = None) -> None:
+        self.failure = failure
+        self.cleared = False
+
+    def clear(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+        self.cleared = True
+
+
+def _clear_walking(
+    monkeypatch: pytest.MonkeyPatch, root: ValueError, frames: dict[ValueError, list[_FakeFrame]]
+) -> None:
+    """_clear_frames(root), where the traceback of each error in frames walks the fake frames given for it.
+
+    A real frame cannot be made to fail in clear() (a C method), so the walk over the traceback is replaced, for this
+    call only. That the real walk hands the frames on is shown by the tests with real tracebacks (test_clear_frames_*).
+    """
+    frames_of = {id(error.__traceback__): its_frames for error, its_frames in frames.items()}
+    with monkeypatch.context() as patch:
+        patch.setattr(traceback, "walk_tb", lambda tb: ((frame, 0) for frame in frames_of.get(id(tb), [])))
+        _clear_frames(root)
+
+
+def test_a_failure_emptying_a_frame_does_not_spare_the_rest_of_the_chain(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # root -(context)-> middle -(cause)-> deep; a frame fails first in the traceback of middle and of deep
+    root, middle, deep = _caught_holding("root"), _caught_holding("middle"), _caught_holding("deep")
+    root.__context__ = middle
+    middle.__cause__ = deep
+    plan = {
+        root: [_FakeFrame()],
+        middle: [_FakeFrame(ValueError("failed on middle-secret")), _FakeFrame()],
+        deep: [_FakeFrame(ValueError("failed on deep-secret")), _FakeFrame()],
+    }
+
+    with caplog.at_level(logging.WARNING, logger=CLIENT_LOGGER):
+        _clear_walking(monkeypatch, root, plan)
+
+    # every frame that can be emptied is: the rest of the traceback and the rest of the chain are walked on
+    assert [frame.cleared for frames in plan.values() for frame in frames] == [True, False, True, False, True]
+    assert [(record.levelno, record.name) for record in caplog.records] == [(logging.WARNING, CLIENT_LOGGER)] * 2
+    assert all(f"{NOT_CLEARED} (ValueError)" in record.getMessage() for record in caplog.records)
+    assert "secret" not in caplog.text  # the class of the failure only: its message may carry a local
+
+
+def test_a_frame_that_still_runs_is_left_alone_without_a_note(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    error = _caught_holding("error")
+    plan = {error: [_FakeFrame(RuntimeError("cannot clear an executing frame")), _FakeFrame()]}
+
+    with caplog.at_level(logging.WARNING, logger=CLIENT_LOGGER):
+        _clear_walking(monkeypatch, error, plan)
+
+    assert plan[error][1].cleared
+    assert caplog.records == []
+
+
+def test_an_interrupt_while_emptying_a_frame_goes_on_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = _caught_holding("error")
+    plan = {error: [_FakeFrame(KeyboardInterrupt())]}
+
+    with pytest.raises(KeyboardInterrupt):
+        _clear_walking(monkeypatch, error, plan)
+
+
+class _RaisingFilter(logging.Filter):
+    """A filter that raises, which (unlike a handler: Handler.handleError swallows) reaches the caller of warning()."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        self.calls += 1
+        raise OSError("the filter is broken")
+
+
+def test_a_logger_that_raises_does_not_end_the_emptying(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = _caught_holding("error")
+    plan = {error: [_FakeFrame(ValueError("failed")), _FakeFrame()]}
+    logger = logging.getLogger(CLIENT_LOGGER)
+    broken = _RaisingFilter()
+    logger.addFilter(broken)
+    try:
+        _clear_walking(monkeypatch, error, plan)
+    finally:
+        logger.removeFilter(broken)
+
+    assert plan[error][1].cleared
+    assert broken.calls == 1  # the note was attempted, through the real logger
+
+
+async def test_a_read_inside_an_except_block_leaves_the_frames_of_the_error_being_handled(
+    comexio: FakeComexio,
+) -> None:
+    comexio.serve("GET", API_PATH, _admin_page(NO_SWITCH_PAGE))
+    handled = _caught_holding("caller-secret")
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session)
+        try:
+            raise handled
+        except ValueError:
+            with pytest.raises(ComexioDataError) as info:
+                await client.get_api_settings()
+
+    assert info.value.__context__ is handled  # the read failed while handling it, so it is in the chain
+    assert "_fail_holding" in _frames_holding(handled, "caller-secret", module=__name__)[1]
+    assert _frames_holding(info.value, PAGE_PASSWORD, ignore=(client,))[1] == []
+
+
+async def test_without_the_clearing_the_frames_check_finds_the_page(
+    comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The positive control of the checks above: they must see the page in the frame once nothing empties it.
+    # (The body of an undecodable answer is emptied by _response_text itself: its control is in test_client.py.)
+    monkeypatch.setattr("aiocomexio.client._clear_frames", lambda *args, **kwargs: None)
+    _serve_admin_bytes(comexio, NO_SWITCH_PAGE.encode())
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session)
+
+        with pytest.raises(ComexioDataError) as info:
+            await client.get_api_settings()
+
+    assert "parse_api_settings" in _frames_holding(info.value, PAGE_PASSWORD, ignore=(client,))[1]
+
+
+async def test_a_clearing_that_fails_does_not_replace_the_error(
+    comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def failing(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("clearing failed")
+
+    monkeypatch.setattr("aiocomexio.client._clear_frames", failing)
+    comexio.serve("GET", API_PATH, _admin_page(NO_SWITCH_PAGE))
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session)
+
+        with caplog.at_level(logging.WARNING, logger=CLIENT_LOGGER), pytest.raises(ComexioDataError) as info:
+            await client.get_api_settings()
+
+    assert str(info.value) == NO_SWITCH_MESSAGE
+    assert f"{NOT_CLEARED} (ValueError)" in caplog.text  # the failure is noted, not lost
+
+
+class _Abort(BaseException):  # not an Exception, like a KeyboardInterrupt, but safe to raise inside the event loop
+    pass
+
+
+async def test_an_abort_while_clearing_is_not_swallowed(comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch) -> None:
+    def aborting(*_args: object, **_kwargs: object) -> None:
+        raise _Abort
+
+    monkeypatch.setattr("aiocomexio.client._clear_frames", aborting)
+    comexio.serve("GET", API_PATH, _admin_page(NO_SWITCH_PAGE))
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session)
+
+        with pytest.raises(_Abort):  # by design: only an Exception of the clearing is taken
+            await client.get_api_settings()
+
+
+async def test_a_failed_read_notes_no_clearing_failure(comexio: FakeComexio, caplog: pytest.LogCaptureFixture) -> None:
+    # The frame of get_api_settings still runs when its error is handled, so clearing it raises RuntimeError: that is
+    # no failure to note (a version of Python that raised something else would log a warning on every failed read).
+    with caplog.at_level(logging.WARNING, logger=CLIENT_LOGGER):
+        await _read_failing(comexio, NO_SWITCH_PAGE)
+
+    assert NOT_CLEARED not in caplog.text
+
+
+async def test_an_error_status_does_not_carry_the_page_in_the_error(comexio: FakeComexio) -> None:
+    # An error page at this address may hold the page of the settings (and the password in it) as well.
+    async def handler(_request: web.Request) -> web.Response:
+        return web.Response(text=FIXTURE, status=500, content_type="text/html")
+
+    comexio.serve("GET", API_PATH, handler)
+    async with aiohttp.ClientSession(**session_kwargs()) as session:
+        client = await _client(comexio, session)
+
+        with pytest.raises(ComexioResponseError) as info:
+            await client.get_api_settings()
+
+    assert str(info.value) == "API settings page failed: HTTP 500"
+    assert info.value.status == 500
+    assert info.value.body is None
+    assert _frames_holding(info.value, PAGE_PASSWORD, ignore=(client,))[1] == []
+
+
+class _Slotted:
+    __slots__ = ("held",)
+
+    def __init__(self, held: object) -> None:
+        self.held = held
+
+
+@pytest.mark.parametrize(
+    "holder",
+    [
+        pytest.param(f"a {NEEDLE} here", id="text"),
+        pytest.param(f"a {NEEDLE} here".encode(), id="bytes"),
+        pytest.param(bytearray(f"a {NEEDLE} here".encode()), id="bytearray"),
+        pytest.param(["x", ("y", NEEDLE)], id="nested containers"),
+        pytest.param({"key": [NEEDLE]}, id="dict value"),
+        pytest.param({NEEDLE: 1}, id="dict key"),
+        pytest.param(ValueError(NEEDLE), id="exception args"),
+        pytest.param(_Slotted(NEEDLE), id="slots"),
+        pytest.param(_Slotted(ValueError(NEEDLE)), id="slots holding an exception"),
+    ],
+)
+def test_holds_finds_the_needle_in_every_shape(holder: object) -> None:
+    assert _holds(holder, NEEDLE)
+
+
+def test_holds_finds_nothing_that_is_not_there() -> None:
+    assert not _holds(_Slotted(["other", ValueError("other")]), NEEDLE)
 
 
 async def test_get_api_settings_sends_no_api_credential_to_comexio(comexio: FakeComexio) -> None:
