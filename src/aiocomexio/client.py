@@ -17,7 +17,9 @@ import logging
 import math
 import re
 import secrets
+import sys
 import time
+import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -29,7 +31,7 @@ from http import HTTPStatus
 from io import StringIO
 from itertools import repeat
 from operator import attrgetter, is_
-from types import MappingProxyType
+from types import FrameType, MappingProxyType
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, Self, TypeIs
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
@@ -38,6 +40,15 @@ from aiohttp.client_reqrep import ConnectionKey
 from aiohttp.http_exceptions import HttpProcessingError
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+from .api_settings import (
+    ACTIVE_RADIO,
+    API_FORM_ID,
+    API_INPUT_IDS,
+    API_SELECT_IDS,
+    ApiPageFields,
+    ApiSettings,
+    api_settings_from_fields,
+)
 from .config import iter_group, log_excerpt
 from .doorstation import (
     CAMERA_ID_ATTRIBUTE,
@@ -55,6 +66,7 @@ from .exceptions import (
     ComexioCreatedWithoutIdError,
     ComexioDataError,
     ComexioError,
+    ComexioInsecureTransportError,
     ComexioRequestRejectedError,
     ComexioResponseError,
 )
@@ -129,6 +141,7 @@ _EXTENSION_COUNTER_ID_PREFIX = "number_of_"
 _EXTENSION_COUNTER_CLASS_RE = re.compile(rf"{_ANY_TYPE_COUNTER}\d+(?:_\d+)*", re.ASCII)
 _EXTENSION_FIRMWARE_PATH = "/admin/extension/checkextension_fwupdate/"
 _EXTENSION_EDIT_PATH = "/admin/extension/edit/"
+_API_SETTINGS_PATH = "/admin/api/home"
 _SYSTEM_DASHBOARD_PATH = "/admin/admin_dashboard/home/"
 _RUN_DURATION_PATH = "/admin/admin_dashboard/run_duration"
 _API_PATH = "/api/"
@@ -1110,6 +1123,48 @@ class ComexioClient:
             params={"id": str(ext_id), "json_return": "true"},
         )
         return parse_extension_form(ext_id, html)
+
+    async def get_api_settings(self, *, require_https: bool = False) -> ApiSettings:
+        """The API settings of the IO-Server (switch, login, access per data type), read from its API page.
+
+        One request with the admin session to /admin/api/home; see api_settings.ApiSettings. The page holds the API
+        password in clear text: it is compared with the API password this client was created with and not kept, so
+        the result has only the verdict (ApiSettings.password_matches), and nothing here logs it. For a write that
+        failed this tells whether the settings explain it (ApiSettings.write_blockers). A page without the settings
+        this reads raises ComexioDataError, the login form ComexioAuthenticationError. An error status raises
+        ComexioResponseError without the text of its page (body is None): the page of an error status at this
+        address is not known to be free of the password.
+
+        The page comes over the transport this client uses, so over plain HTTP anyone listening on the way sees the
+        password in it (a write over /api/ sends it as Basic Auth the same way). With require_https=True a client
+        without a pinned certificate raises ComexioInsecureTransportError before any request; the default False
+        reads the page over whatever the client uses.
+
+        An error raised on the way (a page without the settings, an undecodable answer, a cancelled read) leaves
+        with the local variables of the library's frames in its traceback emptied: they would hold the page, so a
+        tool that records the locals of a traceback would keep the password of the page. The error of a caller that
+        calls from an except block is left alone. This covers the page, not the client: the running frame keeps
+        self, and with it the credentials the client was built with, and the caller's own frames keep their locals.
+        """
+        if require_https and self._fingerprint is None:
+            raise ComexioInsecureTransportError(
+                "API settings page not read: the client talks plain HTTP and the page holds the API password in clear "
+                "text (require_https=True; give the client a certificate fingerprint to use HTTPS)"
+            )
+        outer = sys.exception()  # the error a caller is handling, if it calls from an except block: not ours
+        try:
+            # The page goes on as an argument, so no local of this frame holds it (a running frame cannot be emptied).
+            return parse_api_settings(
+                await self._request_admin_text("GET", _API_SETTINGS_PATH, what="API settings page", error_body=False),
+                api_username=self._api_username,
+                api_password=self._api_password,
+            )
+        except BaseException as err:  # an abort too: a cancelled read holds the part of the page it has read
+            try:
+                _clear_frames(err, keep=outer)
+            except Exception as failure:  # defence in depth: the hygiene never replaces the error it is about
+                _note_clearing_failed(failure)
+            raise
 
     def doorstation_stream_url(self, camera_id: int) -> str:
         """URL of the MJPEG stream of a Doorstation camera on the IO-Server (Doorstation.camera_id)."""
@@ -2264,13 +2319,19 @@ class ComexioClient:
         path: str,
         *,
         what: str,
+        error_body: bool = True,
         **kwargs: Any,
     ) -> str:
-        """Body of one request as text, with transport errors and error statuses mapped to ComexioError."""
+        """Body of one request as text, with transport errors and error statuses mapped to ComexioError.
+
+        error_body=False leaves the page of an error status out of the error (message and ComexioResponseError.body):
+        for a page that may hold a secret, which an error page of the same address may hold too.
+        """
         try:
             async with self._response(method, path, what=what, **kwargs) as resp:
                 if resp.status != HTTPStatus.OK:
-                    raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
+                    page = _collapse_error_body(await _error_page_text(resp, what)) if error_body else None
+                    raise _status_error(what, resp.status, page)
                 return await _response_text(resp, what)
         except (aiohttp.ClientError, TimeoutError) as err:
             _raise_from_stripped(self._transport_error(what, err), err)
@@ -3523,6 +3584,163 @@ def parse_extension_form(ext_id: int, html: str) -> ExtensionInfo:
     return extension_from_inputs(ext_id, parser.inputs)
 
 
+# The leading digits of a size, as a browser reads them (ASCII digits only: \d alone would take any Unicode digit).
+_SELECT_SIZE = re.compile(r"[ \t\n\f\r]*\+?(\d+)", re.ASCII)
+
+
+def _is_list_box(attributes: dict[str, str]) -> bool:
+    """Whether the select is shown as a list (a size of 2 or more), not as a drop-down that shows its first option."""
+    found = _SELECT_SIZE.match(attributes.get("size", ""))
+    return found is not None and found.group(1).lstrip("0") not in ("", "1")
+
+
+class _ApiFormParser(_FormParser):
+    """The fields of the API settings page the client reads (see api_settings), read as a browser does.
+
+    Only the fields of the first form apiform count (a page without it has none, and the settings are not read; a
+    second form of the id is ignored, as a browser's getElementById ignores it). The
+    checked api_active radio counts (the last one, as a browser keeps one checked per group; an input of another type
+    is no switch), the first input of an id
+    (compared exactly), the first select of an id and its selected option (the last one, a browser shows one).
+    An option of a disabled <optgroup> is disabled, a select that allows several selected options has no single
+    value (it does not count), and a select shown as a list (size 2 or more) shows no option unless one is selected.
+    Everything else on the page is ignored.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fields = ApiPageFields()
+        self._in_api_form = False
+        self._api_form_seen = False  # the first form apiform was met; a later one does not count
+        self._select_id: str | None = None
+        self._selects_seen: set[str] = set()
+        # The open select's last selected option, and its first enabled one (what a browser shows if none is selected).
+        self._chosen: str | None = None
+        self._first_enabled: str | None = None
+        self._multiple = False  # the open select allows several selected options
+        self._list_box = False  # the open select is shown as a list (size 2 or more)
+        self._group_disabled = False  # the open <optgroup> is disabled
+
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        if tag == "form":
+            # A form inside a form is ignored by a browser: the outer one stays open.
+            if not self._start_ignored:
+                self._in_api_form = attributes.get("id") == API_FORM_ID and not self._api_form_seen
+                self._api_form_seen = self._api_form_seen or self._in_api_form
+        elif not self._in_api_form:
+            return
+        elif tag == "input":
+            self._input(attributes)
+        elif tag == "select":
+            self._select_start(attributes)
+        elif tag == "option" and self._select_id is not None:
+            self._option(attributes)
+        elif tag == "optgroup" and self._select_id is not None:
+            self._group_disabled = "disabled" in attributes
+
+    def _select_start(self, attributes: dict[str, str]) -> None:
+        # The first select of an id counts, like the first input.
+        select_id = attributes.get("id")
+        if select_id in API_SELECT_IDS and select_id not in self._selects_seen:
+            self._selects_seen.add(select_id)
+            self._select_id = select_id
+            self._multiple = "multiple" in attributes
+            self._list_box = _is_list_box(attributes)
+        else:
+            self._select_id = None
+
+    def _option(self, attributes: dict[str, str]) -> None:
+        value = attributes.get("value", "")
+        if "selected" in attributes:
+            self._chosen = value
+        if self._first_enabled is None and "disabled" not in attributes and not self._group_disabled:
+            self._first_enabled = value
+
+    def handle_form_endtag(self, tag: str) -> None:
+        if tag == "form":
+            self._in_api_form = False
+        elif tag == "optgroup":
+            self._group_disabled = False
+
+    def _input(self, attributes: dict[str, str]) -> None:
+        if (
+            attributes.get("name") == ACTIVE_RADIO
+            and attributes.get("type", "").lower() == "radio"
+            and "checked" in attributes
+        ):
+            self.fields.active_choice = attributes.get("value", "")
+        if (input_id := attributes.get("id", "")) in API_INPUT_IDS:
+            self.fields.inputs.setdefault(input_id, attributes)
+
+    def _shown_option(self) -> str | None:
+        """The value a browser shows: the selected option, else the first enabled one (a list box shows none)."""
+        if self._chosen is not None:
+            return self._chosen
+        return None if self._list_box else self._first_enabled
+
+    def handle_select_end(self) -> None:
+        # Only a select that ended counts: a page cut off inside it says nothing about its value, and a select that
+        # allows several selected options has none.
+        if self._select_id is not None and not self._multiple and (choice := self._shown_option()) is not None:
+            self.fields.selected[self._select_id] = choice
+        self._select_id = self._chosen = self._first_enabled = None
+        self._multiple = self._list_box = self._group_disabled = False
+
+
+def parse_api_settings(html: str, *, api_username: str, api_password: str) -> ApiSettings:
+    """The ApiSettings of the API page html, with the login compared to api_username and api_password.
+
+    See api_settings.api_settings_from_fields; the password is compared and not kept.
+    """
+    parser = _ApiFormParser()
+    parser.feed(html)
+    parser.close()
+    return api_settings_from_fields(parser.fields, api_username=api_username, api_password=api_password)
+
+
+def _clear_frames(error: BaseException, *, keep: BaseException | None = None) -> None:
+    """Empty the local variables of the frames error, its causes and its contexts passed through.
+
+    A frame that still runs (the caller's own) keeps its locals. keep is an error that is not ours (the one a caller
+    is handling): neither it nor what only it leads to is touched. A frame that cannot be emptied is noted
+    (_note_clearing_failed) and the walk goes on with the rest of its traceback and of the chain. Only an Exception
+    is taken: a KeyboardInterrupt or SystemExit during the clearing goes on up.
+    """
+    pending = [error]
+    seen = {id(keep)}
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        for frame, _ in traceback.walk_tb(current.__traceback__):
+            _clear_frame(frame)
+        pending.extend(linked for linked in (current.__cause__, current.__context__) if linked is not None)
+
+
+def _clear_frame(frame: FrameType) -> None:
+    """Empty the local variables of one frame, as traceback.clear_frames does; best effort, never raises."""
+    try:
+        frame.clear()
+    except RuntimeError:
+        pass  # the frame still runs (the caller's own): it keeps its locals
+    except Exception as failure:  # one frame failing must not spare the rest of the chain
+        _note_clearing_failed(failure)
+
+
+def _note_clearing_failed(failure: Exception) -> None:
+    """Log that the frames of one error could not be emptied, by the class of the failure only.
+
+    Nothing of the failure beyond its class goes in: its message could carry a local of the frame it was about. A log
+    handler that raises does not end the clearing (the hygiene never replaces the error it is about).
+    """
+    with suppress(Exception):
+        _LOGGER.warning(
+            "A traceback of a failed API settings read could not be cleared (%s); the page may still be in its locals",
+            type(failure).__name__,
+        )
+
+
 async def _read_first_frame(resp: aiohttp.ClientResponse, what: str) -> bytes:
     """The first complete JPEG of a stream response; see ComexioClient.get_doorstation_snapshot."""
     received = bytearray()
@@ -4210,12 +4428,23 @@ async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str
     while (left := _RESPONSE_MAX_BYTES + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
         body += chunk
     if len(body) > _RESPONSE_MAX_BYTES:
+        body.clear()  # the frame stays in the traceback of the error with its locals: the last chunk too
+        chunk = b""
         raise ComexioDataError(f"{what}: response is longer than {_RESPONSE_MAX_BYTES} bytes")
     encoding = _text_encoding(resp)
+    detail = ""
     try:
         return body.decode(encoding, errors=errors)
-    except UnicodeError as err:  # not only UnicodeDecodeError: a codec may raise a plain UnicodeError
-        raise ComexioDataError(f"{what}: response is not valid {encoding}") from err
+    except UnicodeDecodeError as err:
+        detail = f" (byte {err.start}: {err.reason})"
+    except UnicodeError:  # a codec may raise a plain UnicodeError, which has no position
+        pass
+    # Raised outside the handlers, so it has neither cause nor context: the UnicodeDecodeError holds the whole body
+    # (its object attribute), and a page with a password in it would travel on inside the exception. The frame
+    # stays in the traceback with its locals, so the body is emptied too (the last chunk is empty here: the read
+    # ended on an empty one).
+    body.clear()
+    raise ComexioDataError(f"{what}: response is not valid {encoding}{detail}")
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:

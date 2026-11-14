@@ -1,5 +1,6 @@
 """Fixtures for the client tests: a running fake Comexio server and a client wired to it."""
 
+import gc
 import sys
 from collections.abc import AsyncIterator, Iterator
 
@@ -33,6 +34,25 @@ def client(comexio: FakeComexio, session: aiohttp.ClientSession) -> ComexioClien
 async def logged_in(client: ComexioClient) -> ComexioClient:
     await client.login()
     return client
+
+
+@pytest.fixture
+def garbage_collected() -> Iterator[None]:
+    """Collect now, at a shallow stack, and not at all while the test runs.
+
+    A test that recurses up to the recursion limit uses it. A collection that ran in the middle of such a test would
+    call the finalizers of earlier tests' garbage there, and pytest's unraisable-exception hook cannot even format what
+    they raise at that depth: the test failed in CI (Python 3.13.18, with coverage) with "Failed to process unraisable
+    exception". The cause of that garbage is not known; this takes the collection out of the recursion.
+    """
+    gc.collect()
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 @pytest.fixture

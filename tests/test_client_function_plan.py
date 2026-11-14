@@ -884,6 +884,7 @@ def _circular() -> dict[str, Any]:
         (3, _deeply_nested(), TypeError, "not JSON-serializable"),
     ],
 )
+@pytest.mark.usefixtures("garbage_collected")
 async def test_save_function_plan_scene_refuses_bad_arguments_before_sending(
     logged_in: ComexioClient, comexio: FakeComexio, scene_id: Any, config: Any, error: type[Exception], match: str
 ) -> None:
