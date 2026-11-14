@@ -38,6 +38,7 @@ FIXTURE = load_fixture("api_settings_page.html")
 # The user and the password the fixture carries in its login rows: synthetic, like everything in the fixture.
 PAGE_USER = "api-user"
 PAGE_PASSWORD = "s3cret-api-pw"  # nosec B105
+RESPONSE_TEXT_FRAME = "_response_text"  # the frame that reads and decodes the body of the settings page
 SELECTION = "access to markers is single selection"
 MARKER_LIST = "{'1':0,'2':0,'3':0,'4':0,'5':0,'6':null,'7':0,'8':null}"
 # The page without the switch: the parser fails on it, with the page and the password input in its frames.
@@ -1115,22 +1116,28 @@ async def test_an_undecodable_answer_leaves_no_page_in_its_frames_or_in_the_erro
     # The UnicodeDecodeError holds the whole body in its object: it is not chained to the error.
     assert (error.__cause__, error.__context__) == (None, None)
     visited, holders = _frames_holding(error, PAGE_PASSWORD, ignore=(client,))
-    assert "_response_text" in visited
+    assert RESPONSE_TEXT_FRAME in visited
     assert holders == []
 
 
+@pytest.mark.parametrize("chunk_size", [1, 50, None], ids=["byte-wise", "50-bytes", "as-delivered"])
 async def test_a_read_cancelled_midway_leaves_no_page_in_the_locals_of_its_frames(
-    comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+    comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch, chunk_size: int | None
 ) -> None:
     comexio.serve("GET", API_PATH, _admin_page(FIXTURE))
     real_read = aiohttp.StreamReader.read
-    chunks: list[bytes] = []
+    read_so_far = bytearray()
+    reads: list[int] = []
 
     async def read_then_cancel(self: aiohttp.StreamReader, n: int = -1) -> bytes:
-        if chunks:
+        # The answer is cut into chunks of chunk_size (the password may straddle a boundary): the abort comes at the
+        # first read after the password was read.
+        if PAGE_PASSWORD.encode() in read_so_far:
             raise asyncio.CancelledError
-        chunks.append(await real_read(self, n))
-        return chunks[0]
+        reads.append(n)
+        chunk = await real_read(self, n if chunk_size is None else chunk_size)
+        read_so_far.extend(chunk)
+        return chunk
 
     async with aiohttp.ClientSession(**session_kwargs()) as session:
         client = await _client(comexio, session)
@@ -1139,9 +1146,10 @@ async def test_a_read_cancelled_midway_leaves_no_page_in_the_locals_of_its_frame
         with pytest.raises(asyncio.CancelledError) as info:
             await client.get_api_settings()
 
-    assert PAGE_PASSWORD.encode() in chunks[0]  # what was read before the abort held the password
+    if chunk_size is not None:
+        assert len(reads) > 1  # the chunked cases really read the page in pieces
     visited, holders = _frames_holding(info.value, PAGE_PASSWORD, ignore=(client,))
-    assert "_response_text" in visited
+    assert RESPONSE_TEXT_FRAME in visited
     assert holders == []
 
 
