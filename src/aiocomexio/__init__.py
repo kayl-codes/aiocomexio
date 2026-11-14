@@ -41,7 +41,14 @@ from .exceptions import (
 from .extension import DOORSTATION_TYPE_ID, ExtensionInfo
 from .onewire import OneWireSensor, OneWireStatus
 from .scrape import TimeServerSettings
-from .session import connection_trace_config, is_local_address, progress_trace_config, session_kwargs
+from .session import (
+    DEFAULT_KEEPALIVE_TIMEOUT_SEC,
+    connection_trace_config,
+    connector_kwargs,
+    is_local_address,
+    progress_trace_config,
+    session_kwargs,
+)
 from .tls import fetch_certificate_fingerprint, format_fingerprint, normalize_fingerprint
 
 __version__ = version("aiocomexio")
@@ -65,6 +72,7 @@ __all__ = [
     "ComexioRequestRejectedError",
     "ComexioResponseError",
     "CreatedFunctionPlan",
+    "DEFAULT_KEEPALIVE_TIMEOUT_SEC",
     "DOORSTATION_TYPE_ID",
     "Doorstation",
     "ExtensionInfo",
@@ -83,6 +91,7 @@ __all__ = [
     "WebioCommandForm",
     "__version__",
     "connection_trace_config",
+    "connector_kwargs",
     "fetch_certificate_fingerprint",
     "format_fingerprint",
     "io_written_over_admin_session",

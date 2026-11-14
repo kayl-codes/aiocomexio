@@ -8,8 +8,12 @@ import pytest
 from aiohttp import web
 from yarl import URL
 
-from aiocomexio import is_local_address, session_kwargs
+from aiocomexio import DEFAULT_KEEPALIVE_TIMEOUT_SEC, connector_kwargs, is_local_address, session_kwargs
+from aiocomexio.session import CONNECTION_KEY, CONNECTION_NEW, CONNECTION_REUSED
 from tests.fake_comexio import ADMIN_PATH, FakeComexio
+
+# Comexio closes an idle connection after about 6 s (measured), the default keep-alive has to stay below that.
+COMEXIO_IDLE_CLOSE_SEC = 6
 
 
 @pytest.mark.parametrize(
@@ -54,6 +58,58 @@ async def test_session_kwargs_logs_nothing_by_default() -> None:
 
     assert set(kwargs) == {"timeout", "cookie_jar", "trace_configs"}
     assert len(kwargs["trace_configs"]) == 1
+
+
+def test_default_keepalive_is_shorter_than_comexios_idle_close() -> None:
+    assert 0 < DEFAULT_KEEPALIVE_TIMEOUT_SEC < COMEXIO_IDLE_CLOSE_SEC
+    assert connector_kwargs() == {"keepalive_timeout": DEFAULT_KEEPALIVE_TIMEOUT_SEC}
+
+
+def test_connector_kwargs_takes_another_keepalive() -> None:
+    assert connector_kwargs(keepalive_timeout=1.5) == {"keepalive_timeout": 1.5}
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_connector_kwargs_rejects_non_positive_keepalive(timeout: float) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        connector_kwargs(keepalive_timeout=timeout)
+
+
+async def _connections_of_a_request(session: aiohttp.ClientSession, url: str) -> list[str]:
+    ctx: dict[str, list[str]] = {}
+    async with session.get(url, trace_request_ctx=ctx) as resp:
+        await resp.read()
+    return ctx[CONNECTION_KEY]
+
+
+def _answering_comexio(comexio: FakeComexio) -> str:
+    async def answer(_request: web.Request) -> web.Response:
+        return web.Response(text="done")
+
+    comexio.serve("GET", ADMIN_PATH, answer)
+    return f"http://{comexio.host}{ADMIN_PATH}"
+
+
+async def test_connector_built_from_kwargs_reuses_a_connection_within_the_keepalive(comexio: FakeComexio) -> None:
+    # The keep-alive is far longer than the test takes, so a stalled event loop cannot expire the connection.
+    url = _answering_comexio(comexio)
+    connector = aiohttp.TCPConnector(**connector_kwargs(keepalive_timeout=30))
+
+    async with aiohttp.ClientSession(connector=connector, **session_kwargs()) as session:
+        assert await _connections_of_a_request(session, url) == [CONNECTION_NEW]
+        assert await _connections_of_a_request(session, url) == [CONNECTION_REUSED]
+
+
+async def test_connector_built_from_kwargs_drops_a_connection_after_the_keepalive(comexio: FakeComexio) -> None:
+    # The wait is many times the keep-alive, so a stalled event loop only makes the expiry more certain: the request
+    # opens a new connection instead of meeting one the server closed meanwhile.
+    url = _answering_comexio(comexio)
+    connector = aiohttp.TCPConnector(**connector_kwargs(keepalive_timeout=0.05))
+
+    async with aiohttp.ClientSession(connector=connector, **session_kwargs()) as session:
+        assert await _connections_of_a_request(session, url) == [CONNECTION_NEW]
+        await asyncio.sleep(0.5)
+        assert await _connections_of_a_request(session, url) == [CONNECTION_NEW]
 
 
 @pytest.mark.parametrize("ip", ["192.168.0.5", "203.0.113.7"])
