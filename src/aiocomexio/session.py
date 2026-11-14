@@ -25,6 +25,11 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_SEC = 120
 DEFAULT_PROGRESS_LOG_INTERVAL_SEC = 10
 
+# Comexio closes a connection that has been idle for about 6 s, while aiohttp keeps one for 15 s by default: a request
+# sent in between meets the closed connection ("Server disconnected"; 6.6 % of the POSTs in a measurement of
+# 2026-11-11). A connector that keeps an idle connection for less than Comexio does never reuses a closed one.
+DEFAULT_KEEPALIVE_TIMEOUT_SEC = 3
+
 # Where connection_trace_config() leaves its findings in a request's trace_request_ctx dict (a list, one entry per
 # connection the request was tried on), and the two values. The key carries the library's name so it cannot collide with
 # something a caller keeps in its own trace_request_ctx.
@@ -83,6 +88,22 @@ def session_kwargs(
         "cookie_jar": aiohttp.CookieJar(unsafe=True),
         "trace_configs": configs,
     }
+
+
+def connector_kwargs(*, keepalive_timeout: float = DEFAULT_KEEPALIVE_TIMEOUT_SEC) -> dict[str, Any]:
+    """Keyword arguments for the aiohttp connector a ComexioClient's session should use.
+
+    The keep-alive is a setting of the connector, not of the session: pass these to aiohttp.TCPConnector (or a
+    subclass) and the connector to aiohttp.ClientSession(connector=...). A caller that cannot build its own connector
+    (a framework that hands out one shared by every session) has no way to set it. keepalive_timeout is how long
+    an idle connection is kept, in seconds; the default, DEFAULT_KEEPALIVE_TIMEOUT_SEC, is shorter than the time
+    after which Comexio closes one. Raises ValueError for a value that is not a positive, finite number (aiohttp reads
+    0 as "keep nothing", which would open a new connection for every request, and infinity as "keep for ever", which
+    is the very connection Comexio has closed).
+    """
+    if not math.isfinite(keepalive_timeout) or keepalive_timeout <= 0:
+        raise ValueError(f"keepalive timeout must be positive and finite, got {keepalive_timeout}")
+    return {"keepalive_timeout": keepalive_timeout}
 
 
 def connection_trace_config() -> aiohttp.TraceConfig:

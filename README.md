@@ -36,7 +36,11 @@ login for an IP-address host, a request timeout; `progress_log_interval=10` adds
 waiting" log line for slow requests). The result always carries `trace_configs` (the library's
 own, which let the client tell a dropped connection from a refusal in its debug line): pass your own
 trace configs to `session_kwargs(trace_configs=[...])`, not to `aiohttp.ClientSession` as well, or
-Python raises a `TypeError` for the duplicate keyword. Give every client its own session: `login()` clears the
+Python raises a `TypeError` for the duplicate keyword. Comexio closes a connection that has been idle for about 6 s, aiohttp keeps one for 15 s, so a request in
+between meets a closed connection ("Server disconnected"). How long an idle connection is kept is a setting of
+the connector, not of the session: build it with `aiohttp.TCPConnector(**connector_kwargs())` (a keep-alive of
+`DEFAULT_KEEPALIVE_TIMEOUT_SEC`, 3 s; `connector_kwargs(keepalive_timeout=...)` for another) and pass it as
+`aiohttp.ClientSession(connector=...)`. Give every client its own session: `login()` clears the
 session's cookie jar. Several tasks can share one client while it logs in: `login()` waits for
 the requests already in flight (at most 60 s), and requests that come up meanwhile wait until the
 login is done, so renewing the session does not cut them off. Two exceptions: a request still
