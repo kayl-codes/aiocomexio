@@ -107,7 +107,13 @@ import asyncio
 
 import aiohttp
 
-from aiocomexio import ComexioClient, fetch_certificate_fingerprint, format_fingerprint, session_kwargs
+from aiocomexio import (
+    ComexioClient,
+    connector_kwargs,
+    fetch_certificate_fingerprint,
+    format_fingerprint,
+    session_kwargs,
+)
 from aiocomexio.config import parse_config
 
 HOST = "192.168.0.20"
@@ -122,7 +128,8 @@ async def setup() -> str:
 
 async def main(stored_fingerprint: str) -> None:
     """Every later start: use the stored fingerprint, never a freshly fetched one."""
-    async with aiohttp.ClientSession(**session_kwargs()) as session:
+    connector = aiohttp.TCPConnector(**connector_kwargs())
+    async with aiohttp.ClientSession(connector=connector, **session_kwargs()) as session:
         client = ComexioClient(HOST, "admin", "secret", session=session, fingerprint=stored_fingerprint)
         await client.login()
         raw = await client.get_raw_config()
@@ -165,7 +172,7 @@ import asyncio
 
 import aiohttp
 
-from aiocomexio import ComexioClient, session_kwargs
+from aiocomexio import ComexioClient, connector_kwargs, session_kwargs
 
 
 async def report_1wire_problems(client: ComexioClient) -> None:
@@ -178,7 +185,8 @@ async def report_1wire_problems(client: ComexioClient) -> None:
 
 
 async def main(stored_fingerprint: str) -> None:
-    async with aiohttp.ClientSession(**session_kwargs()) as session:
+    connector = aiohttp.TCPConnector(**connector_kwargs())
+    async with aiohttp.ClientSession(connector=connector, **session_kwargs()) as session:
         client = ComexioClient("192.168.0.20", "admin", "secret", session=session, fingerprint=stored_fingerprint)
         await client.login()
         await report_1wire_problems(client)

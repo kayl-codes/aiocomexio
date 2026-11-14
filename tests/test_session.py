@@ -75,26 +75,41 @@ def test_connector_kwargs_rejects_non_positive_keepalive(timeout: float) -> None
         connector_kwargs(keepalive_timeout=timeout)
 
 
-async def test_connector_built_from_kwargs_drops_an_idle_connection(comexio: FakeComexio) -> None:
-    # The connector keeps an idle connection for the time given and no longer: a request right after reuses it,
-    # one after the keep-alive ran out opens a new one instead of meeting a connection the server closed meanwhile.
+async def _connections_of_a_request(session: aiohttp.ClientSession, url: str) -> list[str]:
+    ctx: dict[str, list[str]] = {}
+    async with session.get(url, trace_request_ctx=ctx) as resp:
+        await resp.read()
+    return ctx[CONNECTION_KEY]
+
+
+def _answering_comexio(comexio: FakeComexio) -> str:
     async def answer(_request: web.Request) -> web.Response:
         return web.Response(text="done")
 
     comexio.serve("GET", ADMIN_PATH, answer)
-    connector = aiohttp.TCPConnector(**connector_kwargs(keepalive_timeout=0.5))
+    return f"http://{comexio.host}{ADMIN_PATH}"
 
-    async def connections_of_a_request(session: aiohttp.ClientSession) -> list[str]:
-        ctx: dict[str, list[str]] = {}
-        async with session.get(f"http://{comexio.host}{ADMIN_PATH}", trace_request_ctx=ctx) as resp:
-            await resp.read()
-        return ctx[CONNECTION_KEY]
+
+async def test_connector_built_from_kwargs_reuses_a_connection_within_the_keepalive(comexio: FakeComexio) -> None:
+    # The keep-alive is far longer than the test takes, so a stalled event loop cannot expire the connection.
+    url = _answering_comexio(comexio)
+    connector = aiohttp.TCPConnector(**connector_kwargs(keepalive_timeout=30))
 
     async with aiohttp.ClientSession(connector=connector, **session_kwargs()) as session:
-        assert await connections_of_a_request(session) == [CONNECTION_NEW]
-        assert await connections_of_a_request(session) == [CONNECTION_REUSED]
-        await asyncio.sleep(1.2)
-        assert await connections_of_a_request(session) == [CONNECTION_NEW]
+        assert await _connections_of_a_request(session, url) == [CONNECTION_NEW]
+        assert await _connections_of_a_request(session, url) == [CONNECTION_REUSED]
+
+
+async def test_connector_built_from_kwargs_drops_a_connection_after_the_keepalive(comexio: FakeComexio) -> None:
+    # The wait is many times the keep-alive, so a stalled event loop only makes the expiry more certain: the request
+    # opens a new connection instead of meeting one the server closed meanwhile.
+    url = _answering_comexio(comexio)
+    connector = aiohttp.TCPConnector(**connector_kwargs(keepalive_timeout=0.05))
+
+    async with aiohttp.ClientSession(connector=connector, **session_kwargs()) as session:
+        assert await _connections_of_a_request(session, url) == [CONNECTION_NEW]
+        await asyncio.sleep(0.5)
+        assert await _connections_of_a_request(session, url) == [CONNECTION_NEW]
 
 
 @pytest.mark.parametrize("ip", ["192.168.0.5", "203.0.113.7"])
