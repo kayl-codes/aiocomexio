@@ -890,6 +890,35 @@ async def _redirect_to_moved(_request: web.Request) -> web.StreamResponse:
     return web.Response(status=302, headers={"Location": MOVED_PATH})
 
 
+async def test_a_redirect_without_the_verdict_is_logged_as_failed(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve("POST", SLOW_PATH, _redirect_to_moved)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioRequestRejectedError):
+        await api_client._request_redirect("POST", SLOW_PATH, what=FORM, verdict=("added", "1"))
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    assert _expected_line(
+        FORM, "failed", idle=re.escape("n/a (first request)"), connection="new", error="ComexioRequestRejectedError"
+    ).fullmatch(line)
+
+
+async def test_a_redirect_with_the_verdict_is_no_failure(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def confirmed(_request: web.Request) -> web.StreamResponse:
+        return web.Response(status=302, headers={"Location": f"{MOVED_PATH}?added=1"})
+
+    comexio.serve("POST", SLOW_PATH, confirmed)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        location = await api_client._request_redirect("POST", SLOW_PATH, what=FORM, verdict=("added", "1"))
+
+    assert location == f"{MOVED_PATH}?added=1"
+    assert not [r for r in caplog.records if r.name == LOGGER]
+
+
 async def test_a_form_request_dropped_on_a_reused_connection_logs_why(
     api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
 ) -> None:

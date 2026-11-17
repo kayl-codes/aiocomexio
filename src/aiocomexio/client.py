@@ -1835,15 +1835,14 @@ class ComexioClient:
         """
         _require_ints(fub_id=fub_id)
         what = f"Deleting function plan {fub_id}"
-        location = await self._request_redirect(
+        await self._request_redirect(
             "GET",
             _PLAN_DELETE_PATH,
             what=what,
+            verdict=_PLAN_DELETED_CONFIRMATION,
             params={"id": str(fub_id)},
             headers=self._xhr_headers(_FUNCTION_MODULE_PATH),
         )
-        if not _redirect_confirms(location, _PLAN_DELETED_CONFIRMATION):
-            raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
 
     async def run_function_plan(self, fub_id: int, plan: Mapping[str, Any] | None = None) -> None:
         """Save a plan's elements and connections and activate the plan (Comexio's run_fup).
@@ -2254,10 +2253,13 @@ class ComexioClient:
     async def _post_plan_form(self, form: dict[str, str], verdict: tuple[str, str], *, what: str) -> None:
         """POST the plan settings form; ComexioRequestRejectedError unless the redirect carries verdict."""
         location = await self._request_redirect(
-            "POST", _PLAN_SAVE_PATH, what=what, data=form, headers=self._xhr_headers(_FUNCTION_MODULE_PATH)
+            "POST",
+            _PLAN_SAVE_PATH,
+            what=what,
+            verdict=verdict,
+            data=form,
+            headers=self._xhr_headers(_FUNCTION_MODULE_PATH),
         )
-        if not _redirect_confirms(location, verdict):
-            raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
         _LOGGER.debug("%s confirmed (redirect to %r)", what, location)
 
     async def _plan_state_request(self, path: str, form: dict[str, str], *, what: str) -> None:
@@ -2516,14 +2518,18 @@ class ComexioClient:
             raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
         return body
 
-    async def _request_redirect(self, method: str, path: str, *, what: str, **kwargs: Any) -> str:
+    async def _request_redirect(
+        self, method: str, path: str, *, what: str, verdict: tuple[str, str] | None = None, **kwargs: Any
+    ) -> str:
         """Location of a form action Comexio answers with a redirect.
 
         Any other answer is not the confirmation: the login form or a redirect to it raises
         ComexioAuthenticationError, an error status ComexioResponseError, anything else
         ComexioRequestRejectedError. A compressed 200 answer is no confirmation either and is not read; one
         longer than _RESPONSE_MAX_BYTES is read up to that size plus one byte, then refused. Both are a
-        ComexioDataError. The request has the debug line of _diagnosed, an error from the answer included.
+        ComexioDataError. A redirect that does not carry `verdict` (when given, e.g. ("added", "1")) is refused
+        as ComexioRequestRejectedError. The request has the debug line of _diagnosed, an error from the answer
+        and a refused redirect included.
         """
         notes: dict[str, Any] = {}
         try:
@@ -2538,12 +2544,16 @@ class ComexioClient:
                     **_unencoded(kwargs),
                 ) as resp:
                     self._last_response_at = time.monotonic()  # the server answered: the idle time of a later request
-                    return await self._form_answer_location(resp, what)
+                    return await self._form_answer_location(resp, what, verdict)
         except (aiohttp.ClientError, TimeoutError) as err:
             _raise_from_stripped(self._transport_error(what, err), err)
 
-    async def _form_answer_location(self, resp: aiohttp.ClientResponse, what: str) -> str:
+    async def _form_answer_location(
+        self, resp: aiohttp.ClientResponse, what: str, verdict: tuple[str, str] | None
+    ) -> str:
         """Location of the redirect a form action was answered with; any other answer raises (see _request_redirect).
+
+        With `verdict`, a redirect that does not carry it raises as well.
 
         Runs inside the diagnostics scope of the request: the refusals below end in the debug line, as in _request_text.
         """
@@ -2560,6 +2570,8 @@ class ComexioClient:
                 raise ComexioAuthenticationError(
                     f"Comexio redirected to the login page, the session is not logged in ({what})"
                 )
+            if verdict is not None and not _redirect_confirms(location, verdict):
+                raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
             return location
         status = resp.status
         body = await (
