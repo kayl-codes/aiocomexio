@@ -102,15 +102,25 @@ def doorstations_from_attributes(elements: Iterable[Mapping[str, str]]) -> dict[
     Several elements name the same Doorstation; the first one counts. An element without a name does not clash with
     a named one: the name comes from whichever element carries it. A later element that names the Doorstation with
     another camera or another name is logged. An element with an empty data-camera_id names no camera and is
-    skipped (counted at DEBUG); one whose ids are not positive integers is logged and skipped. If elements exist but
-    none is usable, the page has changed: that raises ComexioDataError rather than reporting no Doorstation.
+    skipped (counted at DEBUG). An element that carries data-camera_id but no data-extid at all names no Doorstation
+    either and is skipped the same way, however many such elements appear: Comexio's "delete this Doorstation's
+    pictures" button carries its own data-camera_id without a data-extid, on a Doorstation extension without a
+    camera tile (none is configured, or none has ever connected) just as much as on one with a working camera -
+    a page with only such buttons describes real, cameraless Doorstations, not a changed page, so it reports no
+    Doorstation rather than raising. An element that does carry data-extid, but whose id (either one) is not a
+    positive integer, is logged and skipped as unusable; if such elements exist and none of them is usable, the
+    page itself has changed and that raises ComexioDataError instead of reporting no Doorstation.
     """
     found: dict[int, Doorstation] = {}
     unusable = 0
     without_camera = 0
+    without_extid = 0
     for attributes in elements:
         if not attributes.get(CAMERA_ID_ATTRIBUTE):
             without_camera += 1
+            continue
+        if EXT_ID_ATTRIBUTE not in attributes:
+            without_extid += 1
             continue
         doorstation = _doorstation_of(attributes)
         if doorstation is None:
@@ -119,6 +129,8 @@ def doorstations_from_attributes(elements: Iterable[Mapping[str, str]]) -> dict[
         found[doorstation.ext_id] = _merged(found.get(doorstation.ext_id), doorstation)
     if without_camera:
         _LOGGER.debug("Skipped %d Doorstation elements with an empty camera id", without_camera)
+    if without_extid:
+        _LOGGER.debug("Skipped %d Doorstation elements without a data-extid at all", without_extid)
     if unusable:
         _LOGGER.warning("Skipped %d Doorstation elements without a usable extension and camera id", unusable)
     if unusable and not found:
