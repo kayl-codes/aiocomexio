@@ -233,8 +233,9 @@ extension. The camera calls need the admin session (`login()` first):
   only Comexio's "delete pictures" control, which carries `data-camera_id` and no `data-extid`, so such a page
   yields an empty map. Elements that carry a `data-extid` and a non-empty `data-camera_id`, but where one of the
   two is not a positive integer, are skipped (and logged); if there are such elements but none is usable, the call raises `ComexioDataError`.
-  Detection follows the IO home page of Comexio OS 11.0.2: the elements of a Doorstation tab carry
-  `data-extid`, `data-extname` and `data-camera_id`.
+  Detection follows the IO home page of Comexio OS 11.0.2: the camera-tile elements of a Doorstation tab carry
+  `data-extid`, `data-extname` and `data-camera_id`; other controls of the tab, such as the "delete pictures"
+  button, may carry only `data-camera_id`.
 - `get_extension(ext_id)` reads the edit form of one extension (`/admin/extension/edit/?id=<ext_id>&json_return=true`,
   which answers with the HTML of the form, not JSON) and returns an `ExtensionInfo`: `ext_id`, `type_id`
   (`DOORSTATION_TYPE_ID`, 16, for a Doorstation; `is_doorstation` tells), `name` and `serial` (`None` if empty; an
