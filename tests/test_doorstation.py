@@ -163,14 +163,12 @@ def test_an_empty_camera_id_names_no_camera_and_is_skipped_at_debug(caplog: pyte
         ("7", "9" * 19),
         ("", "7"),
         ("x", "7"),
-        (None, "7"),
     ],
 )
 def test_an_element_with_unusable_ids_is_skipped_and_logged(
-    ext_id: str | None, camera_id: str, caplog: pytest.LogCaptureFixture
+    ext_id: str, camera_id: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    attributes = {"data_camera_id": camera_id} | ({} if ext_id is None else {"data_extid": ext_id})
-    html = _element(**attributes) + _doorstation_tab("9", "Garage")
+    html = _element(data_extid=ext_id, data_camera_id=camera_id) + _doorstation_tab("9", "Garage")
 
     with caplog.at_level(logging.WARNING, logger="aiocomexio"):
         result = parse_doorstations(html)
@@ -188,6 +186,17 @@ def test_camera_elements_none_of_them_usable_mean_a_changed_page() -> None:
         parse_doorstations(html)
 
     assert str(info.value) == "None of the 2 Doorstation elements has a usable extension and camera id"
+
+
+def test_an_extid_less_element_is_not_counted_among_the_unusable_ones() -> None:
+    """A delete-pictures button (no data-extid) next to a genuinely malformed element must not inflate the
+    raise's count - the two are unrelated failure reasons."""
+    html = _element(data_camera_id="7") + _element(data_extid="x", data_camera_id="9")
+
+    with pytest.raises(ComexioDataError) as info:
+        parse_doorstations(html)
+
+    assert str(info.value) == "None of the 1 Doorstation elements has a usable extension and camera id"
 
 
 def test_a_doorstation_named_twice_differently_keeps_the_first_and_logs(caplog: pytest.LogCaptureFixture) -> None:
@@ -1445,10 +1454,27 @@ def test_a_counter_among_other_or_with_suffixed_classes_marks_the_io_home_page(h
     assert parse_doorstations(html) == {}
 
 
-def test_a_camera_element_without_an_extension_id_is_named_as_unusable() -> None:
-    html = _element(data_camera_id="7")
+def test_a_camera_element_without_an_extension_id_is_not_a_doorstation_declaration(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Comexio's "delete this Doorstation's pictures" button carries data-camera_id but no data-extid at all,
+    on a Doorstation extension without a camera tile as much as on one with a working camera; it names no
+    Doorstation and must not make the page look like one of only unusable Doorstation elements."""
+    html = _element(data_camera_id="7") + _doorstation_tab("9", "Garage")
 
-    with pytest.raises(ComexioDataError) as info:
-        parse_doorstations(html)
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio"):
+        result = parse_doorstations(html)
 
-    assert str(info.value) == "None of the 1 Doorstation elements has a usable extension and camera id"
+    assert result == {9: Doorstation(ext_id=9, camera_id=9, name="Garage")}
+    assert [record.getMessage() for record in caplog.records] == [
+        "Skipped 1 Doorstation elements without a data-extid at all"
+    ]
+
+
+def test_a_doorstation_without_a_camera_tile_at_all_names_no_doorstation() -> None:
+    """The exact page a cameraless Doorstation extension renders: the "delete pictures" button is the only
+    element carrying data-camera_id, there is no Doorstation tab at all. That must report no Doorstation, not
+    raise ComexioDataError - a cameraless Doorstation is a real, supported state, not a changed page."""
+    html = _element(data_camera_id="14")
+
+    assert parse_doorstations(html) == {}
