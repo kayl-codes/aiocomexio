@@ -160,6 +160,8 @@ def _run_with_hash_seeds(script: str, *args: str) -> set[bytes]:
         result = subprocess.run(
             [sys.executable, "-c", script, *args],
             env={**os.environ, "PYTHONHASHSEED": seed},
+            # Own stdin: under pre-commit on Windows the inherited one is an invalid handle (WinError 6).
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             check=True,
         )
