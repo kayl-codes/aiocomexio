@@ -80,7 +80,8 @@ def test_connector_kwargs_takes_another_keepalive(timeout: float) -> None:
         float("inf"),
         float("-inf"),
         pytest.param(10**400, id="int-beyond-the-float-range"),
-        pytest.param(2**1024, id="first-int-above-the-float-range"),
+        pytest.param(int(sys.float_info.max) + 1, id="one-above-the-largest-float"),
+        pytest.param(2**1024, id="first-int-that-overflows-float"),
         pytest.param(-(10**400), id="negative-int-beyond-the-float-range"),
     ],
 )
