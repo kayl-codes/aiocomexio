@@ -1054,7 +1054,9 @@ async def test_a_form_answer_cut_off_in_the_body_still_counts_as_an_answer(
         await api_client._request_redirect("POST", SLOW_PATH, what=FORM)
 
     (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
-    assert line.startswith(f"{FORM}: failed after ")
+    assert _expected_line(
+        FORM, "failed", idle=re.escape("n/a (first request)"), connection="new", error=r"ClientPayloadError\(.*\)"
+    ).fullmatch(line)
     assert _answered_at(api_client) is not None  # the headers came in before the body broke off
 
 

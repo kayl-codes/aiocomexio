@@ -367,7 +367,7 @@ async def test_update_function_plan_unconfirmed_is_rejected(logged_in: ComexioCl
 
     with pytest.raises(
         ComexioRequestRejectedError,
-        match=r"Saving settings of function plan 4 was not confirmed \(redirect to '.*added=1'\)",
+        match=r"^Saving settings of function plan 4 was not confirmed \(redirect to '.*added=1'\)$",
     ):
         await logged_in.update_function_plan(
             4, name="P", comment="", position=0, active=False, paper_format="A4", orientation="landscape", dpi=90
@@ -389,7 +389,7 @@ async def test_delete_function_plan_unconfirmed_is_rejected(logged_in: ComexioCl
 
     with pytest.raises(
         ComexioRequestRejectedError,
-        match=r"Deleting function plan 9 was not confirmed \(redirect to '.*delete=error'\)",
+        match=r"^Deleting function plan 9 was not confirmed \(redirect to '.*delete=error'\)$",
     ):
         await logged_in.delete_function_plan(9)
 
