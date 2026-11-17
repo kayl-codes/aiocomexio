@@ -346,6 +346,15 @@ async def test_redirect_to_the_login_page_is_an_authentication_error(
         await logged_in.delete_function_plan(9)
 
 
+@pytest.mark.parametrize("location", ["/admin/home/?msg=login", "http://login.local/admin/home/?saved=1"])
+async def test_login_only_in_the_query_or_host_of_a_redirect_is_no_logout(
+    logged_in: ComexioClient, comexio: FakeComexio, location: str
+) -> None:
+    _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, location)
+
+    assert await logged_in._request_redirect("POST", PLAN_SAVE_PATH, what="Save plan") == location
+
+
 async def test_update_function_plan_unconfirmed_is_rejected(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
 
