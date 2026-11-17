@@ -331,7 +331,14 @@ async def test_unparsable_redirect_location_is_a_response_error(logged_in: Comex
         await logged_in.delete_function_plan(9)
 
 
-@pytest.mark.parametrize("location", ["/board/home/login/", "http://comexio/admin/home/Login?next=saved=1"])
+@pytest.mark.parametrize(
+    "location",
+    [
+        "/board/home/login/",
+        "http://comexio/admin/home/Login?next=saved=1",
+        "/board/home/login/?saved=1&delete=ok",  # carries the verdict, still the login page
+    ],
+)
 async def test_redirect_to_the_login_page_is_an_authentication_error(
     logged_in: ComexioClient, comexio: FakeComexio, location: str
 ) -> None:
@@ -346,10 +353,22 @@ async def test_redirect_to_the_login_page_is_an_authentication_error(
         await logged_in.delete_function_plan(9)
 
 
+@pytest.mark.parametrize("location", ["/admin/home/?msg=login", "http://login.local/admin/home/?saved=1"])
+async def test_login_only_in_the_query_or_host_of_a_redirect_is_no_logout(
+    logged_in: ComexioClient, comexio: FakeComexio, location: str
+) -> None:
+    _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, location)
+
+    assert await logged_in._request_redirect("POST", PLAN_SAVE_PATH, what="Save plan") == location
+
+
 async def test_update_function_plan_unconfirmed_is_rejected(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     _serve_redirect(comexio, "POST", PLAN_SAVE_PATH, f"{_HOME}?added=1")
 
-    with pytest.raises(ComexioRequestRejectedError):
+    with pytest.raises(
+        ComexioRequestRejectedError,
+        match=r"^Saving settings of function plan 4 was not confirmed \(redirect to '.*added=1'\)$",
+    ):
         await logged_in.update_function_plan(
             4, name="P", comment="", position=0, active=False, paper_format="A4", orientation="landscape", dpi=90
         )
@@ -368,7 +387,10 @@ async def test_delete_function_plan(logged_in: ComexioClient, comexio: FakeComex
 async def test_delete_function_plan_unconfirmed_is_rejected(logged_in: ComexioClient, comexio: FakeComexio) -> None:
     _serve_redirect(comexio, "GET", PLAN_DELETE_PATH, f"{_HOME}?delete=error")
 
-    with pytest.raises(ComexioRequestRejectedError, match="delete=error"):
+    with pytest.raises(
+        ComexioRequestRejectedError,
+        match=r"^Deleting function plan 9 was not confirmed \(redirect to '.*delete=error'\)$",
+    ):
         await logged_in.delete_function_plan(9)
 
 

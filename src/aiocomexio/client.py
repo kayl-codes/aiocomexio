@@ -1835,15 +1835,14 @@ class ComexioClient:
         """
         _require_ints(fub_id=fub_id)
         what = f"Deleting function plan {fub_id}"
-        location = await self._request_redirect(
+        await self._request_redirect(
             "GET",
             _PLAN_DELETE_PATH,
             what=what,
+            verdict=_PLAN_DELETED_CONFIRMATION,
             params={"id": str(fub_id)},
             headers=self._xhr_headers(_FUNCTION_MODULE_PATH),
         )
-        if not _redirect_confirms(location, _PLAN_DELETED_CONFIRMATION):
-            raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
 
     async def run_function_plan(self, fub_id: int, plan: Mapping[str, Any] | None = None) -> None:
         """Save a plan's elements and connections and activate the plan (Comexio's run_fup).
@@ -2254,10 +2253,13 @@ class ComexioClient:
     async def _post_plan_form(self, form: dict[str, str], verdict: tuple[str, str], *, what: str) -> None:
         """POST the plan settings form; ComexioRequestRejectedError unless the redirect carries verdict."""
         location = await self._request_redirect(
-            "POST", _PLAN_SAVE_PATH, what=what, data=form, headers=self._xhr_headers(_FUNCTION_MODULE_PATH)
+            "POST",
+            _PLAN_SAVE_PATH,
+            what=what,
+            verdict=verdict,
+            data=form,
+            headers=self._xhr_headers(_FUNCTION_MODULE_PATH),
         )
-        if not _redirect_confirms(location, verdict):
-            raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
         _LOGGER.debug("%s confirmed (redirect to %r)", what, location)
 
     async def _plan_state_request(self, path: str, form: dict[str, str], *, what: str) -> None:
@@ -2348,7 +2350,22 @@ class ComexioClient:
     async def _response(
         self, method: str, path: str, *, what: str, deadline: asyncio.Timeout | None = None, **kwargs: Any
     ) -> AsyncIterator[aiohttp.ClientResponse]:
-        """The response to one request (see _follow_redirects), with a debug line when it fails or comes after a pause.
+        """The response to one request (see _follow_redirects), with the debug line of _diagnosed.
+
+        `deadline` is the caller's asyncio.timeout around the request and its block, see _diagnosed.
+        """
+        notes: dict[str, Any] = {}
+        async with (
+            self._diagnosed(what, notes, deadline),
+            self._follow_redirects(method, path, what=what, connection=notes, **kwargs) as resp,
+        ):
+            yield resp
+
+    @asynccontextmanager
+    async def _diagnosed(
+        self, what: str, notes: dict[str, Any], deadline: asyncio.Timeout | None = None
+    ) -> AsyncIterator[None]:
+        """Debug line for the request run in the block, when it fails or comes after a pause.
 
         The line says how long the client had been idle, on which connections the request was tried (a reused one,
         a new one; two entries mean aiohttp tried again itself) and how many other requests were in flight: what
@@ -2356,16 +2373,18 @@ class ComexioClient:
         duration both count from the moment the request got its slot at the login gate. "failed" is any exception
         out of the request or the caller's block (a status or data error too; the line names its class, and the
         message only for a transport error). It costs nothing unless the aiocomexio logger is at DEBUG, and a failure
-        of the line itself never replaces the request's own result. A request that bypasses this method
-        (_request_redirect, the function plan forms) gets no line of its own, but its answer moves the time of the
-        last one. `deadline` is the caller's asyncio.timeout around the request and its block: when it expires, the
-        line names a timeout instead of the cancellation it raises in here.
+        of the line itself never replaces the request's own result.
+
+        `notes` is the dict the request is sent with as its trace_request_ctx, and the block calls
+        _mark_request_start on it once the request has its slot at the login gate: a block that never gets that far
+        (cancelled in the queue, nothing sent) leaves no line. Both ways of sending a request share this scope:
+        _response and _request_redirect (the function plan forms). `deadline` is the caller's asyncio.timeout around
+        the request and its block: when it expires, the line names a timeout instead of the cancellation it raises
+        in here.
         """
-        notes: dict[str, Any] = {}
         failure: BaseException | None = None
         try:
-            async with self._follow_redirects(method, path, what=what, connection=notes, **kwargs) as resp:
-                yield resp
+            yield
         # Only noted for the debug line, always re-raised.
         except BaseException as err:
             expired = isinstance(err, asyncio.CancelledError) and deadline is not None and deadline.expired()
@@ -2388,9 +2407,14 @@ class ComexioClient:
         if isinstance(error, aiohttp.ClientResponseError) and not isinstance(error, aiohttp.ClientHttpProxyError):
             self._last_response_at = time.monotonic()
 
+    def _mark_request_start(self, notes: dict[str, Any]) -> None:
+        """Where the debug line of _diagnosed counts duration and idle time from: the request has its gate slot."""
+        notes[_STARTED_KEY] = time.monotonic()
+        notes[_PREVIOUS_RESPONSE_KEY] = self._last_response_at
+
     def _log_request_safely(self, what: str, notes: dict[str, Any], error: BaseException | None) -> None:
         try:
-            # _follow_redirects sets both keys together: a missing one is a bug, reported below as a failed line.
+            # _mark_request_start sets both keys together: a missing one is a bug, reported below as a failed line.
             self._log_request(what, notes[_STARTED_KEY], notes[_PREVIOUS_RESPONSE_KEY], notes, error)
         # A diagnostic line must never replace the request's own exception.
         except Exception as line_error:
@@ -2443,8 +2467,7 @@ class ComexioClient:
         redirect_target = _unpinned_redirect_target if self._fingerprint is None else _pinned_redirect_target
         kwargs = _unencoded(kwargs)
         async with self._gate.request():
-            connection[_STARTED_KEY] = time.monotonic()
-            connection[_PREVIOUS_RESPONSE_KEY] = self._last_response_at
+            self._mark_request_start(connection)
             url = f"{self._base_url}{path}"
             for _ in range(_MAX_REDIRECTS + 1):
                 # The connections of the hop being sent: a followed redirect is no second try of aiohttp.
@@ -2495,46 +2518,65 @@ class ComexioClient:
             raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
         return body
 
-    async def _request_redirect(self, method: str, path: str, *, what: str, **kwargs: Any) -> str:
+    async def _request_redirect(
+        self, method: str, path: str, *, what: str, verdict: tuple[str, str] | None = None, **kwargs: Any
+    ) -> str:
         """Location of a form action Comexio answers with a redirect.
 
         Any other answer is not the confirmation: the login form or a redirect to it raises
         ComexioAuthenticationError, an error status ComexioResponseError, anything else
         ComexioRequestRejectedError. A compressed 200 answer is no confirmation either and is not read; one
         longer than _RESPONSE_MAX_BYTES is read up to that size plus one byte, then refused. Both are a
-        ComexioDataError.
+        ComexioDataError. A redirect that does not carry `verdict` (when given, e.g. ("added", "1")) is refused
+        as ComexioRequestRejectedError. The request has the debug line of _diagnosed, an error from the answer
+        and a refused redirect included.
         """
+        notes: dict[str, Any] = {}
         try:
-            async with (
-                self._gate.request(),
-                self._session.request(
-                    method, f"{self._base_url}{path}", allow_redirects=False, ssl=self._ssl, **_unencoded(kwargs)
-                ) as resp,
-            ):
-                self._last_response_at = time.monotonic()  # the server answered: the idle time of a later request
-                if resp.status in _REDIRECT_STATUSES:
-                    location = resp.headers.get("Location", "")
-                    try:
-                        location_path = urlsplit(location).path
-                    except ValueError as err:
-                        raise ComexioResponseError(
-                            f"{what} failed: Comexio redirected to an unparsable location {location!r}",
-                            status=resp.status,
-                        ) from err
-                    if "login" in location_path.lower():
-                        raise ComexioAuthenticationError(
-                            f"Comexio redirected to the login page, the session is not logged in ({what})"
-                        )
-                    return location
-                status = resp.status
-                body = await (
-                    _response_text(resp, what, errors="replace")
-                    if status == HTTPStatus.OK
-                    else _error_page_text(resp, what)
-                )
+            async with self._diagnosed(what, notes), self._gate.request():
+                self._mark_request_start(notes)
+                async with self._session.request(
+                    method,
+                    f"{self._base_url}{path}",
+                    allow_redirects=False,
+                    ssl=self._ssl,
+                    trace_request_ctx=notes,
+                    **_unencoded(kwargs),
+                ) as resp:
+                    self._last_response_at = time.monotonic()  # the server answered: the idle time of a later request
+                    return await self._form_answer_location(resp, what, verdict)
         except (aiohttp.ClientError, TimeoutError) as err:
-            self._note_status_answer(err)
             _raise_from_stripped(self._transport_error(what, err), err)
+
+    async def _form_answer_location(
+        self, resp: aiohttp.ClientResponse, what: str, verdict: tuple[str, str] | None
+    ) -> str:
+        """Location of the redirect a form action was answered with; any other answer raises (see _request_redirect).
+
+        With `verdict`, a redirect that does not carry it raises as well.
+
+        Runs inside the diagnostics scope of the request: the refusals below end in the debug line, as in _request_text.
+        """
+        if resp.status in _REDIRECT_STATUSES:
+            location = resp.headers.get("Location", "")
+            try:
+                location_path = urlsplit(location).path
+            except ValueError as err:
+                raise ComexioResponseError(
+                    f"{what} failed: Comexio redirected to an unparsable location {location!r}",
+                    status=resp.status,
+                ) from err
+            if "login" in location_path.lower():
+                raise ComexioAuthenticationError(
+                    f"Comexio redirected to the login page, the session is not logged in ({what})"
+                )
+            if verdict is not None and not _redirect_confirms(location, verdict):
+                raise ComexioRequestRejectedError(f"{what} was not confirmed (redirect to {location!r})")
+            return location
+        status = resp.status
+        body = await (
+            _response_text(resp, what, errors="replace") if status == HTTPStatus.OK else _error_page_text(resp, what)
+        )
         if _LOGIN_FORM_SUBMIT_MARKER in body:
             raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
         if status != HTTPStatus.OK:

@@ -22,8 +22,10 @@ from multidict import CIMultiDictProxy
 from yarl import URL
 
 from aiocomexio import (
+    ComexioAuthenticationError,
     ComexioClient,
     ComexioConnectionError,
+    ComexioRequestRejectedError,
     ComexioResponseError,
     connection_trace_config,
     session_kwargs,
@@ -38,6 +40,7 @@ API_PATH = "/api/"
 SLOW_PATH = "/slow"
 MOVED_PATH = "/moved"
 LOGGER = "aiocomexio.client"
+FORM = "Form"
 
 
 @pytest.fixture
@@ -880,6 +883,203 @@ async def test_a_redirect_form_answer_moves_the_answer_time(
         assert await api_client._request_redirect("POST", SLOW_PATH, what="Form") == MOVED_PATH
 
     assert _answered_at(api_client) is not None
+    assert not [r for r in caplog.records if r.name == LOGGER]
+
+
+async def _redirect_to_moved(_request: web.Request) -> web.StreamResponse:
+    return web.Response(status=302, headers={"Location": MOVED_PATH})
+
+
+async def test_a_redirect_without_the_verdict_is_logged_as_failed(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve("POST", SLOW_PATH, _redirect_to_moved)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioRequestRejectedError):
+        await api_client._request_redirect("POST", SLOW_PATH, what=FORM, verdict=("added", "1"))
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    assert _expected_line(
+        FORM, "failed", idle=re.escape("n/a (first request)"), connection="new", error="ComexioRequestRejectedError"
+    ).fullmatch(line)
+
+
+async def test_a_redirect_with_the_verdict_is_no_failure(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def confirmed(_request: web.Request) -> web.StreamResponse:
+        return web.Response(status=302, headers={"Location": f"{MOVED_PATH}?added=1"})
+
+    comexio.serve("POST", SLOW_PATH, confirmed)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        location = await api_client._request_redirect("POST", SLOW_PATH, what=FORM, verdict=("added", "1"))
+
+    assert location == f"{MOVED_PATH}?added=1"
+    assert not [r for r in caplog.records if r.name == LOGGER]
+
+
+async def test_a_form_request_dropped_on_a_reused_connection_logs_why(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve("POST", SLOW_PATH, _redirect_to_moved)
+    await api_client._request_redirect("POST", SLOW_PATH, what=FORM)  # opens the connection the next one reuses
+    comexio.serve("POST", SLOW_PATH, _close_connection)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
+        await api_client._request_redirect("POST", SLOW_PATH, what=FORM)
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    # aiohttp does not repeat a POST: the reused connection is the only one tried.
+    assert _expected_line(FORM, "failed", connection="reused", error=r"ServerDisconnectedError\(.*\)").fullmatch(line)
+
+
+async def test_the_first_form_request_has_no_idle_time_and_a_new_connection(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve("POST", SLOW_PATH, _close_connection)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
+        await api_client._request_redirect("POST", SLOW_PATH, what=FORM)
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    assert _expected_line(
+        FORM,
+        "failed",
+        idle=re.escape("n/a (first request)"),
+        connection="new",
+        error=r"ServerDisconnectedError\(.*\)",
+    ).fullmatch(line)
+
+
+async def test_a_form_answer_after_a_pause_logs_even_when_it_succeeds(
+    api_client: ComexioClient,
+    comexio: FakeComexio,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comexio.serve("POST", SLOW_PATH, _redirect_to_moved)
+    monkeypatch.setattr(client_module, "_IDLE_LOG_MIN_SEC", 0.0)
+    await api_client._request_redirect("POST", SLOW_PATH, what=FORM)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        assert await api_client._request_redirect("POST", SLOW_PATH, what=FORM) == MOVED_PATH
+
+    (line,) = (r.getMessage() for r in caplog.records if "answered after" in r.getMessage())
+    assert _expected_line(FORM, "answered", connection="reused").fullmatch(line)
+
+
+async def test_a_form_answer_that_is_no_confirmation_is_named_by_its_class(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def to_login(_request: web.Request) -> web.StreamResponse:
+        return web.Response(status=302, headers={"Location": "/login/"})
+
+    comexio.serve("POST", SLOW_PATH, to_login)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioAuthenticationError):
+        await api_client._request_redirect("POST", SLOW_PATH, what=FORM)
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    assert _expected_line(
+        FORM, "failed", idle=re.escape("n/a (first request)"), connection="new", error="ComexioAuthenticationError"
+    ).fullmatch(line)
+
+
+async def _cut_off_in_the_body(request: web.Request) -> web.StreamResponse:
+    assert request.transport is not None
+    request.transport.write(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+    request.transport.close()
+    return web.Response()
+
+
+@pytest.mark.parametrize(
+    ("handler", "raised", "error"),
+    [
+        pytest.param(
+            lambda _request: web.Response(status=500, text="boom"),
+            ComexioResponseError,
+            "ComexioResponseError",
+            id="error-status",
+        ),
+        pytest.param(
+            lambda _request: web.Response(text="saved"),
+            ComexioRequestRejectedError,
+            "ComexioRequestRejectedError",
+            id="no-confirmation",
+        ),
+        pytest.param(
+            lambda _request: web.Response(text='<form id="loginsubmit">'),
+            ComexioAuthenticationError,
+            "ComexioAuthenticationError",
+            id="login-form",
+        ),
+        pytest.param(
+            lambda _request: web.Response(status=401, text='<form id="loginsubmit">'),
+            ComexioAuthenticationError,
+            "ComexioAuthenticationError",
+            id="login-form-with-error-status",
+        ),
+    ],
+)
+async def test_a_form_answer_that_refuses_is_named_by_its_class(
+    api_client: ComexioClient,
+    comexio: FakeComexio,
+    caplog: pytest.LogCaptureFixture,
+    handler: Callable[[web.Request], web.StreamResponse],
+    raised: type[Exception],
+    error: str,
+) -> None:
+    async def serve(request: web.Request) -> web.StreamResponse:
+        return handler(request)
+
+    comexio.serve("POST", SLOW_PATH, serve)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(raised):
+        await api_client._request_redirect("POST", SLOW_PATH, what=FORM)
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    assert _expected_line(
+        FORM, "failed", idle=re.escape("n/a (first request)"), connection="new", error=error
+    ).fullmatch(line)
+    assert _answered_at(api_client) is not None
+
+
+async def test_a_form_answer_cut_off_in_the_body_still_counts_as_an_answer(
+    api_client: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio.serve("POST", SLOW_PATH, _cut_off_in_the_body)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER), pytest.raises(ComexioConnectionError):
+        await api_client._request_redirect("POST", SLOW_PATH, what=FORM)
+
+    (line,) = (r.getMessage() for r in caplog.records if "failed after" in r.getMessage())
+    assert _expected_line(
+        FORM, "failed", idle=re.escape("n/a (first request)"), connection="new", error=r"ClientPayloadError\(.*\)"
+    ).fullmatch(line)
+    assert _answered_at(api_client) is not None  # the headers came in before the body broke off
+
+
+async def test_a_form_request_cancelled_before_its_slot_has_no_line(
+    api_client: ComexioClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    gate_closed, entered = asyncio.Event(), asyncio.Event()
+
+    @asynccontextmanager
+    async def blocked_slot() -> AsyncIterator[None]:
+        entered.set()
+        await gate_closed.wait()  # a login that never lets a request start
+        yield
+
+    api_client._gate.request = blocked_slot  # type: ignore[method-assign]
+    task = asyncio.create_task(api_client._request_redirect("POST", SLOW_PATH, what=FORM))
+    await entered.wait()
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
     assert not [r for r in caplog.records if r.name == LOGGER]
 
 
