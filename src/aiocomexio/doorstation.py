@@ -1,8 +1,9 @@
 """Comexio Doorstation: its detection on the IO home page and the first frame of its camera stream.
 
-The IO home page (/admin/in_output/home) renders one tab per extension. The elements of a Doorstation tab carry
-data-extid, data-extname and data-camera_id, the ids holding the extension id (reported for Comexio OS 11.0.2 in
-kayl-codes/homeassistant-comexio#180). The IO-Server serves the camera as an MJPEG stream (multipart/x-mixed-replace,
+The IO home page (/admin/in_output/home) renders one tab per extension. The camera-tile elements of a Doorstation tab
+carry data-extid, data-extname and data-camera_id, the ids holding the extension id (reported for Comexio OS 11.0.2 in
+kayl-codes/homeassistant-comexio#180); other controls of the tab, such as the "delete pictures" button, may carry only
+data-camera_id. The IO-Server serves the camera as an MJPEG stream (multipart/x-mixed-replace,
 one JPEG per part) under /proxy/cam/<camera_id>/; the Doorstation itself serves the same stream under its own address.
 
 Reading the tags of the page is the client's job (a browser-like html.parser, see ComexioClient.get_doorstations);
