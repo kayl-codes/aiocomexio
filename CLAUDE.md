@@ -45,6 +45,9 @@ Beta. The move out of the integration, in order:
      (`get_doorstation_snapshot`, `doorstation_stream_url`), and the settings of one extension
      (`get_extension`, `ExtensionInfo`: name, serial, type id and the IP address from
      `extension_location` of `/admin/extension/edit/`).
+   - Done: TLS settings of a Web-IO device (`get_webio_device_tls` → `WebioTlsSettings`: certificate check and key
+     pin, read from the device form on `/admin/web_io/home`); `update_webio_device_address(..., keep_tls=True)`
+     saves them unchanged instead of resetting them (default `False` keeps the old reset).
    - A successful admin answer is read through a byte cap (`_RESPONSE_MAX_BYTES`, 16 MiB); an error
      page has its own 64 KiB cap and the Doorstation snapshot its own 4 MiB cap. The credentials POST
      of `login()` is sent without reading its answer (`_request_unread`). Every request sends

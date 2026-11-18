@@ -24,6 +24,7 @@ from .client import (
     SystemInfo,
     WebioBaseInfo,
     WebioCommandForm,
+    WebioTlsSettings,
     io_written_over_admin_session,
 )
 from .doorstation import Doorstation
@@ -89,6 +90,7 @@ __all__ = [
     "WRITE_TARGET_MARKER",
     "WebioBaseInfo",
     "WebioCommandForm",
+    "WebioTlsSettings",
     "__version__",
     "connection_trace_config",
     "connector_kwargs",
