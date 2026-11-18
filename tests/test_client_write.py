@@ -27,6 +27,7 @@ from aiocomexio import (
     ComexioResponseError,
     WebioBaseInfo,
     WebioCommandForm,
+    WebioTlsSettings,
     io_written_over_admin_session,
 )
 from aiocomexio import client as client_module
@@ -861,6 +862,248 @@ async def test_update_webio_device_address_unconfirmed_raises(logged_in: Comexio
 
     with pytest.raises(ComexioRequestRejectedError):
         await logged_in.update_webio_device_address(34, "192.168.0.11:8123", "HA [M]")
+
+
+_PIN = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AbCdE="  # synthetic, not a real SPKI hash
+
+
+def _webio_device_form(device_id: int, *, check_on: bool | None, pin: str | None) -> str:
+    """The TLS rows of one device form on /admin/web_io/home; None leaves the select / the pin input out."""
+    select = (
+        ""
+        if check_on is None
+        else f'<select id="checkca_{device_id}" name="checkca_{device_id}">'
+        f'<option value="1"{" selected=selected" if check_on else ""}>Aktiv</option>'
+        f'<option value="0"{"" if check_on else " selected=selected"}>Inaktiv</option></select>'
+    )
+    pin_input = (
+        ""
+        if pin is None
+        else f'<input type="text" id="pinnedpubkey_{device_id}" name="pinnedpubkey_{device_id}" value="{pin}">'
+    )
+    row = f"<td>Zertifikatprüfung</td><td>{select}</td><td>Key Pinning</td><td>{pin_input}</td>"
+    return f'<form id="device_{device_id}"><table><tr>{row}</tr></table></form>'
+
+
+def _webio_home_page(*forms: str) -> str:
+    return f"<html><body><div id='tabs'>{''.join(forms)}</div></body></html>"
+
+
+async def test_get_webio_device_tls_reads_the_form_of_that_device(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # Device 3 is a prefix of 34: ids are compared exactly, so each device reads its own fields.
+    comexio.serve_text(
+        "GET",
+        WEBIO_HOME_PATH,
+        _webio_home_page(
+            _webio_device_form(3, check_on=True, pin=""),
+            _webio_device_form(34, check_on=False, pin=_PIN),
+        ),
+    )
+
+    assert await logged_in.get_webio_device_tls(34) == WebioTlsSettings(check_certificate=False, pinned_public_key=_PIN)
+    assert await logged_in.get_webio_device_tls("3") == WebioTlsSettings(check_certificate=True, pinned_public_key="")
+
+
+def _tls_select(options: str, device_id: int = 34, attrs: str = "") -> str:
+    return f'<select id="checkca_{device_id}"{attrs}>{options}</select>'
+
+
+_ON_SELECTED = '<option value="1" selected>Aktiv</option><option value="0">Inaktiv</option>'
+_NONE_SELECTED = '<option value="1">Aktiv</option><option value="0">Inaktiv</option>'
+_BOTH_SELECTED = '<option value="1" selected>Aktiv</option><option value="0" selected>Inaktiv</option>'
+_PIN_INPUT = '<input id="pinnedpubkey_34" value="">'
+_NO_FIELDS = "the Web-IO page has no certificate check and key pin fields for it"
+_NO_SELECTED = "the certificate check select is not a single drop-down with one selected option"
+_NO_VALUE = "the key pin input has no value attribute"
+
+
+@pytest.mark.parametrize(
+    ("page", "message"),
+    [
+        pytest.param(_webio_home_page(_webio_device_form(9, check_on=True, pin="")), _NO_FIELDS, id="no-such-device"),
+        pytest.param(_webio_home_page(_webio_device_form(34, check_on=None, pin=_PIN)), _NO_FIELDS, id="no-select"),
+        pytest.param(_webio_home_page(_webio_device_form(34, check_on=True, pin=None)), _NO_FIELDS, id="no-pin-input"),
+        pytest.param(
+            _webio_home_page(f"<template>{_tls_select('')}{_PIN_INPUT}</template>"),
+            _NO_FIELDS,
+            id="fields-only-inside-a-template",
+        ),
+        pytest.param(
+            _webio_home_page(_tls_select(_ON_SELECTED), '<input id="pinnedpubkey_34">'),
+            _NO_VALUE,
+            id="pin-input-without-value-attribute",
+        ),
+        pytest.param(
+            _webio_home_page(_tls_select(_NONE_SELECTED), _PIN_INPUT), _NO_SELECTED, id="no-option-marked-selected"
+        ),
+        pytest.param(
+            _webio_home_page(_tls_select(_BOTH_SELECTED), _PIN_INPUT), _NO_SELECTED, id="two-options-selected"
+        ),
+        pytest.param(
+            _webio_home_page(_tls_select(_ON_SELECTED, attrs=" multiple"), _PIN_INPUT),
+            _NO_SELECTED,
+            id="multiple-select",
+        ),
+        pytest.param(
+            # The answer ends inside the select: its options are not complete, so nothing is chosen from it.
+            f'<html><body>{_PIN_INPUT}<select id="checkca_34"><option value="1" selected>Aktiv',
+            _NO_SELECTED,
+            id="select-cut-off-before-its-end",
+        ),
+        pytest.param(_webio_home_page(_tls_select(""), _PIN_INPUT), _NO_SELECTED, id="select-without-options"),
+        *[
+            pytest.param(
+                _webio_home_page(_tls_select(f'<option value="{value}" selected>?</option>'), _PIN_INPUT),
+                "unknown certificate check value",
+                id=f"unknown-check-value-{value.strip() or 'empty'}-{len(value)}",
+            )
+            for value in ("2", "", "01", " 1")
+        ],
+    ],
+)
+async def test_get_webio_device_tls_unreadable_form_raises(
+    logged_in: ComexioClient, comexio: FakeComexio, page: str, message: str
+) -> None:
+    comexio.serve_text("GET", WEBIO_HOME_PATH, page)
+
+    with pytest.raises(ComexioDataError, match=re.escape(message)) as excinfo:
+        await logged_in.get_webio_device_tls(34)
+    assert "Web-IO device 34" in str(excinfo.value)
+
+
+async def test_get_webio_device_tls_option_without_value_attribute_uses_its_text(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("GET", WEBIO_HOME_PATH, _webio_home_page(_tls_select("<option selected>0</option>"), _PIN_INPUT))
+
+    assert await logged_in.get_webio_device_tls(34) == WebioTlsSettings(check_certificate=False, pinned_public_key="")
+
+
+async def test_get_webio_device_tls_decodes_the_pin_as_a_browser_does(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # Entities are resolved and the value is kept as it stands (no strip).
+    pin_input = '<input id="pinnedpubkey_34" value=" Ab&#43;c&#x2F;d&amp;e= ">'
+    comexio.serve_text("GET", WEBIO_HOME_PATH, _webio_home_page(_tls_select(_ON_SELECTED), pin_input))
+
+    assert (await logged_in.get_webio_device_tls(34)).pinned_public_key == " Ab+c/d&e= "
+
+
+async def test_get_webio_device_tls_first_element_of_the_id_counts(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # A copy hidden in a template is no element of the page; of two real ones the first wins, as for a browser.
+    page = _webio_home_page(
+        '<template><input id="pinnedpubkey_34" value="hidden"></template>',
+        _tls_select(_ON_SELECTED),
+        _tls_select('<option value="0" selected>Inaktiv</option>'),
+        f'<input id="pinnedpubkey_34" value="{_PIN}">',
+        '<input id="pinnedpubkey_34" value="second">',
+    )
+    comexio.serve_text("GET", WEBIO_HOME_PATH, page)
+
+    assert await logged_in.get_webio_device_tls(34) == WebioTlsSettings(check_certificate=True, pinned_public_key=_PIN)
+
+
+async def test_get_webio_device_tls_login_form_raises_authentication_error(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve_text("GET", WEBIO_HOME_PATH, LOGIN_PAGE)
+
+    with pytest.raises(ComexioAuthenticationError):
+        await logged_in.get_webio_device_tls(34)
+
+
+@pytest.mark.parametrize(
+    ("check_on", "pin", "expected_check"),
+    [(True, "", "1"), (False, _PIN, "0"), (True, _PIN, "1")],
+    ids=["check-on-no-pin", "check-off-with-pin", "check-on-with-pin"],
+)
+@pytest.mark.parametrize("device_id", [34, "34"], ids=["int-id", "str-id"])
+async def test_update_webio_device_address_keep_tls_keeps_check_and_pin(
+    logged_in: ComexioClient,
+    comexio: FakeComexio,
+    device_id: int | str,
+    check_on: bool,
+    pin: str,
+    expected_check: str,
+) -> None:
+    comexio.serve_text(
+        "GET",
+        WEBIO_HOME_PATH,
+        _webio_home_page(
+            _webio_device_form(3, check_on=False, pin="other"), _webio_device_form(34, check_on=check_on, pin=pin)
+        ),
+    )
+    comexio.serve_json("POST", WEBIO_SAVE_DEVICE_PATH, {"save": 1})
+
+    await logged_in.update_webio_device_address(device_id, "192.168.0.11:8123", "HA [M]", keep_tls=True)
+
+    (request,) = comexio.received_at("POST", WEBIO_SAVE_DEVICE_PATH)
+    saved = json.loads(request.form["JSON"])
+    # Only the TLS fields differ from the default call: address, name and the reset credentials are as before.
+    assert saved == {
+        "web_device_id": "34",
+        "name_34": "HA [M]",
+        "ip_34": "192.168.0.11:8123",
+        "username_34": "",
+        "password_34": "",
+        "checkca_34": expected_check,
+        "pinnedpubkey_34": pin,
+        "form_login_34": "2",
+    }
+    # The page is read once, before the save.
+    wanted = {("GET", WEBIO_HOME_PATH), ("POST", WEBIO_SAVE_DEVICE_PATH)}
+    assert [call for call in comexio.requests if call in wanted] == [
+        ("GET", WEBIO_HOME_PATH),
+        ("POST", WEBIO_SAVE_DEVICE_PATH),
+    ]
+
+
+async def test_update_webio_device_address_default_still_resets_the_tls_settings(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # The page carries a pin, but without keep_tls it is neither read nor kept.
+    comexio.serve_text("GET", WEBIO_HOME_PATH, _webio_home_page(_webio_device_form(34, check_on=True, pin=_PIN)))
+    comexio.serve_json("POST", WEBIO_SAVE_DEVICE_PATH, {"save": 1})
+
+    await logged_in.update_webio_device_address(34, "192.168.0.11:8123", "HA [M]")
+
+    assert comexio.received_at("GET", WEBIO_HOME_PATH) == []
+    (request,) = comexio.received_at("POST", WEBIO_SAVE_DEVICE_PATH)
+    saved = json.loads(request.form["JSON"])
+    assert (saved["checkca_34"], saved["pinnedpubkey_34"]) == ("0", "")
+
+
+@pytest.mark.parametrize(
+    ("page", "error"),
+    [
+        pytest.param(
+            _webio_home_page(_webio_device_form(9, check_on=True, pin=_PIN)), ComexioDataError, id="device-not-on-page"
+        ),
+        pytest.param(
+            _webio_home_page(_tls_select(_ON_SELECTED), '<input id="pinnedpubkey_34">'),
+            ComexioDataError,
+            id="pin-without-value-attribute",
+        ),
+        pytest.param(
+            _webio_home_page(_tls_select(_NONE_SELECTED), _PIN_INPUT), ComexioDataError, id="no-option-marked-selected"
+        ),
+        pytest.param(LOGIN_PAGE, ComexioAuthenticationError, id="login-page"),
+    ],
+)
+async def test_update_webio_device_address_keep_tls_unreadable_form_saves_nothing(
+    logged_in: ComexioClient, comexio: FakeComexio, page: str, error: type[Exception]
+) -> None:
+    comexio.serve_text("GET", WEBIO_HOME_PATH, page)
+    comexio.serve_json("POST", WEBIO_SAVE_DEVICE_PATH, {"save": 1})
+
+    with pytest.raises(error):
+        await logged_in.update_webio_device_address(34, "192.168.0.11:8123", "HA [M]", keep_tls=True)
+
+    assert comexio.received_at("POST", WEBIO_SAVE_DEVICE_PATH) == []
 
 
 # --- Web-IO commands ------------------------------------------------------------------------------

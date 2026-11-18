@@ -108,6 +108,7 @@ __all__ = [
     "SystemInfo",
     "WebioBaseInfo",
     "WebioCommandForm",
+    "WebioTlsSettings",
     "io_written_over_admin_session",
 ]
 
@@ -406,6 +407,13 @@ _NOT_RECONSTRUCTING = (
 _SIZE_RE = re.compile(rf"[{_HTML_WHITESPACE}]*\+?(\d+)", re.ASCII)
 # The id of the form's protocol <select>, whose options read e.g. <option value="0" selected="selected">.
 _WEBIO_PROTOCOL_SELECT_ID = "protocol"
+# The fields of a device form on /admin/web_io/home carry the device id as suffix: the certificate check is a
+# <select id="checkca_<id>"> (option values "1" = Aktiv, "0" = Inaktiv), the key pin an <input id="pinnedpubkey_<id>">.
+# The save form takes the same names.
+_WEBIO_CHECKCA_PREFIX = "checkca_"
+_WEBIO_PINNED_PUBKEY_PREFIX = "pinnedpubkey_"
+_WEBIO_CHECKCA_ON = "1"
+_WEBIO_CHECKCA_OFF = "0"
 # A protocol is a small number (leading zeros aside); a longer digit string is none, and int() would refuse one
 # beyond 4300 digits, leading zeros included.
 _PROTOCOL_VALUE_RE = re.compile(r"0*(\d{1,9})", re.ASCII)
@@ -564,6 +572,18 @@ class WebioBaseInfo:
 
     base_id: str
     deletable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WebioTlsSettings:
+    """The TLS settings of one Web-IO device (see get_webio_device_tls).
+
+    check_certificate is the device's "Zertifikatprüfung" (Aktiv / Inaktiv), pinned_public_key its "Key Pinning"
+    field as Comexio shows it (the Base64 SHA-256 of the server's SPKI; empty: no pin).
+    """
+
+    check_certificate: bool
+    pinned_public_key: str
 
 
 class IoAddress(NamedTuple):
@@ -1481,22 +1501,50 @@ class ComexioClient:
         # The answer carries no verdict to check; logged so a silent refusal can be traced.
         _LOGGER.debug("Creating Web-IO device %r (class %s): %s", name, base_id, _excerpt(body))
 
-    async def update_webio_device_address(self, device_id: str | int, address: str, device_name: str) -> None:
+    async def get_webio_device_tls(self, device_id: str | int) -> WebioTlsSettings:
+        """The certificate check and key pin of the Web-IO device device_id, read from its form on the Web-IO page.
+
+        One request for the whole page /admin/web_io/home, which holds the form of every device; the fields
+        are found by their id suffix (checkca_<id>, pinnedpubkey_<id>), so device 3 never reads device 34's.
+        Raises ComexioDataError if the page has no such device, its form lacks a field, the key pin input has no
+        value attribute, or the certificate check is not exactly one option marked selected whose value is Aktiv
+        ("1") or Inaktiv ("0") — never a guess, because a caller writes the values back; see parse_webio_device_tls.
+        The device's Basic Auth credentials are not read (Comexio does not put the password into the form).
+        """
+        html = await self._request_admin_text(
+            "GET", _WEBIO_HOME_PATH, what=f"Web-IO page (TLS settings of device {device_id!r})"
+        )
+        return parse_webio_device_tls(device_id, html)
+
+    async def update_webio_device_address(
+        self, device_id: str | int, address: str, device_name: str, *, keep_tls: bool = False
+    ) -> None:
         """Point an existing Web-IO device at a new address ("host:port").
 
         Comexio's save handler takes the whole device form, so device_name must be the device's
-        current name (it is saved along), and the device's Basic Auth credentials, TLS checks and
-        login mode are reset to none — only use it on a device without credentials. Raises
-        ComexioRequestRejectedError if Comexio does not confirm the save.
+        current name (it is saved along), and the device's Basic Auth credentials and login mode
+        are reset to none — only use it on a device without credentials.
+
+        The TLS settings are reset too (certificate check Inaktiv, no key pin) unless keep_tls is True:
+        then the device's current ones are read first (get_webio_device_tls) and saved unchanged, so an
+        address change does not delete a pin. Where the device's form cannot be read that way, ComexioDataError
+        is raised before anything is saved — the settings are never cleared silently. The read and the save are
+        two requests: a change made to the device in between is overwritten.
+
+        Raises ComexioRequestRejectedError if Comexio does not confirm the save.
         """
+        check_certificate, pinned_public_key = False, ""
+        if keep_tls:
+            tls = await self.get_webio_device_tls(device_id)
+            check_certificate, pinned_public_key = tls.check_certificate, tls.pinned_public_key
         device_data = {
             "web_device_id": str(device_id),
             f"name_{device_id}": device_name,
             f"ip_{device_id}": address,
             f"username_{device_id}": "",
             f"password_{device_id}": "",  # nosec B105
-            f"checkca_{device_id}": "0",
-            f"pinnedpubkey_{device_id}": "",
+            f"{_WEBIO_CHECKCA_PREFIX}{device_id}": _WEBIO_CHECKCA_ON if check_certificate else _WEBIO_CHECKCA_OFF,
+            f"{_WEBIO_PINNED_PUBKEY_PREFIX}{device_id}": pinned_public_key,
             f"form_login_{device_id}": "2",
         }
         what = f"Updating the address of Web-IO device {device_id}"
@@ -3889,7 +3937,7 @@ class _Option(NamedTuple):
 
 
 class _ProtocolSelectParser(_FormParser):
-    """The <option>s of a page's first <select id="protocol">, read as a browser does.
+    """The <option>s of a page's first <select> of the id select_id (default "protocol"), read as a browser does.
 
     Attribute values come unquoted with entities resolved, the first of a name wins and a bare one is "";
     a ">" inside a quoted value does not end its tag. options counts the options and selections the selected ones;
@@ -3900,8 +3948,9 @@ class _ProtocolSelectParser(_FormParser):
     so it selects no option by default.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, select_id: str = _WEBIO_PROTOCOL_SELECT_ID) -> None:
         super().__init__()
+        self._select_id = select_id
         self.found = False
         self.closed = False
         self.multiple = False
@@ -3910,7 +3959,7 @@ class _ProtocolSelectParser(_FormParser):
         self.selections = 0
         self.selected: _Option | None = None
         self.first_enabled: _Option | None = None
-        self._inside = False  # the open select is the protocol select
+        self._inside = False  # the open select is the one asked for (select_id)
         self._text: StringIO | None = None  # the text of the open option, if it is kept
         self._group: bool | None = None  # whether the open <optgroup> is disabled; None: no optgroup is open
 
@@ -3921,14 +3970,14 @@ class _ProtocolSelectParser(_FormParser):
             self._start_option_ending_tag(tag, attributes)
 
     def _start_select(self, attributes: dict[str, str]) -> None:
-        self._inside = not self.found and attributes.get("id") == _WEBIO_PROTOCOL_SELECT_ID
+        self._inside = not self.found and attributes.get("id") == self._select_id
         if self._inside:
             self.found = True
             self.multiple = "multiple" in attributes
             self.listbox = _shows_several_rows(attributes.get("size", ""))
 
     def _start_option_ending_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        if tag != "option":  # an <optgroup> outside the protocol select does not group its options
+        if tag != "option":  # an <optgroup> outside the asked-for select does not group its options
             self._group = "disabled" in attributes if tag == "optgroup" and self._inside else None
         self._text = None
         if tag == "option" and self._inside:
@@ -4030,6 +4079,56 @@ def _command_protocol(html: str, command_id: str | int) -> int | None:
         _LOGGER.warning("Web-IO command %r has an unknown protocol value: %s", command_id, _excerpt(value))
         return None
     return int(match.group(1))
+
+
+class _WebioTlsParser(_ProtocolSelectParser):
+    """The certificate check <select> and the key pin <input> of one device form on the Web-IO page.
+
+    The select is read as _ProtocolSelectParser reads one (id checkca_<id>). pin_seen says the page has an
+    <input id="pinnedpubkey_<id>"> a browser makes an element of — the first one counts — and pin is its value
+    attribute, None if that input has none (an input without one shows "", but a page that fills its pin another
+    way would then read as "no pin"). Ids are compared exactly, so device 3 never matches the fields of device 34.
+    """
+
+    def __init__(self, device_id: str | int) -> None:
+        super().__init__(f"{_WEBIO_CHECKCA_PREFIX}{device_id}")
+        self._pin_id = f"{_WEBIO_PINNED_PUBKEY_PREFIX}{device_id}"
+        self.pin_seen = False
+        self.pin: str | None = None
+
+    def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
+        if tag == "input" and not self.pin_seen and not self._start_ignored and attributes.get("id") == self._pin_id:
+            self.pin_seen = True
+            self.pin = attributes.get("value")
+        super().handle_form_tag(tag, attributes)
+
+
+def parse_webio_device_tls(device_id: str | int, html: str) -> WebioTlsSettings:
+    """The WebioTlsSettings of device device_id on the Web-IO page html (see ComexioClient.get_webio_device_tls).
+
+    Strict, because a caller saves the result back: ComexioDataError unless the page has a device form whose key pin
+    input carries a value attribute (value="" is "no pin") and whose certificate check is a single drop-down that
+    closes, with exactly one option marked selected whose value is "1" (Aktiv) or "0" (Inaktiv). An option a
+    browser would only show by default (none marked selected), several selected ones and a pin that is not in the
+    value attribute are errors, never a guess that could clear a pin.
+    """
+    parser = _WebioTlsParser(device_id)
+    parser.feed(html)
+    parser.close()
+    what = f"Web-IO device {device_id!r}"
+    if not (parser.found and parser.pin_seen):
+        raise ComexioDataError(f"{what}: the Web-IO page has no certificate check and key pin fields for it")
+    if parser.pin is None:
+        raise ComexioDataError(f"{what}: the key pin input has no value attribute")
+    chosen = parser.selected
+    if not parser.closed or parser.multiple or parser.selections != 1 or chosen is None:
+        raise ComexioDataError(
+            f"{what}: the certificate check select is not a single drop-down with one selected option"
+        )
+    value = _option_value(chosen.attributes, chosen.text)
+    if value not in (_WEBIO_CHECKCA_ON, _WEBIO_CHECKCA_OFF):
+        raise ComexioDataError(f"{what}: unknown certificate check value {_excerpt(value)}")
+    return WebioTlsSettings(check_certificate=value == _WEBIO_CHECKCA_ON, pinned_public_key=parser.pin)
 
 
 def _collect_io_values(result: dict[str, Any], io_ids: Iterable[str]) -> tuple[dict[str, str], list[str]]:
