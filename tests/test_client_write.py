@@ -947,6 +947,11 @@ _NO_VALUE = "the key pin input has no value attribute"
             id="multiple-select",
         ),
         pytest.param(
+            _webio_home_page(_tls_select(_ON_SELECTED, attrs=' size="3"'), _PIN_INPUT),
+            _NO_SELECTED,
+            id="list-box-with-one-selected-option",
+        ),
+        pytest.param(
             # The answer ends inside the select: its options are not complete, so nothing is chosen from it.
             f'<html><body>{_PIN_INPUT}<select id="checkca_34"><option value="1" selected>Aktiv',
             _NO_SELECTED,

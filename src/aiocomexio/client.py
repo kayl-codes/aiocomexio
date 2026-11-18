@@ -4108,9 +4108,10 @@ def parse_webio_device_tls(device_id: str | int, html: str) -> WebioTlsSettings:
 
     Strict, because a caller saves the result back: ComexioDataError unless the page has a device form whose key pin
     input carries a value attribute (value="" is "no pin") and whose certificate check is a single drop-down that
-    closes, with exactly one option marked selected whose value is "1" (Aktiv) or "0" (Inaktiv). An option a
-    browser would only show by default (none marked selected), several selected ones and a pin that is not in the
-    value attribute are errors, never a guess that could clear a pin.
+    closes (no `multiple`, no list box with a `size` above 1), with exactly one option marked selected whose value
+    is "1" (Aktiv) or "0" (Inaktiv). An option a browser would only show by default (none marked selected),
+    several selected ones and a pin that is not in the value attribute are errors, never a guess that could clear a
+    pin.
     """
     parser = _WebioTlsParser(device_id)
     parser.feed(html)
@@ -4121,7 +4122,7 @@ def parse_webio_device_tls(device_id: str | int, html: str) -> WebioTlsSettings:
     if parser.pin is None:
         raise ComexioDataError(f"{what}: the key pin input has no value attribute")
     chosen = parser.selected
-    if not parser.closed or parser.multiple or parser.selections != 1 or chosen is None:
+    if not parser.closed or parser.multiple or parser.listbox or parser.selections != 1 or chosen is None:
         raise ComexioDataError(
             f"{what}: the certificate check select is not a single drop-down with one selected option"
         )
