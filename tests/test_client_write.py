@@ -914,9 +914,9 @@ _ON_SELECTED = '<option value="1" selected>Aktiv</option><option value="0">Inakt
 _NONE_SELECTED = '<option value="1">Aktiv</option><option value="0">Inaktiv</option>'
 _BOTH_SELECTED = '<option value="1" selected>Aktiv</option><option value="0" selected>Inaktiv</option>'
 _PIN_INPUT = '<input id="pinnedpubkey_34" value="">'
+_PIN_INPUT_NO_VALUE = '<input type="text" id="pinnedpubkey_34" title="Hash">'  # as Comexio renders no pin
 _NO_FIELDS = "the Web-IO page has no certificate check and key pin fields for it"
 _NO_SELECTED = "the certificate check select is not a single drop-down with one selected option"
-_NO_VALUE = "the key pin input has no value attribute"
 
 
 @pytest.mark.parametrize(
@@ -929,11 +929,6 @@ _NO_VALUE = "the key pin input has no value attribute"
             _webio_home_page(f"<template>{_tls_select('')}{_PIN_INPUT}</template>"),
             _NO_FIELDS,
             id="fields-only-inside-a-template",
-        ),
-        pytest.param(
-            _webio_home_page(_tls_select(_ON_SELECTED), '<input id="pinnedpubkey_34">'),
-            _NO_VALUE,
-            id="pin-input-without-value-attribute",
         ),
         pytest.param(
             _webio_home_page(_tls_select(_NONE_SELECTED), _PIN_INPUT), _NO_SELECTED, id="no-option-marked-selected"
@@ -984,6 +979,29 @@ async def test_get_webio_device_tls_option_without_value_attribute_uses_its_text
     comexio.serve_text("GET", WEBIO_HOME_PATH, _webio_home_page(_tls_select("<option selected>0</option>"), _PIN_INPUT))
 
     assert await logged_in.get_webio_device_tls(34) == WebioTlsSettings(check_certificate=False, pinned_public_key="")
+
+
+async def test_get_webio_device_tls_pin_input_without_value_attribute_is_no_pin(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # Comexio leaves the value attribute out while no pin is stored (no script fills the field); a browser submits ""
+    # for it, so it reads as "no pin" and keep_tls can save the device (a device the library created has no value).
+    page = _webio_home_page(_tls_select(_ON_SELECTED), _PIN_INPUT_NO_VALUE)
+    comexio.serve_text("GET", WEBIO_HOME_PATH, page)
+
+    assert await logged_in.get_webio_device_tls(34) == WebioTlsSettings(check_certificate=True, pinned_public_key="")
+
+
+async def test_get_webio_device_tls_first_pin_input_without_value_wins(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # The first input of the id counts even without a value attribute: a later duplicate with a value must not win.
+    page = _webio_home_page(
+        _tls_select(_ON_SELECTED), _PIN_INPUT_NO_VALUE, f'<input id="pinnedpubkey_34" value="{_PIN}">'
+    )
+    comexio.serve_text("GET", WEBIO_HOME_PATH, page)
+
+    assert await logged_in.get_webio_device_tls(34) == WebioTlsSettings(check_certificate=True, pinned_public_key="")
 
 
 async def test_get_webio_device_tls_decodes_the_pin_as_a_browser_does(
@@ -1067,6 +1085,21 @@ async def test_update_webio_device_address_keep_tls_keeps_check_and_pin(
     ]
 
 
+async def test_update_webio_device_address_keep_tls_device_without_a_stored_pin(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # A device the library created: certificate check Aktiv (Comexio's default), pin input without a value attribute.
+    page = _webio_home_page(_tls_select(_ON_SELECTED), _PIN_INPUT_NO_VALUE)
+    comexio.serve_text("GET", WEBIO_HOME_PATH, page)
+    comexio.serve_json("POST", WEBIO_SAVE_DEVICE_PATH, {"save": 1})
+
+    await logged_in.update_webio_device_address(34, "192.168.0.11:8123", "HA [M]", keep_tls=True)
+
+    (request,) = comexio.received_at("POST", WEBIO_SAVE_DEVICE_PATH)
+    saved = json.loads(request.form["JSON"])
+    assert (saved["checkca_34"], saved["pinnedpubkey_34"]) == ("1", "")
+
+
 async def test_update_webio_device_address_default_still_resets_the_tls_settings(
     logged_in: ComexioClient, comexio: FakeComexio
 ) -> None:
@@ -1087,11 +1120,6 @@ async def test_update_webio_device_address_default_still_resets_the_tls_settings
     [
         pytest.param(
             _webio_home_page(_webio_device_form(9, check_on=True, pin=_PIN)), ComexioDataError, id="device-not-on-page"
-        ),
-        pytest.param(
-            _webio_home_page(_tls_select(_ON_SELECTED), '<input id="pinnedpubkey_34">'),
-            ComexioDataError,
-            id="pin-without-value-attribute",
         ),
         pytest.param(
             _webio_home_page(_tls_select(_NONE_SELECTED), _PIN_INPUT), ComexioDataError, id="no-option-marked-selected"

@@ -1506,9 +1506,9 @@ class ComexioClient:
 
         One request for the whole page /admin/web_io/home, which holds the form of every device; the fields
         are found by their id suffix (checkca_<id>, pinnedpubkey_<id>), so device 3 never reads device 34's.
-        Raises ComexioDataError if the page has no such device, its form lacks a field, the key pin input has no
-        value attribute, or the certificate check is not exactly one option marked selected whose value is Aktiv
-        ("1") or Inaktiv ("0") — never a guess, because a caller writes the values back; see parse_webio_device_tls.
+        Raises ComexioDataError if the page has no such device, its form lacks a field, or the certificate check is
+        not exactly one option marked selected whose value is Aktiv ("1") or Inaktiv ("0") — never a guess, because a
+        caller writes the values back; a pin input without a value attribute is "no pin" (see parse_webio_device_tls).
         The device's Basic Auth credentials are not read (Comexio does not put the password into the form).
         """
         html = await self._request_admin_text(
@@ -4084,43 +4084,40 @@ def _command_protocol(html: str, command_id: str | int) -> int | None:
 class _WebioTlsParser(_ProtocolSelectParser):
     """The certificate check <select> and the key pin <input> of one device form on the Web-IO page.
 
-    The select is read as _ProtocolSelectParser reads one (id checkca_<id>). pin_seen says the page has an
-    <input id="pinnedpubkey_<id>"> a browser makes an element of — the first one counts — and pin is its value
-    attribute, None if that input has none (an input without one shows "", but a page that fills its pin another
-    way would then read as "no pin"). Ids are compared exactly, so device 3 never matches the fields of device 34.
+    The select is read as _ProtocolSelectParser reads one (id checkca_<id>). pin is the value of the first
+    <input id="pinnedpubkey_<id>"> a browser makes an element of, None while the page has none. An input without a
+    value attribute reads "": Comexio leaves the attribute out while no pin is stored (seen on a real IO-Server, no
+    script fills the field), which is also what a browser submits for it. Ids are compared exactly, so device 3
+    never matches the fields of device 34.
     """
 
     def __init__(self, device_id: str | int) -> None:
         super().__init__(f"{_WEBIO_CHECKCA_PREFIX}{device_id}")
         self._pin_id = f"{_WEBIO_PINNED_PUBKEY_PREFIX}{device_id}"
-        self.pin_seen = False
         self.pin: str | None = None
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
-        if tag == "input" and not self.pin_seen and not self._start_ignored and attributes.get("id") == self._pin_id:
-            self.pin_seen = True
-            self.pin = attributes.get("value")
+        if tag == "input" and self.pin is None and not self._start_ignored and attributes.get("id") == self._pin_id:
+            self.pin = attributes.get("value", "")
         super().handle_form_tag(tag, attributes)
 
 
 def parse_webio_device_tls(device_id: str | int, html: str) -> WebioTlsSettings:
     """The WebioTlsSettings of device device_id on the Web-IO page html (see ComexioClient.get_webio_device_tls).
 
-    Strict, because a caller saves the result back: ComexioDataError unless the page has a device form whose key pin
-    input carries a value attribute (value="" is "no pin") and whose certificate check is a single drop-down that
-    closes (no `multiple`, no list box with a `size` above 1), with exactly one option marked selected whose value
-    is "1" (Aktiv) or "0" (Inaktiv). An option a browser would only show by default (none marked selected),
-    several selected ones and a pin that is not in the value attribute are errors, never a guess that could clear a
-    pin.
+    Strict about the certificate check, because a caller saves the result back: ComexioDataError unless the page has
+    a device form with a key pin input and a certificate check that is a single drop-down that closes (no
+    `multiple`, no list box with a `size` above 1), with exactly one option marked selected whose value is "1"
+    (Aktiv) or "0" (Inaktiv). An option a browser would only show by default (none marked selected) and several
+    selected ones are errors, never a guess that could flip the check. A pin input without a value attribute is "no
+    pin" (see _WebioTlsParser).
     """
     parser = _WebioTlsParser(device_id)
     parser.feed(html)
     parser.close()
     what = f"Web-IO device {device_id!r}"
-    if not (parser.found and parser.pin_seen):
+    if parser.pin is None or not parser.found:
         raise ComexioDataError(f"{what}: the Web-IO page has no certificate check and key pin fields for it")
-    if parser.pin is None:
-        raise ComexioDataError(f"{what}: the key pin input has no value attribute")
     chosen = parser.selected
     if not parser.closed or parser.multiple or parser.listbox or parser.selections != 1 or chosen is None:
         raise ComexioDataError(
