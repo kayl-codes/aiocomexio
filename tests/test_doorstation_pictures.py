@@ -25,6 +25,7 @@ from aiocomexio import (
     doorstation_picture_file_path,
 )
 from aiocomexio import client as client_module
+from aiocomexio import doorstation_pictures as pictures_module
 from aiocomexio.doorstation_pictures import (
     doorstation_picture_path,
     is_plain_picture_name,
@@ -255,6 +256,41 @@ def test_an_integer_too_long_to_read_raises_a_data_error(int_max_str_digits: Non
 
     assert str(info.value) == "Doorstation picture list holds a number too long to read"
     assert info.value.__cause__ is None
+
+
+def test_an_answer_longer_than_the_cap_is_refused_before_it_is_parsed() -> None:
+    cap = pictures_module._MAX_LIST_CHARS
+    names = ",".join(f'"{index}.jpg"' for index in range(cap // 9))  # more than the cap, a valid list
+    text = f"[{names}]"
+    assert len(text) > cap
+
+    with pytest.raises(ComexioDataError) as info:
+        parse_picture_list(text)
+
+    assert str(info.value) == f"Doorstation picture list is {len(text)} characters long, more than {cap}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # not JSON at all: the length is refused first
+        pytest.param("x" * (pictures_module._MAX_LIST_CHARS + 1), id="not-json"),
+        # one character over, mostly blanks a strip would drop (ids stay short: pytest puts them in an env variable)
+        pytest.param("[]" + " " * (pictures_module._MAX_LIST_CHARS - 1), id="one-over-blanks"),
+    ],
+)
+def test_the_cap_is_checked_on_the_raw_text_before_anything_else(text: str) -> None:
+    with pytest.raises(ComexioDataError, match="characters long, more than"):
+        parse_picture_list(text)
+
+
+def test_an_answer_of_exactly_the_cap_is_still_read() -> None:
+    cap = pictures_module._MAX_LIST_CHARS
+    text = f'["{BELL}"]'
+    padded = text + " " * (cap - len(text))
+    assert len(padded) == cap
+
+    assert [picture.name for picture in parse_picture_list(padded)] == [BELL]
 
 
 def _list_handler(answer: str, *, form: list[dict[str, object]] | None = None) -> Handler:
@@ -540,6 +576,87 @@ async def test_read_picture_shortens_a_long_content_type_in_its_message() -> Non
 
     assert "..." in str(info.value)
     assert len(str(info.value)) < 400
+
+
+def _buffers_in_traceback(err: BaseException | None) -> list[bytearray]:
+    """Every bytearray held by a local of a frame the exception, its cause or its context passed through."""
+    found: list[bytearray] = []
+    seen: set[int] = set()
+    while err is not None and id(err) not in seen:
+        seen.add(id(err))
+        frame = err.__traceback__
+        while frame is not None:
+            found += [value for value in frame.tb_frame.f_locals.values() if isinstance(value, bytearray)]
+            frame = frame.tb_next
+        found += _buffers_in_traceback(err.__cause__) + _buffers_in_traceback(err.__context__)
+        err = None
+    return found
+
+
+class _PieceContent:
+    """A response body of one piece (or, with `then`, one piece and then an exception), handed over by size."""
+
+    def __init__(self, body: bytes, then: BaseException | None = None) -> None:
+        self.rest = body
+        self.then = then
+
+    async def read(self, size: int) -> bytes:
+        if not self.rest and self.then is not None:
+            raise self.then
+        piece, self.rest = self.rest[:size], self.rest[size:]
+        return piece
+
+
+def _picture_response(content: _PieceContent) -> Any:
+    return cast("Any", SimpleNamespace(headers=CIMultiDict[str](), content=content, content_type="image/jpeg"))
+
+
+@pytest.mark.parametrize(
+    ("body", "cap", "error", "message"),
+    [
+        (JPEG, 10, ComexioDataError, "larger than 10 bytes"),  # the cap passed
+        (JPEG[:-1], 4_000_000, ComexioDataError, "no complete JPEG"),  # a cut picture
+        (b"<html>no picture</html>", 4_000_000, ComexioDataError, "no complete JPEG"),
+        (LOGIN_PAGE.encode(), 4_000_000, ComexioAuthenticationError, "login form"),  # not only the data error
+    ],
+)
+async def test_a_failed_picture_read_leaves_no_picture_bytes_in_its_traceback(
+    monkeypatch: pytest.MonkeyPatch, body: bytes, cap: int, error: type[Exception], message: str
+) -> None:
+    monkeypatch.setattr(client_module, "_MAX_PICTURE_BYTES", cap)
+
+    with pytest.raises(error, match=message) as info:
+        await client_module._read_picture(_picture_response(_PieceContent(body)), "picture")
+
+    held = _buffers_in_traceback(info.value)
+    assert held  # the frames do hold the buffer (else this proves nothing) ...
+    assert not any(held)  # ... and it is empty by now
+
+
+async def test_a_picture_the_parser_refuses_leaves_no_bytes_in_the_chained_frames() -> None:
+    body = SOI + b"\x00\x00\x00\x00"  # a JPEG start, then no marker where the structure needs one
+
+    with pytest.raises(ComexioDataError) as info:
+        await client_module._read_picture(_picture_response(_PieceContent(body)), "picture")
+
+    assert info.value.__cause__ is not None  # the parser's own error, chained
+    held = _buffers_in_traceback(info.value.__cause__)
+    assert held
+    assert not any(held)
+
+
+@pytest.mark.parametrize("failure", [asyncio.CancelledError(), aiohttp.ClientPayloadError("cut")])
+async def test_a_read_that_breaks_off_half_way_leaves_no_picture_bytes_in_its_traceback(
+    failure: BaseException,
+) -> None:
+    content = _PieceContent(JPEG[:5], then=failure)
+
+    with pytest.raises(type(failure)) as info:
+        await client_module._read_picture(_picture_response(content), "picture")
+
+    held = _buffers_in_traceback(info.value)
+    assert held
+    assert not any(held)
 
 
 async def test_get_doorstation_picture_of_exactly_the_cap_is_returned(

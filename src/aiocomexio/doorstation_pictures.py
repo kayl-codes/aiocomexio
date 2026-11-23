@@ -34,12 +34,16 @@ _PLAIN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.jpg", re.ASCII)
 # The name the Doorstation gives a picture: year (two digits), month, day, hour, minute, second, the kind.
 _PICTURE_NAME = re.compile(r"(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)_([A-Za-z0-9._-]+)\.jpg", re.ASCII)
 _YEAR_BASE = 2000
-# What the kind token of a name says; a name that holds "shot" anywhere is a screenshot, as Comexio's page reads it.
-_BELL_TOKEN = "bell"
-_MOTION_TOKEN = "pir"
-_SCREENSHOT_TOKEN = "shot"
+# What the kind word of a name says; a name that holds "shot" anywhere is a screenshot, as Comexio's page reads it.
+_BELL_WORD = "bell"
+_MOTION_WORD = "pir"
+_SCREENSHOT_WORD = "shot"
 # The empty answers: no picture saved yet.
 _EMPTY_ANSWERS = frozenset({"", "null"})
+# The longest answer parse_picture_list reads. A real list is about 30 characters per picture, so this holds some
+# 35,000; the client reads an answer up to 16 MiB, which json would turn into millions of strings, a set and a
+# DoorstationPicture each, many times the size of the text.
+_MAX_LIST_CHARS = 1024 * 1024
 
 
 class DoorstationPictureKind(StrEnum):
@@ -95,24 +99,24 @@ def picture_of(name: str) -> DoorstationPicture:
     match = _PICTURE_NAME.fullmatch(name)
     if match is None:
         return DoorstationPicture(name=name, kind=_kind_of(name, None), taken_at=None)
-    *moment, token = match.groups()
+    *moment, word = match.groups()
     year, month, day, hour, minute, second = (int(part) for part in moment)  # two ASCII digits each: no failure
     try:
         taken_at: datetime | None = datetime(_YEAR_BASE + year, month, day, hour, minute, second)
     except ValueError:  # a month 13, a day 31 of April: the name keeps its kind, the moment is not known
         taken_at = None
-    return DoorstationPicture(name=name, kind=_kind_of(name, token), taken_at=taken_at)
+    return DoorstationPicture(name=name, kind=_kind_of(name, word), taken_at=taken_at)
 
 
-def _kind_of(name: str, token: str | None) -> DoorstationPictureKind:
+def _kind_of(name: str, word: str | None) -> DoorstationPictureKind:
     """The kind a name stands for: a name that holds `shot` anywhere is a screenshot (as the page of Comexio reads
-    it), otherwise the kind token of the pattern says bell or motion; token is None for a name off the pattern."""
-    if _SCREENSHOT_TOKEN in name.lower():
+    it), otherwise the kind word of the pattern says bell or motion; word is None for a name off the pattern."""
+    if _SCREENSHOT_WORD in name.lower():
         return DoorstationPictureKind.SCREENSHOT
-    lowered = (token or "").lower()
-    if lowered == _MOTION_TOKEN:
+    lowered = (word or "").lower()
+    if lowered == _MOTION_WORD:
         return DoorstationPictureKind.MOTION
-    if lowered == _BELL_TOKEN:
+    if lowered == _BELL_WORD:
         return DoorstationPictureKind.BELL
     return DoorstationPictureKind.OTHER
 
@@ -124,10 +128,13 @@ def parse_picture_list(text: str) -> tuple[DoorstationPicture, ...]:
     changed format) raises ComexioDataError, naming what is wrong but not quoting the answer. Entries that are not a
     plain file name (see the module text) are dropped and counted in one warning; if the list is not empty and none
     of its entries is usable, the format has changed and that raises ComexioDataError instead of reporting no
-    picture. A name listed twice counts once. The order is by the moment in the name, the newest first; names with
-    no moment come last, in name order, which is not a chronological order: a caller that wants the latest picture
-    of a kind takes the first one of that kind that has a taken_at.
+    picture. An answer longer than _MAX_LIST_CHARS raises ComexioDataError before it is parsed. A name listed twice
+    counts once. The order is by the moment in the name, the newest first; names with no moment come last, in name
+    order, which is not a chronological order: a caller that wants the latest picture of a kind takes the first one
+    of that kind that has a taken_at.
     """
+    if len(text) > _MAX_LIST_CHARS:  # checked before anything is parsed or copied
+        raise ComexioDataError(f"Doorstation picture list is {len(text)} characters long, more than {_MAX_LIST_CHARS}")
     stripped = text.strip()
     if stripped in _EMPTY_ANSWERS:
         return ()

@@ -3926,8 +3926,20 @@ async def _read_picture(resp: aiohttp.ClientResponse, what: str) -> bytes:
     if encoding := _content_encoding(resp):
         raise ComexioDataError(f"{what}: the answer came {_excerpt(encoding)}-encoded, not unencoded")
     body = bytearray()
-    while (left := _MAX_PICTURE_BYTES + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
-        body += chunk
+    try:
+        while (left := _MAX_PICTURE_BYTES + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
+            body += chunk
+        return _picture_from(body, resp, what)
+    finally:
+        # The buffer is a local of this frame and of the parser's, so an exception that outlives the call (stored by
+        # a caller, its traceback and chained cause) would keep up to _MAX_PICTURE_BYTES of picture alive; the frame
+        # is a copy.
+        # Only the buffer: the last chunk read (one network read) stays in the frame.
+        body.clear()
+
+
+def _picture_from(body: bytearray, resp: aiohttp.ClientResponse, what: str) -> bytes:
+    """The one JPEG in a picture answer's body, or the error that says why it is none; see _read_picture."""
     if len(body) > _MAX_PICTURE_BYTES:
         raise ComexioDataError(f"{what}: the picture is larger than {_MAX_PICTURE_BYTES} bytes")
     # A file is a JPEG from its first byte, unlike a stream that may carry a boundary before its frame. Only such a
