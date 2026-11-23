@@ -61,7 +61,13 @@ _SOS_COMPONENTS_OFFSET = 3
 # of 0 would need a DNL marker, which a still from a camera never has, so it counts as malformed.
 _SOF_FIXED_LENGTH = 8
 _SOF_BYTES_PER_COMPONENT = 3
-_MAX_SAMPLE_PRECISION = 16
+# Sample precision by process (T.81, Table B.2): baseline DCT (SOF0) 8 bits; the other DCT processes (extended,
+# progressive, differential, arithmetic-coded) 8 or 12; the lossless ones (SOF3, 7, 11, 15) 2 to 16.
+_BASELINE_CODE = 0xC0
+_LOSSLESS_CODES = frozenset({0xC3, 0xC7, 0xCB, 0xCF})
+_BASELINE_PRECISION = 8
+_DCT_PRECISIONS = frozenset({8, 12})
+_LOSSLESS_PRECISIONS = range(2, 17)
 _MAX_SAMPLING_FACTOR = 4
 _MAX_QUANTIZATION_TABLE = 3
 # Offsets from the SOF code: precision, height, width, Nf and the first component.
@@ -209,11 +215,21 @@ class JpegFrameReader:
     the reader is done. With require_frame_header a scan that comes before a start-of-frame marker raises.
     """
 
-    __slots__ = ("_framed", "_pos", "_require_frame_header", "_scan_from", "_scan_pos", "_scanned", "_start")
+    __slots__ = (
+        "_frame_ids",
+        "_framed",
+        "_pos",
+        "_require_frame_header",
+        "_scan_from",
+        "_scan_pos",
+        "_scanned",
+        "_start",
+    )
 
     def __init__(self, *, require_frame_header: bool = False) -> None:
         self._require_frame_header = require_frame_header
         self._framed = False  # a start-of-frame marker has been passed
+        self._frame_ids: frozenset[int] | None = None  # component ids of the checked frame header (frame headers only)
         self._start = -1  # offset of the SOI, -1 until it arrived
         self._pos = 0  # where the walk goes on: the search for the SOI, then the next marker
         self._scan_from: int | None = None  # inside a scan: where its entropy-coded data starts
@@ -276,15 +292,22 @@ class JpegFrameReader:
         if self._require_frame_header and code in _SOF_CODES:
             if end > len(data):
                 return False  # the frame header has not arrived whole yet: the next call checks it
-            _check_sof_header(data, code_at, end)
+            self._frame_ids = _check_sof_header(data, code_at, end)
         self._framed = self._framed or code in _SOF_CODES
-        if code == _SOS_CODE:
-            if code_at + _SOS_COMPONENTS_OFFSET >= len(data):
-                return False  # the component count has not arrived yet
-            _check_sos_header(data, code_at, end)
-            self._scanned = True
-            self._scan_from = self._scan_pos = end
+        if code == _SOS_CODE and not self._entered_scan(data, code_at, end):
+            return False
         self._pos = end
+        return True
+
+    def _entered_scan(self, data: bytes | bytearray, code_at: int, end: int) -> bool:
+        """Whether the SOS header ending at end has arrived far enough to be checked; the scan then begins at end."""
+        if code_at + _SOS_COMPONENTS_OFFSET >= len(data):
+            return False  # the component count has not arrived yet
+        if self._frame_ids is not None and end > len(data):
+            return False  # the scan's component selectors have not arrived whole yet: the next call checks them
+        _check_sos_header(data, code_at, end, self._frame_ids)
+        self._scanned = True
+        self._scan_from = self._scan_pos = end
         return True
 
 
@@ -298,8 +321,12 @@ def _segment_end(data: bytes | bytearray, pos: int) -> int | None:
     return pos + length
 
 
-def _check_sos_header(data: bytes | bytearray, code_at: int, end: int) -> None:
-    """Raise ComexioDataError unless the SOS segment from code_at to end has 1 to 4 components and their length."""
+def _check_sos_header(data: bytes | bytearray, code_at: int, end: int, frame_ids: frozenset[int] | None) -> None:
+    """Raise ComexioDataError unless the SOS segment from code_at to end fits its 1 to 4 components.
+
+    With the component ids of the frame header (frame_ids) each scan component must name a different one of them
+    (T.81, B.2.3: each selector matches a component of the frame header).
+    """
     components = data[code_at + _SOS_COMPONENTS_OFFSET]
     length = end - code_at - 1  # the length field, which counts itself but not the code
     if (
@@ -307,13 +334,36 @@ def _check_sos_header(data: bytes | bytearray, code_at: int, end: int) -> None:
         or length != _SOS_FIXED_LENGTH + _SOS_BYTES_PER_COMPONENT * components
     ):
         raise ComexioDataError(f"Camera frame has a malformed SOS header (length {length}) at offset {code_at}")
+    if frame_ids is None:
+        return
+    first = code_at + _SOS_COMPONENTS_OFFSET + 1
+    selectors = [data[first + at] for at in range(0, _SOS_BYTES_PER_COMPONENT * components, _SOS_BYTES_PER_COMPONENT)]
+    if len(set(selectors)) != len(selectors) or not frame_ids.issuperset(selectors):
+        raise ComexioDataError(f"Camera frame has a scan whose components do not fit its frame at offset {code_at}")
 
 
-def _check_sof_header(data: bytes | bytearray, code_at: int, end: int) -> None:
-    """Raise ComexioDataError unless the SOF segment from code_at to end is a frame header a decoder can read."""
+def _check_sof_header(data: bytes | bytearray, code_at: int, end: int) -> frozenset[int]:
+    """The component ids of the SOF segment from code_at to end; raises ComexioDataError unless it is readable."""
     length = end - code_at - 1  # the length field, which counts itself but not the code
     if length < _SOF_FIXED_LENGTH or not _frame_header_is_sound(data, code_at, length):
         raise ComexioDataError(f"Camera frame has a malformed frame header (length {length}) at offset {code_at}")
+    return frozenset(_sof_component_ids(data, code_at))
+
+
+def _sof_component_ids(data: bytes | bytearray, code_at: int) -> list[int]:
+    """The component ids, in order, of the SOF header at code_at whose length was checked."""
+    components = data[code_at + _SOF_COMPONENTS_OFFSET]
+    first = code_at + _SOF_FIRST_COMPONENT_OFFSET
+    return [data[first + at] for at in range(0, _SOF_BYTES_PER_COMPONENT * components, _SOF_BYTES_PER_COMPONENT)]
+
+
+def _precision_is_sound(code: int, precision: int) -> bool:
+    """Whether the sample precision is one the process of the SOF marker allows (T.81, Table B.2)."""
+    if code == _BASELINE_CODE:
+        return precision == _BASELINE_PRECISION
+    if code in _LOSSLESS_CODES:
+        return precision in _LOSSLESS_PRECISIONS
+    return precision in _DCT_PRECISIONS
 
 
 def _frame_header_is_sound(data: bytes | bytearray, code_at: int, length: int) -> bool:
@@ -326,7 +376,10 @@ def _frame_header_is_sound(data: bytes | bytearray, code_at: int, length: int) -
     precision = data[code_at + _SOF_PRECISION_OFFSET]
     height = int.from_bytes(data[code_at + _SOF_HEIGHT_OFFSET : code_at + _SOF_HEIGHT_OFFSET + 2])
     width = int.from_bytes(data[code_at + _SOF_WIDTH_OFFSET : code_at + _SOF_WIDTH_OFFSET + 2])
-    if not (1 <= precision <= _MAX_SAMPLE_PRECISION and height >= 1 and width >= 1):
+    if not (_precision_is_sound(data[code_at], precision) and height >= 1 and width >= 1):
+        return False
+    ids = _sof_component_ids(data, code_at)
+    if len(set(ids)) != len(ids):  # each component has a label of its own (T.81, B.2.2)
         return False
     first = code_at + _SOF_FIRST_COMPONENT_OFFSET
     return all(

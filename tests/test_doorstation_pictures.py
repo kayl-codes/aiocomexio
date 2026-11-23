@@ -172,9 +172,39 @@ def test_the_proxy_path_needs_a_real_extension_id(ext_id: object, error: type[Ex
         doorstation_picture_path(ext_id, BELL)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("text", ["", "  ", "null", " null\n"])
+@pytest.mark.parametrize("text", ["", "  ", "null", " null\n", "\t", "\r\n", "\t \r\nnull\t", "\rnull", "null\t"])
 def test_an_empty_answer_is_no_picture(text: str) -> None:
     assert parse_picture_list(text) == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "offset"),
+    [
+        ("\xa0null\xa0", 0),
+        ("null\xa0", 4),
+        (" null", 0),
+        ("\x0bnull", 0),
+        ("\x0cnull", 0),
+        ("\xa0", 0),
+        ("null ", 4),
+    ],
+    ids=[
+        "nbsp-both-sides",
+        "nbsp-after",
+        "em-space-before",
+        "vertical-tab",
+        "form-feed",
+        "nbsp-only",
+        "line-separator",
+    ],
+)
+def test_unicode_whitespace_around_an_empty_answer_is_no_json_and_raises(text: str, offset: int) -> None:
+    # str.strip would drop these, but JSON's whitespace is the four ASCII characters only: a malformed answer is
+    # no empty list.
+    with pytest.raises(ComexioDataError) as info:
+        parse_picture_list(text)
+
+    assert str(info.value) == f"Doorstation picture list is not JSON (offset {offset})"
 
 
 def test_an_empty_array_is_no_picture() -> None:
@@ -235,8 +265,10 @@ def test_entries_that_are_no_plain_name_are_dropped_and_counted_in_one_warning(
 
 
 def test_a_list_without_one_usable_name_is_a_changed_format_not_no_picture() -> None:
+    answer = json.dumps(["../a.jpg", "b/c.jpg"])
+
     with pytest.raises(ComexioDataError) as info:
-        parse_picture_list(json.dumps(["../a.jpg", "b/c.jpg"]))
+        parse_picture_list(answer)
 
     assert str(info.value) == "None of the 2 entries of the Doorstation picture list is a file name"
 
@@ -595,10 +627,10 @@ async def test_read_picture_never_asks_for_more_than_one_byte_over_the_cap(monke
             requested.append(size)
             return b"x" * min(size, 4)  # a body that never ends, handed over in pieces of four bytes
 
-    resp = SimpleNamespace(headers=CIMultiDict[str](), content=Content(), content_type="image/jpeg")
+    resp = cast("Any", SimpleNamespace(headers=CIMultiDict[str](), content=Content(), content_type="image/jpeg"))
 
     with pytest.raises(ComexioDataError) as info:
-        await client_module._read_picture(cast("Any", resp), "picture")
+        await client_module._read_picture(resp, "picture")
 
     assert str(info.value) == "picture: the picture is larger than 10 bytes"
 
@@ -626,10 +658,10 @@ async def test_read_picture_shortens_a_long_content_type_in_its_message() -> Non
         async def read(self, size: int) -> bytes:  # noqa: ARG002
             return b""
 
-    resp = SimpleNamespace(headers=CIMultiDict[str](), content=Content(), content_type="text/" + "x" * 500)
+    resp = cast("Any", SimpleNamespace(headers=CIMultiDict[str](), content=Content(), content_type="text/" + "x" * 500))
 
     with pytest.raises(ComexioDataError) as info:
-        await client_module._read_picture(cast("Any", resp), "picture")
+        await client_module._read_picture(resp, "picture")
 
     shown = "'text/" + "x" * 194 + "..."  # the repr cut to 200 characters, then the dots
     assert str(info.value) == (
@@ -928,13 +960,18 @@ def test_a_frame_header_that_arrives_in_pieces_still_counts(cut: int) -> None:
 
 
 def _frame_header(
-    *, precision: int = 8, height: int = 1, width: int = 1, components: tuple[bytes, ...] = (b"\x01\x11\x00",)
+    *,
+    code: int = 0xC0,
+    precision: int = 8,
+    height: int = 1,
+    width: int = 1,
+    components: tuple[bytes, ...] = (b"\x01\x11\x00",),
 ) -> bytes:
-    """An SOF0 segment with the given values; the component count and the length field follow the components."""
+    """An SOF segment (SOF0 unless code says another); the component count and length follow the components."""
     payload = (
         bytes((precision,)) + height.to_bytes(2) + width.to_bytes(2) + bytes((len(components),)) + b"".join(components)
     )
-    return _segment(0xC0, payload)
+    return _segment(code, payload)
 
 
 def _picture_with(frame_header: bytes) -> bytes:
@@ -948,23 +985,17 @@ def test_the_synthetic_frame_header_is_the_one_the_tests_build() -> None:
 @pytest.mark.parametrize(
     "frame_header",
     [
-        _frame_header(precision=12),
         _frame_header(height=65535, width=65535),
         _frame_header(components=(b"\x01\x22\x00", b"\x02\x11\x01", b"\x03\x11\x01")),
         _frame_header(components=(b"\x01\x44\x03",)),
-        _frame_header(precision=1),
-        _frame_header(precision=16),
         _frame_header(height=256, width=256),
         _frame_header(components=(b"\x01\x11\x00", b"\x02\x11\x00", b"\x03\x11\x00", b"\x04\x11\x00")),
         _frame_header(components=tuple(bytes((at, 0x11, 0)) for at in range(1, 256))),
     ],
     ids=[
-        "12-bit",
         "largest-size",
         "three-components-subsampled",
         "largest-factors-and-table",
-        "precision-one",
-        "precision-sixteen",
         "size-with-a-zero-low-byte",
         "four-components",
         "most-components-the-count-byte-holds",
@@ -992,6 +1023,12 @@ _MALFORMED_FRAME_HEADERS = {
     "quantization-table-too-large": _frame_header(components=(b"\x01\x11\x04",)),
     "second-component-bad": _frame_header(components=(b"\x01\x11\x00", b"\x02\x00\x00")),
     "last-component-bad": _frame_header(components=(b"\x01\x11\x00", b"\x02\x11\x00", b"\x03\x11\x04")),
+    "component-id-repeated": _frame_header(components=(b"\x01\x11\x00", b"\x02\x11\x00", b"\x01\x11\x00")),
+    "component-id-repeated-next-to-it": _frame_header(components=(b"\x01\x11\x00", b"\x01\x11\x00", b"\x02\x11\x00")),
+    "component-id-repeated-at-the-end": _frame_header(components=(b"\x01\x11\x00", b"\x02\x11\x00", b"\x02\x11\x00")),
+    "baseline-12-bit": _frame_header(precision=12),
+    "baseline-16-bit": _frame_header(precision=16),
+    "baseline-1-bit": _frame_header(precision=1),
 }
 
 
@@ -1017,8 +1054,17 @@ def test_a_malformed_frame_header_is_refused_for_every_start_of_frame_marker(cod
     assert str(info.value) == f"Camera frame has a malformed frame header (length 11) at offset {len(SOI) + 1}"
 
 
-def test_a_stream_frame_with_a_malformed_frame_header_is_still_read() -> None:
-    picture = _picture_with(_frame_header(height=0))
+@pytest.mark.parametrize(
+    "frame_header",
+    [
+        _frame_header(height=0),
+        _frame_header(components=(b"\x01\x11\x00", b"\x01\x11\x00")),
+        _frame_header(precision=12),
+    ],
+    ids=["height-zero", "component-id-repeated", "baseline-12-bit"],
+)
+def test_a_stream_frame_with_a_malformed_frame_header_is_still_read(frame_header: bytes) -> None:
+    picture = _picture_with(frame_header)
 
     assert first_jpeg_frame(picture) == picture
 
@@ -1051,6 +1097,167 @@ async def test_get_doorstation_picture_with_a_malformed_frame_header_raises(
     )
 
 
+# T.81, Table B.2, written out marker by marker: SOF0 baseline DCT 8 bits; SOF1 extended, SOF2 progressive, SOF5 and
+# SOF6 differential, SOF9, SOF10, SOF13 and SOF14 arithmetic-coded DCT 8 or 12; SOF3, SOF7, SOF11 and SOF15 lossless
+# 2 to 16.
+_ALLOWED_PRECISIONS: dict[int, set[int]] = {
+    0xC0: {8},
+    0xC1: {8, 12},
+    0xC2: {8, 12},
+    0xC3: {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+    0xC5: {8, 12},
+    0xC6: {8, 12},
+    0xC7: {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+    0xC9: {8, 12},
+    0xCA: {8, 12},
+    0xCB: {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+    0xCD: {8, 12},
+    0xCE: {8, 12},
+    0xCF: {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+}
+_PRECISION_CASES = [(code, precision) for code in _SOF_CODES for precision in range(18)]
+
+
+@pytest.mark.parametrize(
+    ("code", "precision"), _PRECISION_CASES, ids=[f"sof-{code:02x}-{bits}-bit" for code, bits in _PRECISION_CASES]
+)
+def test_the_sample_precision_follows_the_process_of_the_marker(code: int, precision: int) -> None:
+    picture = _picture_with(_frame_header(code=code, precision=precision))
+
+    if precision in _ALLOWED_PRECISIONS[code]:
+        assert first_jpeg_frame(picture, require_frame_header=True) == picture
+    else:
+        with pytest.raises(ComexioDataError) as info:
+            first_jpeg_frame(picture, require_frame_header=True)
+        assert str(info.value) == f"Camera frame has a malformed frame header (length 11) at offset {len(SOI) + 1}"
+
+
+def test_the_precision_table_names_every_start_of_frame_marker() -> None:
+    assert sorted(_ALLOWED_PRECISIONS) == sorted(_SOF_CODES)
+
+
+# --- the scan names components of its frame: an id the frame header lacks is no picture a decoder can read ----------
+
+_THREE_COMPONENTS = _frame_header(components=(b"\x01\x11\x00", b"\x02\x11\x00", b"\x03\x11\x00"))
+
+
+def _scan_header(*selectors: int) -> bytes:
+    """An SOS segment whose scan names the given components."""
+    names = b"".join(bytes((selector, 0)) for selector in selectors)
+    return _segment(0xDA, bytes((len(selectors),)) + names + b"\x00\x3f\x00")
+
+
+def _scan_mismatch_message(frame_header: bytes) -> str:
+    offset = len(SOI) + len(frame_header) + 1  # the code byte of the SOS marker, one after its 0xFF
+    return f"Camera frame has a scan whose components do not fit its frame at offset {offset}"
+
+
+@pytest.mark.parametrize(
+    "selectors",
+    [(1,), (2,), (3,), (1, 2, 3), (2, 3), (3, 1)],
+    ids=["first", "second", "third", "all", "two-of-three", "frame-order-not-required"],
+)
+def test_a_scan_of_components_the_frame_has_is_accepted(selectors: tuple[int, ...]) -> None:
+    picture = SOI + _THREE_COMPONENTS + _scan_header(*selectors) + _SCAN + EOI
+
+    assert first_jpeg_frame(picture, require_frame_header=True) == picture
+
+
+@pytest.mark.parametrize(
+    "selectors",
+    [(4,), (0,), (1, 4), (2, 2), (1, 2, 1)],
+    ids=["id-the-frame-lacks", "id-zero", "one-of-two-lacks", "same-twice", "first-again"],
+)
+def test_a_scan_that_names_a_component_the_frame_lacks_or_names_one_twice_is_refused(
+    selectors: tuple[int, ...],
+) -> None:
+    picture = SOI + _THREE_COMPONENTS + _scan_header(*selectors) + _SCAN + EOI
+
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(picture, require_frame_header=True)
+
+    assert str(info.value) == _scan_mismatch_message(_THREE_COMPONENTS)
+
+
+def test_the_second_scan_of_a_frame_is_checked_against_its_frame_too() -> None:
+    first_scan = _scan_header(1) + _SCAN
+    picture = SOI + _THREE_COMPONENTS + first_scan + _scan_header(2, 7) + _SCAN + EOI
+
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(picture, require_frame_header=True)
+
+    assert str(info.value) == _scan_mismatch_message(_THREE_COMPONENTS + first_scan)
+
+
+def test_a_stream_frame_is_read_whatever_components_its_scan_names() -> None:
+    picture = SOI + _THREE_COMPONENTS + _scan_header(9, 9) + _SCAN + EOI
+
+    assert first_jpeg_frame(picture) == picture
+
+
+_SPLIT_SCAN_HEADER = _scan_header(2, 3)
+
+
+@pytest.mark.parametrize(
+    "cut",
+    range(1, len(_SPLIT_SCAN_HEADER)),
+    ids=[f"cut-after-{cut}-bytes" for cut in range(1, len(_SPLIT_SCAN_HEADER))],
+)
+def test_a_scan_header_that_arrives_in_pieces_is_taken_once_whole(cut: int) -> None:
+    header = _SPLIT_SCAN_HEADER
+    reader = JpegFrameReader(require_frame_header=True)
+    buffer = bytearray(SOI + _THREE_COMPONENTS + header[:cut])
+    assert reader.frame(buffer) is None  # the segment is not whole yet: not judged yet
+
+    buffer += header[cut:] + _SCAN + EOI
+
+    assert reader.frame(buffer) == bytes(buffer)
+
+
+@pytest.mark.parametrize(
+    "cut",
+    range(1, len(_SPLIT_SCAN_HEADER)),
+    ids=[f"cut-after-{cut}-bytes" for cut in range(1, len(_SPLIT_SCAN_HEADER))],
+)
+def test_a_scan_header_that_arrives_in_pieces_is_refused_once_whole(cut: int) -> None:
+    header = _scan_header(2, 9)
+    reader = JpegFrameReader(require_frame_header=True)
+    buffer = bytearray(SOI + _THREE_COMPONENTS + header[:cut])
+    assert reader.frame(buffer) is None  # the segment is not whole yet: not judged yet
+
+    buffer += header[cut:] + _SCAN + EOI
+
+    with pytest.raises(ComexioDataError) as info:
+        reader.frame(buffer)
+
+    assert str(info.value) == _scan_mismatch_message(_THREE_COMPONENTS)
+
+
+def test_a_second_frame_header_gives_the_scans_after_it_its_own_components() -> None:
+    second_frame = _frame_header(components=(b"\x05\x11\x00", b"\x06\x11\x00"))
+    picture = SOI + _THREE_COMPONENTS + _scan_header(1) + _SCAN + second_frame + _scan_header(5) + _SCAN + EOI
+
+    assert first_jpeg_frame(picture, require_frame_header=True) == picture
+
+
+def test_a_component_id_of_the_first_frame_is_no_id_of_the_second() -> None:
+    second_frame = _frame_header(components=(b"\x05\x11\x00", b"\x06\x11\x00"))
+    head = SOI + _THREE_COMPONENTS + _scan_header(1) + _SCAN + second_frame
+    picture = head + _scan_header(1) + _SCAN + EOI
+
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(picture, require_frame_header=True)
+
+    assert str(info.value) == f"Camera frame has a scan whose components do not fit its frame at offset {len(head) + 1}"
+
+
+def test_a_frame_whose_components_have_the_ids_zero_and_one_takes_a_scan_of_zero() -> None:
+    frame_header = _frame_header(components=(b"\x00\x11\x00", b"\x01\x11\x00"))
+    picture = SOI + frame_header + _scan_header(0) + _SCAN + EOI
+
+    assert first_jpeg_frame(picture, require_frame_header=True) == picture
+
+
 # --- the list is capped while it is read, not after it has been read and decoded ---------------------------------
 
 
@@ -1067,10 +1274,12 @@ class _EndlessContent:
 
 async def test_a_text_read_stops_at_the_cap_a_caller_names() -> None:
     content = _EndlessContent()
-    resp = SimpleNamespace(headers=CIMultiDict[str](), content=content, content_type="text/html", charset="utf-8")
+    resp = cast(
+        "Any", SimpleNamespace(headers=CIMultiDict[str](), content=content, content_type="text/html", charset="utf-8")
+    )
 
     with pytest.raises(ComexioDataError) as info:
-        await client_module._response_text(cast("Any", resp), "list", max_bytes=10)
+        await client_module._response_text(resp, "list", max_bytes=10)
 
     assert str(info.value) == "list: response is longer than 10 bytes"
     assert content.requested == [11, 7, 3]  # one byte over the cap and not a byte more, whatever the generic cap is

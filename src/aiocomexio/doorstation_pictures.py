@@ -41,6 +41,8 @@ _MOTION_WORD = "pir"
 _SCREENSHOT_WORD = "shot"
 # The empty answers: no picture saved yet.
 _EMPTY_ANSWERS = frozenset({"", "null"})
+# The whitespace JSON allows around a value (RFC 8259, section 2); json.loads accepts no other.
+_JSON_WHITESPACE = " \t\n\r"
 # The longest answer parse_picture_list reads (the client stops reading at as many bytes). A real list is about 30
 # characters per picture, so this holds some 35,000; the client reads an answer up to 16 MiB, which json would turn
 # into millions of strings, a set and a DoorstationPicture each, many times the size of the text.
@@ -136,7 +138,7 @@ def parse_picture_list(text: str) -> tuple[DoorstationPicture, ...]:
     """
     if len(text) > MAX_LIST_CHARS:  # checked before anything is parsed or copied
         raise ComexioDataError(f"Doorstation picture list is {len(text)} characters long, more than {MAX_LIST_CHARS}")
-    stripped = text.strip()
+    stripped = text.strip(_JSON_WHITESPACE)  # not str.strip(): its Unicode whitespace is no JSON whitespace
     if stripped in _EMPTY_ANSWERS:
         return ()
     try:
