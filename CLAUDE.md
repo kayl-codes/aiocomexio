@@ -45,6 +45,11 @@ Beta. The move out of the integration, in order:
      (`get_doorstation_snapshot`, `doorstation_stream_url`), and the settings of one extension
      (`get_extension`, `ExtensionInfo`: name, serial, type id and the IP address from
      `extension_location` of `/admin/extension/edit/`).
+   - Done: the pictures a Doorstation stores (`doorstation_pictures.py`: `get_doorstation_pictures` →
+     `DoorstationPicture` newest first, `get_doorstation_picture` through the file proxy, 4 MiB cap, 10 s). A
+     file name comes from the device and ends up in a URL path, so only plain `.jpg` names pass
+     (`is_plain_picture_name`); the list format is read from the Comexio OS 11.1.5 board script, not from a
+     Doorstation with pictures (order, limit, proxy login unproven).
    - Done: TLS settings of a Web-IO device (`get_webio_device_tls` → `WebioTlsSettings`: certificate check and key
      pin, read from the device form on `/admin/web_io/home`); `update_webio_device_address(..., keep_tls=True)`
      saves them unchanged instead of resetting them (default `False` keeps the old reset).
