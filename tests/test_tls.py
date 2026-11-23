@@ -393,13 +393,13 @@ async def test_fetch_certificate_keeps_the_fingerprint_of_an_unparsable_certific
 
     assert info == CertificateInfo(_UNPARSABLE_FINGERPRINT, None, None)
     assert writer.closed
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (
-            logging.WARNING,
-            f"{_SYNTHETIC_HOST!r} serves a certificate (SHA-256 {format_fingerprint(_UNPARSABLE_FINGERPRINT)}) "
-            "whose validity period cannot be read",
-        )
-    ]
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    # The cause follows (cryptography's own parser error, its wording not part of this contract).
+    assert record.getMessage().startswith(
+        f"{_SYNTHETIC_HOST!r} serves a certificate (SHA-256 {format_fingerprint(_UNPARSABLE_FINGERPRINT)}) "
+        "whose validity period cannot be read: ValueError("
+    )
 
 
 async def test_fetch_certificate_fingerprint_never_parses_the_certificate(

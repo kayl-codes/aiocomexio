@@ -14,12 +14,14 @@ import hashlib
 import logging
 import re
 import ssl
+import warnings
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlsplit
 
 from cryptography import x509
+from cryptography.utils import CryptographyDeprecationWarning
 
 from .exceptions import ComexioConnectionError, ComexioDataError
 
@@ -90,10 +92,11 @@ class CertificateInfo:
     """The certificate a host serves over HTTPS: its pinnable fingerprint and its validity period.
 
     fingerprint is the SHA-256 of the DER certificate (64 lowercase hex digits), the value ComexioClient
-    pins. not_valid_before and not_valid_after are timezone-aware UTC datetimes, or both None when the
-    certificate cannot be parsed as X.509. None means unknown, never unlimited: a caller must not read a
-    missing date as a certificate that does not expire. The fingerprint is what the handshake presented
-    either way and stays pinnable. Constructing it with only one of the two dates raises ValueError.
+    pins. not_valid_before and not_valid_after are the certificate's dates as certificate_info reads them
+    (timezone-aware, UTC), or both None when the certificate cannot be parsed as X.509. None means
+    unknown, never unlimited: a caller must not read a missing date as a certificate that does not
+    expire. The fingerprint is what the handshake presented either way and stays pinnable.
+    Constructing it with only one of the two dates raises ValueError.
     """
 
     fingerprint: str
@@ -105,22 +108,32 @@ class CertificateInfo:
             raise ValueError("not_valid_before and not_valid_after are either both known or both None")
 
 
+def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError | Warning | None]:
+    """certificate_info and, when the dates cannot be read, why not (None when they can)."""
+    fingerprint = hashlib.sha256(certificate).hexdigest()
+    try:
+        with warnings.catch_warnings():
+            # cryptography warns about odd but readable certificates (a negative serial number); under
+            # "-W error" that warning would turn a readable certificate into an unknown validity.
+            warnings.simplefilter("ignore", CryptographyDeprecationWarning)
+            parsed = x509.load_der_x509_certificate(certificate)
+            not_valid_before, not_valid_after = parsed.not_valid_before_utc, parsed.not_valid_after_utc
+    # ValueError: anything cryptography cannot parse. Warning: any other warning raised as an error.
+    except (ValueError, Warning) as err:
+        return CertificateInfo(fingerprint, None, None), err
+    return CertificateInfo(fingerprint, not_valid_before, not_valid_after), None
+
+
 def certificate_info(certificate: bytes) -> CertificateInfo:
     """Fingerprint and validity period of a DER certificate (as ssl's getpeercert(binary_form=True) gives it).
 
-    Bytes that do not parse as an X.509 certificate still get their fingerprint, with both dates None;
-    a caller that wants to report that checks not_valid_after (fetch_certificate logs a warning).
+    Bytes that do not parse as an X.509 certificate still get their fingerprint, with both dates None
+    (logged at DEBUG only; fetch_certificate logs a warning).
     """
-    fingerprint = hashlib.sha256(certificate).hexdigest()
-    try:
-        parsed = x509.load_der_x509_certificate(certificate)
-        not_valid_before, not_valid_after = parsed.not_valid_before_utc, parsed.not_valid_after_utc
-    # ValueError: anything cryptography cannot parse. Warning: a deprecation warning cryptography emits
-    # for an odd certificate (a negative serial number), raised as an error under "-W error".
-    except (ValueError, Warning) as err:
-        _LOGGER.debug("Certificate %s has no readable validity period: %r", format_fingerprint(fingerprint), err)
-        return CertificateInfo(fingerprint, None, None)
-    return CertificateInfo(fingerprint, not_valid_before, not_valid_after)
+    info, cause = _read_certificate(certificate)
+    if cause is not None:
+        _LOGGER.debug("Certificate %s has no readable validity period: %r", format_fingerprint(info.fingerprint), cause)
+    return info
 
 
 async def _fetch_peer_certificate(host: str) -> bytes:
@@ -163,17 +176,19 @@ async def fetch_certificate(host: str) -> CertificateInfo:
     pinned itself: a validity period belongs to the stored pin only when the fingerprints match.
 
     A certificate that does not parse as X.509 is no error: it comes back with both dates None (see
-    CertificateInfo) and a warning is logged. Handshake and closing share one deadline of
+    CertificateInfo) and a warning naming the cause is logged, on every call (a caller that fetches
+    periodically sees one per fetch). Handshake and closing share one deadline of
     FINGERPRINT_FETCH_TIMEOUT_SEC. Raises ComexioConnectionError if host cannot be reached over TLS
     by then (no HTTPS on that port included), ComexioDataError if the handshake completed without a
     certificate. A host that does not form a URL raises ValueError.
     """
-    info = certificate_info(await _fetch_peer_certificate(host))
-    if info.not_valid_after is None:
+    info, cause = _read_certificate(await _fetch_peer_certificate(host))
+    if info.not_valid_after is None:  # exactly when there is a cause
         _LOGGER.warning(
-            "%r serves a certificate (SHA-256 %s) whose validity period cannot be read",
+            "%r serves a certificate (SHA-256 %s) whose validity period cannot be read: %r",
             host,
             format_fingerprint(info.fingerprint),
+            cause,
         )
     else:
         _LOGGER.debug(
@@ -188,8 +203,10 @@ async def fetch_certificate(host: str) -> CertificateInfo:
 async def fetch_certificate_fingerprint(host: str) -> str:
     """The SHA-256 fingerprint (64 lowercase hex digits) of the certificate host serves over HTTPS.
 
-    Same handshake, deadline and errors as fetch_certificate, but the certificate is only hashed, never
-    parsed: what the pin depends on stays independent of the X.509 parser.
+    Pass it to ComexioClient as fingerprint. Trust on first use: fetch it once, at setup, and store it
+    (see fetch_certificate). Same handshake, deadline and errors as fetch_certificate, a host that does
+    not form a URL raising ValueError included, but the certificate is only hashed, never parsed: what
+    the pin depends on stays independent of the X.509 parser.
     """
     fingerprint = hashlib.sha256(await _fetch_peer_certificate(host)).hexdigest()
     _LOGGER.debug("%r serves a certificate with SHA-256 fingerprint %s", host, format_fingerprint(fingerprint))
