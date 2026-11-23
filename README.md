@@ -256,8 +256,33 @@ extension. The camera calls need the admin session (`login()` first):
   never decompressed, so the 4 MB cap holds) raises `ComexioDataError`; the login form raises
   `ComexioAuthenticationError`.
 
+- `get_doorstation_pictures(ext_id)` lists the pictures the Doorstation stored for a bell press or
+  motion (`POST /board/doorstation/getPictureList`, form field `cameraId` = the extension id, admin
+  session). It returns `DoorstationPicture` objects (`name`, `kind`, `taken_at`), the newest first
+  (the order of Comexio's answer is not known, so the list is sorted here); an empty tuple means none
+  stored. The `kind` is a `DoorstationPictureKind`: `BELL` (`..._bell.jpg`), `MOTION` (`..._pir.jpg`),
+  `SCREENSHOT` (a name that holds `shot`, a picture taken by hand) or `OTHER`. `taken_at` is the moment
+  in the file name (`YY-MM-DD-HH-MM-SS_<kind>.jpg`) as a naive `datetime`: it is the Doorstation's own
+  clock and carries no time zone; it is `None` for a name without a valid moment. Only plain file names
+  are kept (ASCII letters, digits, `.`, `_`, `-`, at most 128 characters, ending in `.jpg`): the names
+  come from the device and go into a URL path, so anything else is dropped, counted in one warning
+  (never quoted). An answer that is not a JSON array, or a list in which no entry is a usable name,
+  raises `ComexioDataError` (an error message never quotes the answer); `null` and an empty answer mean
+  no picture. The login form raises `ComexioAuthenticationError`, a bad `ext_id` `TypeError` /
+  `ValueError` before a request.
+- `get_doorstation_picture(ext_id, name)` returns one stored picture as JPEG bytes, read through the
+  IO-Server's file proxy (`/proxy/file/<ext_id>/images/doorstation/<name>`) with the admin session. It
+  raises `ComexioConnectionError` when the read takes longer than 10 seconds, `ComexioResponseError`
+  for an error status, `ComexioDataError` for a picture over 4 MiB, an answer that is no complete JPEG
+  or one sent compressed (it is asked for unencoded and never decompressed), and
+  `ComexioAuthenticationError` for the login form. A `name` that is not a plain `.jpg` file name raises
+  `ValueError` before a request. `doorstation_picture_file_path(name)` is the path of the same file on
+  the Doorstation itself (`/images/doorstation/<name>`, reportedly served without a login).
+
 The Doorstation serves the same stream under its own address, reportedly without a login. If you
-use it, keep the Doorstation in a network segment that only trusted hosts can reach.
+use it, keep the Doorstation in a network segment that only trusted hosts can reach. The picture list
+and the file paths are read from the page logic of Comexio OS 11.1.5 and not yet checked against a
+Doorstation with stored pictures; whether the proxy serves a picture without a login is not known.
 
 ## Development
 

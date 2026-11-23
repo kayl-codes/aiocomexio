@@ -58,7 +58,9 @@ from .doorstation import (
     JpegFrameReader,
     doorstation_stream_path,
     doorstations_from_attributes,
+    first_jpeg_frame,
 )
+from .doorstation_pictures import DoorstationPicture, doorstation_picture_path, parse_picture_list
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioCertificateMismatchError,
@@ -130,6 +132,11 @@ _IO_HOME_PAGE = "IO home page"
 # frame is about 90 KB at 1280x720, so a stream without a frame in its first MBs is no camera stream.
 _SNAPSHOT_TIMEOUT_SEC = 10.0
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+# The list of stored Doorstation pictures (the board page's own call: form field cameraId = the extension id), and how
+# long get_doorstation_picture takes at most and how large a stored picture may be (a JPEG of 1280x720 is under 1 MB).
+_DOORSTATION_PICTURE_LIST_PATH = "/board/doorstation/getPictureList"
+_PICTURE_TIMEOUT_SEC = 10.0
+_MAX_PICTURE_BYTES = 4 * 1024 * 1024
 # Every request asks for its answer unencoded and does not let aiohttp decompress it (_unencoded): decompressed
 # chunks would be allocated before a byte cap could apply, so a compressed answer could exhaust memory. A cap thus
 # counts bytes of the page itself, and a compressed answer is refused (_content_encoding).
@@ -1221,6 +1228,49 @@ class ComexioClient:
                 _raise_from_stripped(
                     ComexioConnectionError(f"{what}: no complete frame within {_SNAPSHOT_TIMEOUT_SEC} s"), err
                 )
+            _raise_from_stripped(self._transport_error(what, err), err)
+
+    async def get_doorstation_pictures(self, ext_id: int) -> tuple[DoorstationPicture, ...]:
+        """The pictures a Doorstation has stored for a bell press or motion, the newest first (empty: none yet).
+
+        One small request with the admin session to the board page's getPictureList, see parse_picture_list for the
+        answer and its failure modes. ext_id is the Doorstation's extension id (Doorstation.ext_id), a positive int
+        (not a bool): anything else raises TypeError or ValueError before a request. An answer that is not a list of
+        file names raises ComexioDataError, the login form ComexioAuthenticationError.
+        """
+        ext_id = require_ext_id(ext_id)
+        text = await self._request_admin_text(
+            "POST",
+            _DOORSTATION_PICTURE_LIST_PATH,
+            what=f"Doorstation {ext_id} picture list",
+            data={"cameraId": str(ext_id)},
+        )
+        return parse_picture_list(text)
+
+    async def get_doorstation_picture(self, ext_id: int, name: str) -> bytes:
+        """One stored picture of a Doorstation as JPEG bytes, read through the IO-Server's file proxy.
+
+        name is a file name of get_doorstation_pictures (DoorstationPicture.name); one that is not a plain .jpg file
+        name raises ValueError before a request, as does a bad ext_id (TypeError for a non-int). A read that takes
+        longer than _PICTURE_TIMEOUT_SEC seconds raises ComexioConnectionError, an error status
+        ComexioResponseError. A picture larger than _MAX_PICTURE_BYTES, an answer that is no complete JPEG and a
+        compressed answer raise ComexioDataError, the login form ComexioAuthenticationError. Only the JPEG itself is
+        returned, from its start to its end marker.
+        """
+        path = doorstation_picture_path(ext_id, name)
+        what = f"Doorstation {ext_id} picture"
+        deadline = asyncio.timeout(_PICTURE_TIMEOUT_SEC)
+        try:
+            async with (
+                deadline,
+                self._response("GET", path, what=what, deadline=deadline) as resp,
+            ):
+                if resp.status != HTTPStatus.OK:
+                    raise _status_error(what, resp.status, _collapse_error_body(await _error_page_text(resp, what)))
+                return await _read_picture(resp, what)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            if deadline.expired():
+                _raise_from_stripped(ComexioConnectionError(f"{what}: not read within {_PICTURE_TIMEOUT_SEC} s"), err)
             _raise_from_stripped(self._transport_error(what, err), err)
 
     async def get_onewire_sensors(self) -> dict[str, OneWireSensor]:
@@ -3862,6 +3912,32 @@ def _complete_frame(reader: JpegFrameReader, received: bytearray, what: str) -> 
         return reader.frame(received)
     except ComexioDataError as err:
         raise ComexioDataError(f"{what}: {err}") from err
+
+
+async def _read_picture(resp: aiohttp.ClientResponse, what: str) -> bytes:
+    """The body of a picture answer, which must be one complete JPEG; see ComexioClient.get_doorstation_picture.
+
+    Reads at most one byte more than _MAX_PICTURE_BYTES, so a picture of any size costs at most the cap in memory,
+    and refuses a longer one instead of cutting it: a cut JPEG would show as a broken picture. A compressed answer
+    (see _unencoded) is refused before it is read. An answer without a JPEG start is looked at for the login form
+    (an expired session), which the file proxy serves like every admin page.
+    """
+    if encoding := _content_encoding(resp):
+        raise ComexioDataError(f"{what}: the answer came {_excerpt(encoding)}-encoded, not unencoded")
+    body = bytearray()
+    while (left := _MAX_PICTURE_BYTES + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
+        body += chunk
+    if len(body) > _MAX_PICTURE_BYTES:
+        raise ComexioDataError(f"{what}: the picture is larger than {_MAX_PICTURE_BYTES} bytes")
+    try:
+        frame = first_jpeg_frame(body)
+    except ComexioDataError as err:
+        raise ComexioDataError(f"{what}: {err}") from err
+    if frame is not None:
+        return frame
+    if _LOGIN_FORM_SUBMIT_MARKER.encode() in body:
+        raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
+    raise ComexioDataError(f"{what}: the answer ({resp.content_type!r}, {len(body)} bytes) is no complete JPEG")
 
 
 class _CommandTextParser(_FormParser):
