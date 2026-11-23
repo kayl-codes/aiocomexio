@@ -28,6 +28,7 @@ from .client import (
     io_written_over_admin_session,
 )
 from .doorstation import Doorstation
+from .doorstation_pictures import DoorstationPicture, DoorstationPictureKind, doorstation_picture_file_path
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioCertificateMismatchError,
@@ -84,6 +85,8 @@ __all__ = [
     "DEFAULT_KEEPALIVE_TIMEOUT_SEC",
     "DOORSTATION_TYPE_ID",
     "Doorstation",
+    "DoorstationPicture",
+    "DoorstationPictureKind",
     "ExtensionInfo",
     "IoAddress",
     "LiveStates",
@@ -103,6 +106,7 @@ __all__ = [
     "certificate_info",
     "connection_trace_config",
     "connector_kwargs",
+    "doorstation_picture_file_path",
     "fetch_certificate",
     "fetch_certificate_fingerprint",
     "format_fingerprint",
