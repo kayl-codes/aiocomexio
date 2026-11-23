@@ -5,6 +5,8 @@ comexio.local, so neither the CA nor the host name can be verified. Instead the 
 SHA-256 fingerprint of the certificate (ComexioClient's fingerprint argument).
 fetch_certificate_fingerprint reads that fingerprint from a bare TLS handshake, before any
 credentials go out; Comexio's own admin page lists the same value under its certificate hashes.
+fetch_certificate reads the same handshake and adds the certificate's validity period, so a
+caller can see when Comexio will replace the certificate it pinned.
 """
 
 import asyncio
@@ -13,12 +15,19 @@ import logging
 import re
 import ssl
 from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import urlsplit
+
+from cryptography import x509
 
 from .exceptions import ComexioConnectionError, ComexioDataError
 
 __all__ = [
     "FINGERPRINT_FETCH_TIMEOUT_SEC",
+    "CertificateInfo",
+    "certificate_info",
+    "fetch_certificate",
     "fetch_certificate_fingerprint",
     "format_fingerprint",
     "https_address",
@@ -76,23 +85,49 @@ def https_address(host: str) -> tuple[str, int]:
     return parts.hostname, _HTTPS_DEFAULT_PORT if port is None else port
 
 
-async def fetch_certificate_fingerprint(host: str) -> str:
-    """The SHA-256 fingerprint (64 lowercase hex digits) of the certificate host serves over HTTPS.
+@dataclass(frozen=True, slots=True)
+class CertificateInfo:
+    """The certificate a host serves over HTTPS: its pinnable fingerprint and its validity period.
 
-    Only the TLS handshake runs: no HTTP request and no credentials are sent, and the certificate
-    is deliberately not verified — reading it is the point. Pass the result to ComexioClient as
-    fingerprint so every later request checks the server presents this very certificate. This is
-    trust on first use: whoever answers this one handshake gets pinned, so fetch once (at setup)
-    and store the result rather than fetching it anew on every start.
-
-    Handshake and closing share one deadline of FINGERPRINT_FETCH_TIMEOUT_SEC. Raises
-    ComexioConnectionError if host cannot be reached over TLS by then (no HTTPS on that port
-    included), ComexioDataError if the handshake completed without a certificate. A host that does
-    not form a URL raises ValueError.
+    fingerprint is the SHA-256 of the DER certificate (64 lowercase hex digits), the value ComexioClient
+    pins. not_valid_before and not_valid_after are timezone-aware UTC datetimes, or both None when the
+    certificate cannot be parsed as X.509. None means unknown, never unlimited: a caller must not read a
+    missing date as a certificate that does not expire. The fingerprint is what the handshake presented
+    either way and stays pinnable. Constructing it with only one of the two dates raises ValueError.
     """
+
+    fingerprint: str
+    not_valid_before: datetime | None
+    not_valid_after: datetime | None
+
+    def __post_init__(self) -> None:
+        if (self.not_valid_before is None) != (self.not_valid_after is None):
+            raise ValueError("not_valid_before and not_valid_after are either both known or both None")
+
+
+def certificate_info(certificate: bytes) -> CertificateInfo:
+    """Fingerprint and validity period of a DER certificate (as ssl's getpeercert(binary_form=True) gives it).
+
+    Bytes that do not parse as an X.509 certificate still get their fingerprint, with both dates None;
+    a caller that wants to report that checks not_valid_after (fetch_certificate logs a warning).
+    """
+    fingerprint = hashlib.sha256(certificate).hexdigest()
+    try:
+        parsed = x509.load_der_x509_certificate(certificate)
+        not_valid_before, not_valid_after = parsed.not_valid_before_utc, parsed.not_valid_after_utc
+    # ValueError: anything cryptography cannot parse. Warning: a deprecation warning cryptography emits
+    # for an odd certificate (a negative serial number), raised as an error under "-W error".
+    except (ValueError, Warning) as err:
+        _LOGGER.debug("Certificate %s has no readable validity period: %r", format_fingerprint(fingerprint), err)
+        return CertificateInfo(fingerprint, None, None)
+    return CertificateInfo(fingerprint, not_valid_before, not_valid_after)
+
+
+async def _fetch_peer_certificate(host: str) -> bytes:
+    """The DER certificate host presents in a bare TLS handshake (see fetch_certificate for the contract)."""
     hostname, port = https_address(host)
     # Self-signed certificate issued to comexio.local: neither host name nor CA can be verified,
-    # the fingerprint read here is what gets pinned (trust on first use, see above).
+    # the fingerprint read here is what gets pinned (trust on first use, see fetch_certificate).
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # NOSONAR
     context.check_hostname = False  # NOSONAR
     context.verify_mode = ssl.CERT_NONE  # NOSONAR
@@ -104,7 +139,7 @@ async def fetch_certificate_fingerprint(host: str) -> str:
         raise ComexioConnectionError(f"TLS handshake with {host!r} failed: {err!r}") from err
     try:
         ssl_object = writer.get_extra_info("ssl_object")
-        certificate = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
+        certificate: bytes | None = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
     finally:
         writer.close()
         # The close_notify exchange is a courtesy; a peer that does not answer it must not stall the caller.
@@ -113,6 +148,49 @@ async def fetch_certificate_fingerprint(host: str) -> str:
                 await writer.wait_closed()
     if not certificate:
         raise ComexioDataError(f"{host!r} completed the TLS handshake without presenting a certificate")
-    fingerprint = hashlib.sha256(certificate).hexdigest()
+    return certificate
+
+
+async def fetch_certificate(host: str) -> CertificateInfo:
+    """Fingerprint and validity period of the certificate host serves over HTTPS.
+
+    Only the TLS handshake runs: no HTTP request and no credentials are sent, and the certificate
+    is deliberately not verified — reading it is the point. Pass the fingerprint to ComexioClient as
+    fingerprint so every later request checks the server presents this very certificate. This is
+    trust on first use: whoever answers this one handshake gets pinned, so fetch once (at setup)
+    and store the fingerprint rather than fetching it anew on every start. Fetching again later to
+    read the validity period is fine as long as the result is compared with the stored pin and not
+    pinned itself: a validity period belongs to the stored pin only when the fingerprints match.
+
+    A certificate that does not parse as X.509 is no error: it comes back with both dates None (see
+    CertificateInfo) and a warning is logged. Handshake and closing share one deadline of
+    FINGERPRINT_FETCH_TIMEOUT_SEC. Raises ComexioConnectionError if host cannot be reached over TLS
+    by then (no HTTPS on that port included), ComexioDataError if the handshake completed without a
+    certificate. A host that does not form a URL raises ValueError.
+    """
+    info = certificate_info(await _fetch_peer_certificate(host))
+    if info.not_valid_after is None:
+        _LOGGER.warning(
+            "%r serves a certificate (SHA-256 %s) whose validity period cannot be read",
+            host,
+            format_fingerprint(info.fingerprint),
+        )
+    else:
+        _LOGGER.debug(
+            "%r serves a certificate with SHA-256 fingerprint %s, valid until %s",
+            host,
+            format_fingerprint(info.fingerprint),
+            info.not_valid_after.isoformat(),
+        )
+    return info
+
+
+async def fetch_certificate_fingerprint(host: str) -> str:
+    """The SHA-256 fingerprint (64 lowercase hex digits) of the certificate host serves over HTTPS.
+
+    Same handshake, deadline and errors as fetch_certificate, but the certificate is only hashed, never
+    parsed: what the pin depends on stays independent of the X.509 parser.
+    """
+    fingerprint = hashlib.sha256(await _fetch_peer_certificate(host)).hexdigest()
     _LOGGER.debug("%r serves a certificate with SHA-256 fingerprint %s", host, format_fingerprint(fingerprint))
     return fingerprint

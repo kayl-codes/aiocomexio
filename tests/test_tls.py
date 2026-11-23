@@ -20,12 +20,15 @@ from cryptography.x509.oid import NameOID
 
 import aiocomexio.tls
 from aiocomexio import (
+    CertificateInfo,
     ComexioCertificateMismatchError,
     ComexioClient,
     ComexioConnectionError,
     ComexioDataError,
     ComexioError,
     ComexioResponseError,
+    certificate_info,
+    fetch_certificate,
     fetch_certificate_fingerprint,
     format_fingerprint,
     normalize_fingerprint,
@@ -53,17 +56,21 @@ class SelfSignedCertificate:
     def __init__(self, directory: Path) -> None:
         key = ec.generate_private_key(ec.SECP256R1())
         name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "comexio.test")])
-        now = datetime.datetime.now(datetime.UTC)
+        # Whole seconds: X.509 keeps no fractions, so these are the dates the certificate carries.
+        now = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
+        self.not_valid_before = now - datetime.timedelta(days=1)
+        self.not_valid_after = now + datetime.timedelta(days=1)
         certificate = (
             x509.CertificateBuilder()
             .subject_name(name)
             .issuer_name(name)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(now - datetime.timedelta(days=1))
-            .not_valid_after(now + datetime.timedelta(days=1))
+            .not_valid_before(self.not_valid_before)
+            .not_valid_after(self.not_valid_after)
             .sign(key, hashes.SHA256())
         )
+        self.der = certificate.public_bytes(serialization.Encoding.DER)
         self.fingerprint = hashlib.sha256(certificate.public_bytes(serialization.Encoding.DER)).hexdigest()
         self.cert_path = directory / "cert.pem"
         self.key_path = directory / "key.pem"
@@ -326,6 +333,144 @@ async def test_fetch_certificate_fingerprint_keeps_one_deadline_for_handshake_an
     # No wall-clock bound: handshake and the stalled close are cut off by the very same deadline.
     (handshake, close) = deadlines
     assert handshake == close == pytest.approx(started + 0.2, abs=0.1)
+
+
+# --- fetch_certificate / certificate_info --------------------------------------------------
+
+_UNPARSABLE = b"synthetic certificate"
+_UNPARSABLE_FINGERPRINT = hashlib.sha256(_UNPARSABLE).hexdigest()
+
+
+def _assert_utc(info: CertificateInfo) -> None:
+    assert info.not_valid_before is not None
+    assert info.not_valid_after is not None
+    assert info.not_valid_before.tzinfo == datetime.UTC
+    assert info.not_valid_after.tzinfo == datetime.UTC
+
+
+async def test_fetch_certificate_reads_fingerprint_and_validity_without_a_request(
+    tls_comexio: FakeComexio, certificate: SelfSignedCertificate, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.tls"):
+        info = await fetch_certificate(tls_comexio.host)
+
+    assert info == CertificateInfo(certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after)
+    _assert_utc(info)
+    assert tls_comexio.requests == []
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.DEBUG,
+            f"{tls_comexio.host!r} serves a certificate with SHA-256 fingerprint "
+            f"{format_fingerprint(certificate.fingerprint)}, valid until {certificate.not_valid_after.isoformat()}",
+        )
+    ]
+
+
+async def test_fetch_certificate_of_a_plain_http_server_is_a_connection_error(comexio: FakeComexio) -> None:
+    with pytest.raises(ComexioConnectionError, match=r"^TLS handshake with '127\.0\.0\.1:\d+' failed: "):
+        await fetch_certificate(comexio.host)
+
+
+async def test_fetch_certificate_without_a_certificate_is_a_data_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = _FakeWriter(_SslObject(None))
+    monkeypatch.setattr(asyncio, "open_connection", _open_connection_returning(writer))
+
+    with pytest.raises(ComexioDataError) as excinfo:
+        await fetch_certificate(_SYNTHETIC_HOST)
+
+    assert str(excinfo.value) == f"{_SYNTHETIC_HOST!r} completed the TLS handshake without presenting a certificate"
+    assert writer.closed
+
+
+async def test_fetch_certificate_keeps_the_fingerprint_of_an_unparsable_certificate_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    writer = _FakeWriter(_SslObject(_UNPARSABLE))
+    monkeypatch.setattr(asyncio, "open_connection", _open_connection_returning(writer))
+
+    with caplog.at_level(logging.WARNING, logger="aiocomexio.tls"):
+        info = await fetch_certificate(_SYNTHETIC_HOST)
+
+    assert info == CertificateInfo(_UNPARSABLE_FINGERPRINT, None, None)
+    assert writer.closed
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            f"{_SYNTHETIC_HOST!r} serves a certificate (SHA-256 {format_fingerprint(_UNPARSABLE_FINGERPRINT)}) "
+            "whose validity period cannot be read",
+        )
+    ]
+
+
+async def test_fetch_certificate_fingerprint_never_parses_the_certificate(
+    monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate
+) -> None:
+    def broken_parser(_data: bytes) -> x509.Certificate:
+        raise RuntimeError("parser must not run for the pin")
+
+    monkeypatch.setattr(x509, "load_der_x509_certificate", broken_parser)
+    monkeypatch.setattr(
+        asyncio, "open_connection", _open_connection_returning(_FakeWriter(_SslObject(certificate.der)))
+    )
+
+    assert await fetch_certificate_fingerprint(_SYNTHETIC_HOST) == certificate.fingerprint
+
+
+def test_certificate_info_reads_the_dates_of_a_der_certificate(certificate: SelfSignedCertificate) -> None:
+    info = certificate_info(certificate.der)
+
+    assert info == CertificateInfo(certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after)
+    _assert_utc(info)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [lambda _c: _UNPARSABLE, lambda c: c.der[:-5], lambda _c: b""],
+    ids=["junk", "truncated certificate", "empty"],
+)
+def test_certificate_info_keeps_the_fingerprint_of_bytes_that_are_no_certificate(
+    caplog: pytest.LogCaptureFixture,
+    certificate: SelfSignedCertificate,
+    data: Callable[[SelfSignedCertificate], bytes],
+) -> None:
+    raw = data(certificate)
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.tls"):
+        info = certificate_info(raw)
+
+    fingerprint = hashlib.sha256(raw).hexdigest()
+    assert info == CertificateInfo(fingerprint, None, None)
+    (record,) = caplog.records
+    assert record.levelno == logging.DEBUG
+    assert record.getMessage().startswith(f"Certificate {format_fingerprint(fingerprint)} has no readable validity")
+
+
+def test_certificate_info_treats_a_warning_raised_as_error_like_an_unparsable_certificate(
+    monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate
+) -> None:
+    def warning_as_error(_data: bytes) -> x509.Certificate:
+        raise UserWarning("negative serial number")  # what "-W error" makes of cryptography's warning
+
+    monkeypatch.setattr(x509, "load_der_x509_certificate", warning_as_error)
+
+    assert certificate_info(certificate.der) == CertificateInfo(certificate.fingerprint, None, None)
+
+
+def test_certificate_info_is_immutable_and_slotted(certificate: SelfSignedCertificate) -> None:
+    info = certificate_info(certificate.der)
+    with pytest.raises(AttributeError):
+        info.fingerprint = FOREIGN_FINGERPRINT  # type: ignore[misc]
+    assert not hasattr(info, "__dict__")
+
+
+@pytest.mark.parametrize("known", ["not_valid_before", "not_valid_after"])
+def test_certificate_info_refuses_only_one_known_date(known: str) -> None:
+    dates: dict[str, datetime.datetime | None] = {
+        "not_valid_before": None,
+        "not_valid_after": None,
+        known: datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+    }
+    with pytest.raises(ValueError, match=r"^not_valid_before and not_valid_after are either both known or both None$"):
+        CertificateInfo(FOREIGN_FINGERPRINT, **dates)
 
 
 # --- the pinned client ---------------------------------------------------------------------

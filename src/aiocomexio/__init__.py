@@ -50,7 +50,14 @@ from .session import (
     progress_trace_config,
     session_kwargs,
 )
-from .tls import fetch_certificate_fingerprint, format_fingerprint, normalize_fingerprint
+from .tls import (
+    CertificateInfo,
+    certificate_info,
+    fetch_certificate,
+    fetch_certificate_fingerprint,
+    format_fingerprint,
+    normalize_fingerprint,
+)
 
 __version__ = version("aiocomexio")
 
@@ -62,6 +69,7 @@ __all__ = [
     "RIGHT_READ",
     "RIGHT_WRITE",
     "ApiSettings",
+    "CertificateInfo",
     "ComexioAuthenticationError",
     "ComexioCertificateMismatchError",
     "ComexioClient",
@@ -92,8 +100,10 @@ __all__ = [
     "WebioCommandForm",
     "WebioTlsSettings",
     "__version__",
+    "certificate_info",
     "connection_trace_config",
     "connector_kwargs",
+    "fetch_certificate",
     "fetch_certificate_fingerprint",
     "format_fingerprint",
     "io_written_over_admin_session",
