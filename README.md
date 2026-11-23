@@ -105,7 +105,8 @@ a fresh `fetch_certificate_fingerprint()` with the pin to tell the two apart.
 `fetch_certificate(host)` runs the same handshake and returns a `CertificateInfo` with the
 `fingerprint` and the certificate's validity period (`not_valid_before`, `not_valid_after`, UTC).
 Use it to see when Comexio will replace the pinned certificate: the dates belong to your pin only
-when `info.fingerprint` equals it. A certificate that does not parse as X.509 keeps its fingerprint
+when `info.fingerprint` equals it. `info.fingerprint` is always 64 lowercase hex digits, so
+compare it with `normalize_fingerprint(pin)` when the pin may be spelled otherwise (uppercase, with colons). A certificate that does not parse as X.509 keeps its fingerprint
 and gets `None` for both dates. `certificate_info(der)` does the same for certificate bytes you
 already hold.
 

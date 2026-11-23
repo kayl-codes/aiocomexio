@@ -6,6 +6,7 @@ import datetime
 import hashlib
 import logging
 import ssl
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from aiohttp import web
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.x509.oid import NameOID
 
 import aiocomexio.tls
@@ -405,7 +407,10 @@ async def test_fetch_certificate_keeps_the_fingerprint_of_an_unparsable_certific
 async def test_fetch_certificate_fingerprint_never_parses_the_certificate(
     monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate
 ) -> None:
-    def broken_parser(_data: bytes) -> x509.Certificate:
+    parsed: list[bytes] = []
+
+    def broken_parser(data: bytes) -> x509.Certificate:
+        parsed.append(data)
         raise RuntimeError("parser must not run for the pin")
 
     monkeypatch.setattr(x509, "load_der_x509_certificate", broken_parser)
@@ -414,6 +419,7 @@ async def test_fetch_certificate_fingerprint_never_parses_the_certificate(
     )
 
     assert await fetch_certificate_fingerprint(_SYNTHETIC_HOST) == certificate.fingerprint
+    assert parsed == []  # not even a parse whose error is swallowed
 
 
 def test_certificate_info_reads_the_dates_of_a_der_certificate(certificate: SelfSignedCertificate) -> None:
@@ -455,6 +461,25 @@ def test_certificate_info_treats_a_warning_raised_as_error_like_an_unparsable_ce
     assert certificate_info(certificate.der) == CertificateInfo(certificate.fingerprint, None, None)
 
 
+def test_certificate_info_keeps_the_dates_of_a_certificate_cryptography_only_warns_about(
+    monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate
+) -> None:
+    real_parser = x509.load_der_x509_certificate
+
+    def warning_parser(data: bytes) -> x509.Certificate:
+        warnings.warn("negative serial number", CryptographyDeprecationWarning, stacklevel=2)
+        return real_parser(data)
+
+    monkeypatch.setattr(x509, "load_der_x509_certificate", warning_parser)
+    filters_before = list(warnings.filters)
+
+    with pytest.warns(CryptographyDeprecationWarning, match="negative serial number"):
+        info = certificate_info(certificate.der)
+
+    assert info == CertificateInfo(certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after)
+    assert warnings.filters == filters_before
+
+
 def test_certificate_info_is_immutable_and_slotted(certificate: SelfSignedCertificate) -> None:
     info = certificate_info(certificate.der)
     with pytest.raises(AttributeError):
@@ -471,6 +496,35 @@ def test_certificate_info_refuses_only_one_known_date(known: str) -> None:
     }
     with pytest.raises(ValueError, match=r"^not_valid_before and not_valid_after are either both known or both None$"):
         CertificateInfo(FOREIGN_FINGERPRINT, **dates)
+
+
+@pytest.mark.parametrize(
+    "date",
+    [
+        datetime.datetime(2026, 1, 1),  # noqa: DTZ001 - the naive date is the point
+        datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=1))),
+    ],
+    ids=["naive", "not UTC"],
+)
+@pytest.mark.parametrize("field", ["not_valid_before", "not_valid_after"])
+def test_certificate_info_refuses_a_date_that_is_not_utc(field: str, date: datetime.datetime) -> None:
+    dates = {
+        "not_valid_before": datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+        "not_valid_after": datetime.datetime(2027, 1, 1, tzinfo=datetime.UTC),
+        field: date,
+    }
+    with pytest.raises(ValueError, match=r"is not a timezone-aware UTC date$"):
+        CertificateInfo(FOREIGN_FINGERPRINT, **dates)
+
+
+@pytest.mark.parametrize(
+    "fingerprint",
+    [FOREIGN_FINGERPRINT.upper(), format_fingerprint(FOREIGN_FINGERPRINT), "ab" * 20, "zz" * 32],
+    ids=["uppercase", "colons", "SHA-1 length", "not hex"],
+)
+def test_certificate_info_refuses_a_fingerprint_in_another_spelling(fingerprint: str) -> None:
+    with pytest.raises(ValueError, match=r"(64 lowercase hex digits|is not a SHA-256 fingerprint)"):
+        CertificateInfo(fingerprint, None, None)
 
 
 # --- the pinned client ---------------------------------------------------------------------

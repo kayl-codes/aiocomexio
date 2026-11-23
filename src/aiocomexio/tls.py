@@ -14,14 +14,12 @@ import hashlib
 import logging
 import re
 import ssl
-import warnings
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 from cryptography import x509
-from cryptography.utils import CryptographyDeprecationWarning
 
 from .exceptions import ComexioConnectionError, ComexioDataError
 
@@ -96,7 +94,9 @@ class CertificateInfo:
     (timezone-aware, UTC), or both None when the certificate cannot be parsed as X.509. None means
     unknown, never unlimited: a caller must not read a missing date as a certificate that does not
     expire. The fingerprint is what the handshake presented either way and stays pinnable.
-    Constructing it with only one of the two dates raises ValueError.
+    Constructing it with only one of the two dates, a date that is not timezone-aware UTC, or a
+    fingerprint in any other spelling than 64 lowercase hex digits raises ValueError, so a stored pin
+    is compared after normalize_fingerprint.
     """
 
     fingerprint: str
@@ -106,19 +106,23 @@ class CertificateInfo:
     def __post_init__(self) -> None:
         if (self.not_valid_before is None) != (self.not_valid_after is None):
             raise ValueError("not_valid_before and not_valid_after are either both known or both None")
+        for date in (self.not_valid_before, self.not_valid_after):
+            if date is not None and date.utcoffset() != timedelta(0):
+                raise ValueError(f"{date!r} is not a timezone-aware UTC date")
+        if normalize_fingerprint(self.fingerprint) != self.fingerprint:
+            raise ValueError(f"{self.fingerprint!r} is not a fingerprint in 64 lowercase hex digits")
 
 
 def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError | Warning | None]:
     """certificate_info and, when the dates cannot be read, why not (None when they can)."""
     fingerprint = hashlib.sha256(certificate).hexdigest()
+    # cryptography warns about odd but readable certificates (a negative serial number). The warning
+    # goes out as it is: changing the warning filters here would change them for every thread of the
+    # process. Under "-W error" it is raised instead and the validity counts as unknown, with the cause.
     try:
-        with warnings.catch_warnings():
-            # cryptography warns about odd but readable certificates (a negative serial number); under
-            # "-W error" that warning would turn a readable certificate into an unknown validity.
-            warnings.simplefilter("ignore", CryptographyDeprecationWarning)
-            parsed = x509.load_der_x509_certificate(certificate)
-            not_valid_before, not_valid_after = parsed.not_valid_before_utc, parsed.not_valid_after_utc
-    # ValueError: anything cryptography cannot parse. Warning: any other warning raised as an error.
+        parsed = x509.load_der_x509_certificate(certificate)
+        not_valid_before, not_valid_after = parsed.not_valid_before_utc, parsed.not_valid_after_utc
+    # ValueError: anything cryptography cannot parse. Warning: a warning raised as an error.
     except (ValueError, Warning) as err:
         return CertificateInfo(fingerprint, None, None), err
     return CertificateInfo(fingerprint, not_valid_before, not_valid_after), None
