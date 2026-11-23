@@ -2,12 +2,16 @@
 
 import asyncio
 import gzip
+import itertools
 import json
 import logging
 from datetime import datetime
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from aiohttp import web
+from multidict import CIMultiDict
 
 from aiocomexio import (
     ComexioAuthenticationError,
@@ -58,6 +62,13 @@ NOT_PLAIN = [
     "é.jpg",
     "٣.jpg",  # an Arabic-Indic digit: \d would take it
     "a" * 200 + ".jpg",
+    "a" * 129 + ".jpg",
+    "x.jpg\n",
+    "a?b.jpg",
+    "a#b.jpg",
+    "a;b.jpg",
+    "a:b.jpg",
+    "a\x00.jpg",
 ]
 
 
@@ -75,7 +86,11 @@ NOT_PLAIN = [
         ("26-04-31-00-00-00_pir.jpg", DoorstationPictureKind.MOTION, None),
         ("26-11-23-25-00-00_bell.jpg", DoorstationPictureKind.BELL, None),
         # A name that does not follow the pattern at all.
-        ("snapshot.jpg", DoorstationPictureKind.OTHER, None),
+        ("picture.jpg", DoorstationPictureKind.OTHER, None),
+        # `shot` anywhere in the name makes a screenshot, with or without the pattern or a moment.
+        ("26-11-21-12-00-00_manual_shot.jpg", DoorstationPictureKind.SCREENSHOT, datetime(2026, 11, 21, 12, 0, 0)),
+        ("shot1.jpg", DoorstationPictureKind.SCREENSHOT, None),
+        ("26-13-01-00-00-00_shot.jpg", DoorstationPictureKind.SCREENSHOT, None),
     ],
 )
 def test_picture_of_reads_kind_and_moment_from_the_name(
@@ -101,6 +116,13 @@ def test_a_name_that_is_not_plain_is_refused_everywhere(name: str) -> None:
         doorstation_picture_file_path(name)
     with pytest.raises(ValueError, match="plain .jpg file name"):
         doorstation_picture_path(7, name)
+
+
+def test_a_name_of_the_longest_plain_length_is_plain() -> None:
+    longest = "a" * 124 + ".jpg"  # 128 characters in all
+
+    assert is_plain_picture_name(longest)
+    assert doorstation_picture_file_path(longest) == f"/images/doorstation/{longest}"
 
 
 @pytest.mark.parametrize("name", [None, 5, b"a.jpg"])
@@ -153,15 +175,19 @@ def test_names_without_a_moment_come_last_in_name_order() -> None:
     ]
 
 
-def test_the_same_moment_of_two_kinds_keeps_both_in_a_fixed_order() -> None:
-    bell = "26-11-23-18-04-09_bell.jpg"
-    motion = "26-11-23-18-04-09_pir.jpg"
+def test_the_same_moment_of_several_kinds_comes_in_name_order_whatever_the_order_of_the_answer() -> None:
+    names = [f"26-11-23-18-04-09_{kind}.jpg" for kind in ("bell", "pir", "shot", "other")]
 
-    assert [p.name for p in parse_picture_list(json.dumps([motion, bell]))] == [bell, motion]
+    for permutation in itertools.permutations(names):
+        assert [p.name for p in parse_picture_list(json.dumps(permutation))] == sorted(names)
 
 
-def test_a_name_listed_twice_counts_once() -> None:
-    assert [p.name for p in parse_picture_list(json.dumps([BELL, BELL, MOTION]))] == [MOTION, BELL]
+def test_a_name_listed_twice_counts_once_and_is_no_unusable_entry(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.doorstation_pictures"):
+        pictures = parse_picture_list(json.dumps([BELL, BELL, MOTION]))
+
+    assert [p.name for p in pictures] == [MOTION, BELL]
+    assert caplog.records == []
 
 
 def test_entries_that_are_no_plain_name_are_dropped_and_counted_in_one_warning(
@@ -213,6 +239,17 @@ def test_an_array_nested_too_deeply_raises_a_data_error(garbage_collected: None)
         parse_picture_list(nested)
 
     assert str(info.value) == "Doorstation picture list is nested too deeply"
+
+
+def test_an_integer_too_long_to_read_raises_a_data_error(int_max_str_digits: None) -> None:
+    # json.loads raises a plain ValueError for it (not a JSONDecodeError): it must not escape as one.
+    text = "[" + "1" * 5000 + "]"
+
+    with pytest.raises(ComexioDataError) as info:
+        parse_picture_list(text)
+
+    assert str(info.value) == "Doorstation picture list holds a number too long to read"
+    assert info.value.__cause__ is None
 
 
 def _list_handler(answer: str, *, form: list[dict[str, object]] | None = None) -> Handler:
@@ -303,6 +340,47 @@ async def test_get_doorstation_picture_returns_only_the_image_not_what_follows_i
     assert await logged_in.get_doorstation_picture(7, BELL) == JPEG
 
 
+async def test_get_doorstation_picture_reads_a_body_that_arrives_in_pieces(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(headers={"Content-Type": "image/jpeg"})
+        await response.prepare(request)
+        for index in range(len(JPEG)):
+            await response.write(JPEG[index : index + 1])
+            await asyncio.sleep(0)
+        return response
+
+    comexio.serve("GET", FILE_PATH, handler)
+
+    assert await logged_in.get_doorstation_picture(7, BELL) == JPEG
+
+
+async def test_get_doorstation_picture_asks_for_an_unencoded_answer(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    asked_for: list[str | None] = []
+
+    async def handler(request: web.Request) -> web.Response:
+        asked_for.append(request.headers.get("Accept-Encoding"))
+        return web.Response(body=JPEG, content_type="image/jpeg")
+
+    comexio.serve("GET", FILE_PATH, handler)
+
+    assert await logged_in.get_doorstation_picture(7, BELL) == JPEG
+    assert asked_for == ["identity"]
+
+
+async def test_get_doorstation_picture_that_does_not_start_like_a_jpeg_raises(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    # A stream may have a boundary before its frame, a file is a JPEG from its first byte.
+    comexio.serve("GET", FILE_PATH, _file_handler(b"junk" + JPEG))
+
+    with pytest.raises(ComexioDataError, match="is no complete JPEG from its first byte"):
+        await logged_in.get_doorstation_picture(7, BELL)
+
+
 async def test_get_doorstation_picture_needs_the_admin_session(client: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve("GET", FILE_PATH, _file_handler(JPEG))
 
@@ -332,7 +410,9 @@ async def test_get_doorstation_picture_that_is_no_complete_jpeg_raises(
 ) -> None:
     comexio.serve("GET", FILE_PATH, _file_handler(body))
 
-    with pytest.raises(ComexioDataError, match="Doorstation 7 picture: the answer .* is no complete JPEG"):
+    with pytest.raises(
+        ComexioDataError, match="Doorstation 7 picture: the answer .* is no complete JPEG from its first byte"
+    ):
         await logged_in.get_doorstation_picture(7, BELL)
 
 
@@ -355,7 +435,9 @@ async def test_get_doorstation_picture_of_an_error_status_raises_a_response_erro
     with pytest.raises(ComexioResponseError) as info:
         await logged_in.get_doorstation_picture(7, BELL)
 
-    assert str(status) in str(info.value)
+    assert str(info.value) == f"Doorstation 7 picture failed: HTTP {status}: gone"
+    assert info.value.status == status
+    assert info.value.body == "gone"
 
 
 async def test_get_doorstation_picture_refuses_a_picture_larger_than_the_cap(
@@ -369,6 +451,34 @@ async def test_get_doorstation_picture_refuses_a_picture_larger_than_the_cap(
         await logged_in.get_doorstation_picture(7, BELL)
 
     assert str(info.value) == f"Doorstation 7 picture: the picture is larger than {cap} bytes"
+
+
+async def test_a_picture_one_byte_over_the_cap_is_refused(
+    logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_MAX_PICTURE_BYTES", len(JPEG))
+    comexio.serve("GET", FILE_PATH, _file_handler(JPEG + b"x"))
+
+    with pytest.raises(ComexioDataError, match="the picture is larger than"):
+        await logged_in.get_doorstation_picture(7, BELL)
+
+
+async def test_read_picture_never_asks_for_more_than_one_byte_over_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "_MAX_PICTURE_BYTES", 10)
+    requested: list[int] = []
+
+    class Content:
+        async def read(self, size: int) -> bytes:
+            requested.append(size)
+            return b"x" * size  # a body that never ends
+
+    resp = SimpleNamespace(headers=CIMultiDict[str](), content=Content(), content_type="image/jpeg")
+
+    with pytest.raises(ComexioDataError, match="larger than 10 bytes"):
+        await client_module._read_picture(cast("Any", resp), "picture")
+
+    assert sum(requested) == 11
+    assert max(requested) <= 11
 
 
 async def test_get_doorstation_picture_of_exactly_the_cap_is_returned(
@@ -419,6 +529,23 @@ async def test_get_doorstation_picture_that_stalls_times_out(
     assert str(info.value) == "Doorstation 7 picture: not read within 0.05 s"
 
 
+async def test_get_doorstation_picture_cut_off_by_the_server_raises_a_connection_error(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(headers={"Content-Type": "image/jpeg", "Content-Length": str(len(JPEG))})
+        await response.prepare(request)
+        await response.write(JPEG[:3])
+        assert request.transport is not None
+        request.transport.close()
+        return response
+
+    comexio.serve("GET", FILE_PATH, handler)
+
+    with pytest.raises(ComexioConnectionError, match="^Doorstation 7 picture"):
+        await logged_in.get_doorstation_picture(7, BELL)
+
+
 @pytest.mark.parametrize("name", ["../secret.jpg", "a/b.jpg", "x.png", ""])
 async def test_get_doorstation_picture_refuses_a_name_that_is_not_plain_before_any_request(
     logged_in: ComexioClient, comexio: FakeComexio, name: str
@@ -431,7 +558,7 @@ async def test_get_doorstation_picture_refuses_a_name_that_is_not_plain_before_a
     assert len(comexio.requests) == requests_before
 
 
-@pytest.mark.parametrize(("ext_id", "error"), [(0, ValueError), (True, TypeError)])
+@pytest.mark.parametrize(("ext_id", "error"), [(0, ValueError), (-1, ValueError), (True, TypeError), ("7", TypeError)])
 async def test_get_doorstation_picture_refuses_a_bad_extension_id_before_any_request(
     logged_in: ComexioClient, comexio: FakeComexio, ext_id: object, error: type[Exception]
 ) -> None:

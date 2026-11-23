@@ -32,7 +32,7 @@ _PROXY_PATH = "/proxy/file/{ext_id}" + PICTURE_DIRECTORY
 # other character a URL path treats specially, and ends in .jpg. ASCII only: \d and \w would take other scripts' digits.
 _PLAIN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.jpg", re.ASCII)
 # The name the Doorstation gives a picture: year (two digits), month, day, hour, minute, second, the kind.
-_PICTURE_NAME = re.compile(r"(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)_([A-Za-z0-9-]+)\.jpg", re.ASCII)
+_PICTURE_NAME = re.compile(r"(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)_([A-Za-z0-9._-]+)\.jpg", re.ASCII)
 _YEAR_BASE = 2000
 # What the kind token of a name says; a token that holds "shot" is a screenshot, as the page of Comexio reads it.
 _BELL_TOKEN = "bell"
@@ -94,20 +94,22 @@ def picture_of(name: str) -> DoorstationPicture:
     _require_plain_name(name)
     match = _PICTURE_NAME.fullmatch(name)
     if match is None:
-        return DoorstationPicture(name=name, kind=DoorstationPictureKind.OTHER, taken_at=None)
+        return DoorstationPicture(name=name, kind=_kind_of(name, None), taken_at=None)
     *moment, token = match.groups()
     year, month, day, hour, minute, second = (int(part) for part in moment)  # two ASCII digits each: no failure
     try:
         taken_at: datetime | None = datetime(_YEAR_BASE + year, month, day, hour, minute, second)
     except ValueError:  # a month 13, a day 31 of April: the name keeps its kind, the moment is not known
         taken_at = None
-    return DoorstationPicture(name=name, kind=_kind_of(token), taken_at=taken_at)
+    return DoorstationPicture(name=name, kind=_kind_of(name, token), taken_at=taken_at)
 
 
-def _kind_of(token: str) -> DoorstationPictureKind:
-    lowered = token.lower()
-    if _SCREENSHOT_TOKEN in lowered:
+def _kind_of(name: str, token: str | None) -> DoorstationPictureKind:
+    """The kind a name stands for: a name that holds `shot` anywhere is a screenshot (as the page of Comexio reads
+    it), otherwise the kind token of the pattern says bell or motion; token is None for a name off the pattern."""
+    if _SCREENSHOT_TOKEN in name.lower():
         return DoorstationPictureKind.SCREENSHOT
+    lowered = (token or "").lower()
     if lowered == _MOTION_TOKEN:
         return DoorstationPictureKind.MOTION
     if lowered == _BELL_TOKEN:
@@ -123,7 +125,8 @@ def parse_picture_list(text: str) -> tuple[DoorstationPicture, ...]:
     plain file name (see the module text) are dropped and counted in one warning; if the list is not empty and none
     of its entries is usable, the format has changed and that raises ComexioDataError instead of reporting no
     picture. A name listed twice counts once. The order is by the moment in the name, the newest first; names with
-    no moment come last, in name order.
+    no moment come last, in name order, which is not a chronological order: a caller that wants the latest picture
+    of a kind takes the first one of that kind that has a taken_at.
     """
     stripped = text.strip()
     if stripped in _EMPTY_ANSWERS:
@@ -135,6 +138,8 @@ def parse_picture_list(text: str) -> tuple[DoorstationPicture, ...]:
         raise ComexioDataError(f"Doorstation picture list is not JSON (offset {err.pos})") from None
     except RecursionError:  # an array nested deeper than the parser follows
         raise ComexioDataError("Doorstation picture list is nested too deeply") from None
+    except ValueError:  # an integer of more than sys.get_int_max_str_digits() digits is no JSONDecodeError
+        raise ComexioDataError("Doorstation picture list holds a number too long to read") from None
     if not isinstance(listed, list):
         raise ComexioDataError(f"Doorstation picture list is a JSON {type(listed).__name__}, not an array")
     usable = [entry for entry in listed if is_plain_picture_name(entry)]

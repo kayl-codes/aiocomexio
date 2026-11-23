@@ -274,7 +274,7 @@ extension. The camera calls need the admin session (`login()` first):
   IO-Server's file proxy (`/proxy/file/<ext_id>/images/doorstation/<name>`) with the admin session. It
   raises `ComexioConnectionError` when the read takes longer than 10 seconds, `ComexioResponseError`
   for an error status, `ComexioDataError` for a picture over 4 MiB, an answer that is no complete JPEG
-  or one sent compressed (it is asked for unencoded and never decompressed), and
+  from its first byte, or one sent compressed (it is asked for unencoded and never decompressed), and
   `ComexioAuthenticationError` for the login form. A `name` that is not a plain `.jpg` file name raises
   `ValueError` before a request. `doorstation_picture_file_path(name)` is the path of the same file on
   the Doorstation itself (`/images/doorstation/<name>`, reportedly served without a login).

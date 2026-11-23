@@ -137,6 +137,7 @@ _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 _DOORSTATION_PICTURE_LIST_PATH = "/board/doorstation/getPictureList"
 _PICTURE_TIMEOUT_SEC = 10.0
 _MAX_PICTURE_BYTES = 4 * 1024 * 1024
+_JPEG_SOI = b"\xff\xd8"  # the first two bytes of every JPEG file
 # Every request asks for its answer unencoded and does not let aiohttp decompress it (_unencoded): decompressed
 # chunks would be allocated before a byte cap could apply, so a compressed answer could exhaust memory. A cap thus
 # counts bytes of the page itself, and a compressed answer is refused (_content_encoding).
@@ -3933,11 +3934,13 @@ async def _read_picture(resp: aiohttp.ClientResponse, what: str) -> bytes:
         frame = first_jpeg_frame(body)
     except ComexioDataError as err:
         raise ComexioDataError(f"{what}: {err}") from err
-    if frame is not None:
+    if frame is not None and body.startswith(_JPEG_SOI):  # a file is a JPEG from its first byte, unlike a stream
         return frame
     if _LOGIN_FORM_SUBMIT_MARKER.encode() in body:
         raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
-    raise ComexioDataError(f"{what}: the answer ({resp.content_type!r}, {len(body)} bytes) is no complete JPEG")
+    raise ComexioDataError(
+        f"{what}: the answer ({_excerpt(resp.content_type)}, {len(body)} bytes) is no complete JPEG from its first byte"
+    )
 
 
 class _CommandTextParser(_FormParser):
