@@ -28,11 +28,12 @@ _LOGGER = logging.getLogger(__name__)
 PICTURE_DIRECTORY = "/images/doorstation/"
 _PROXY_PATH = "/proxy/file/{ext_id}" + PICTURE_DIRECTORY
 
-# A plain file name: it starts with a letter or digit (no dot-only name), has no slash, backslash, percent sign or
-# other character a URL path treats specially, and ends in .jpg. ASCII only: \d and \w would take other scripts' digits.
-_PLAIN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.jpg", re.ASCII)
+# A plain file name: 128 characters at most, .jpg included (1 + 123 + 4). It starts with a letter or digit (no dot-only
+# name), has no slash, backslash, percent sign or other character a URL path treats specially, and ends in .jpg.
+# With re.ASCII \d is 0-9 only; without it \d would take other scripts' digits too.
+_PLAIN_NAME = re.compile(r"[A-Za-z\d][A-Za-z\d._-]{0,123}\.jpg", re.ASCII)
 # The name the Doorstation gives a picture: year (two digits), month, day, hour, minute, second, the kind.
-_PICTURE_NAME = re.compile(r"(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)_([A-Za-z0-9._-]+)\.jpg", re.ASCII)
+_PICTURE_NAME = re.compile(r"(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)_([A-Za-z\d._-]+)\.jpg", re.ASCII)
 _YEAR_BASE = 2000
 # What the kind word of a name says; a name that holds "shot" anywhere is a screenshot, as Comexio's page reads it.
 _BELL_WORD = "bell"
@@ -40,10 +41,10 @@ _MOTION_WORD = "pir"
 _SCREENSHOT_WORD = "shot"
 # The empty answers: no picture saved yet.
 _EMPTY_ANSWERS = frozenset({"", "null"})
-# The longest answer parse_picture_list reads. A real list is about 30 characters per picture, so this holds some
-# 35,000; the client reads an answer up to 16 MiB, which json would turn into millions of strings, a set and a
-# DoorstationPicture each, many times the size of the text.
-_MAX_LIST_CHARS = 1024 * 1024
+# The longest answer parse_picture_list reads (the client stops reading at as many bytes). A real list is about 30
+# characters per picture, so this holds some 35,000; the client reads an answer up to 16 MiB, which json would turn
+# into millions of strings, a set and a DoorstationPicture each, many times the size of the text.
+MAX_LIST_CHARS = 1024 * 1024
 
 
 class DoorstationPictureKind(StrEnum):
@@ -128,13 +129,13 @@ def parse_picture_list(text: str) -> tuple[DoorstationPicture, ...]:
     changed format) raises ComexioDataError, naming what is wrong but not quoting the answer. Entries that are not a
     plain file name (see the module text) are dropped and counted in one warning; if the list is not empty and none
     of its entries is usable, the format has changed and that raises ComexioDataError instead of reporting no
-    picture. An answer longer than _MAX_LIST_CHARS raises ComexioDataError before it is parsed. A name listed twice
+    picture. An answer longer than MAX_LIST_CHARS raises ComexioDataError before it is parsed. A name listed twice
     counts once. The order is by the moment in the name, the newest first; names with no moment come last, in name
     order, which is not a chronological order: a caller that wants the latest picture of a kind takes the first one
     of that kind that has a taken_at.
     """
-    if len(text) > _MAX_LIST_CHARS:  # checked before anything is parsed or copied
-        raise ComexioDataError(f"Doorstation picture list is {len(text)} characters long, more than {_MAX_LIST_CHARS}")
+    if len(text) > MAX_LIST_CHARS:  # checked before anything is parsed or copied
+        raise ComexioDataError(f"Doorstation picture list is {len(text)} characters long, more than {MAX_LIST_CHARS}")
     stripped = text.strip()
     if stripped in _EMPTY_ANSWERS:
         return ()

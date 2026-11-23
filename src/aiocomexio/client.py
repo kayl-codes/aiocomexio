@@ -60,7 +60,7 @@ from .doorstation import (
     doorstations_from_attributes,
     first_jpeg_frame,
 )
-from .doorstation_pictures import DoorstationPicture, doorstation_picture_path, parse_picture_list
+from .doorstation_pictures import MAX_LIST_CHARS, DoorstationPicture, doorstation_picture_path, parse_picture_list
 from .exceptions import (
     ComexioAuthenticationError,
     ComexioCertificateMismatchError,
@@ -1244,6 +1244,7 @@ class ComexioClient:
             "POST",
             _DOORSTATION_PICTURE_LIST_PATH,
             what=f"Doorstation {ext_id} picture list",
+            max_bytes=MAX_LIST_CHARS,  # a text is never longer in characters than in bytes
             data={"cameraId": str(ext_id)},
         )
         return parse_picture_list(text)
@@ -2421,19 +2422,21 @@ class ComexioClient:
         *,
         what: str,
         error_body: bool = True,
+        max_bytes: int | None = None,
         **kwargs: Any,
     ) -> str:
         """Body of one request as text, with transport errors and error statuses mapped to ComexioError.
 
         error_body=False leaves the page of an error status out of the error (message and ComexioResponseError.body):
-        for a page that may hold a secret, which an error page of the same address may hold too.
+        for a page that may hold a secret, which an error page of the same address may hold too. max_bytes lowers the
+        longest answer that is read (default _RESPONSE_MAX_BYTES); a longer one is refused as ComexioDataError.
         """
         try:
             async with self._response(method, path, what=what, **kwargs) as resp:
                 if resp.status != HTTPStatus.OK:
                     page = _collapse_error_body(await _error_page_text(resp, what)) if error_body else None
                     raise _status_error(what, resp.status, page)
-                return await _response_text(resp, what)
+                return await _response_text(resp, what, max_bytes=max_bytes)
         except (aiohttp.ClientError, TimeoutError) as err:
             _raise_from_stripped(self._transport_error(what, err), err)
 
@@ -3933,9 +3936,9 @@ async def _read_picture(resp: aiohttp.ClientResponse, what: str) -> bytes:
     finally:
         # The buffer is a local of this frame and of the parser's, so an exception that outlives the call (stored by
         # a caller, its traceback and chained cause) would keep up to _MAX_PICTURE_BYTES of picture alive; the frame
-        # is a copy.
-        # Only the buffer: the last chunk read (one network read) stays in the frame.
+        # is a copy. The last chunk read (one network read) stays in the frame too, so it is let go as well.
         body.clear()
+        chunk = b""
 
 
 def _picture_from(body: bytearray, resp: aiohttp.ClientResponse, what: str) -> bytes:
@@ -3947,7 +3950,7 @@ def _picture_from(body: bytearray, resp: aiohttp.ClientResponse, what: str) -> b
     # login-form check below and not end in a malformed-structure error.
     if body.startswith(_JPEG_SOI):
         try:
-            frame = first_jpeg_frame(body)
+            frame = first_jpeg_frame(body, require_frame_header=True)  # a still must be one a decoder can read
         except ComexioDataError as err:
             raise ComexioDataError(f"{what}: {err}") from err
         if frame is not None:
@@ -4649,23 +4652,27 @@ def _carries_an_answer(error: BaseException) -> TypeIs[aiohttp.ServerDisconnecte
     return isinstance(error, aiohttp.ServerDisconnectedError) and not isinstance(error.message, str)
 
 
-async def _response_text(resp: aiohttp.ClientResponse, what: str, *, errors: str = "strict") -> str:
-    """The body of a successful answer as text; ComexioDataError if it passes _RESPONSE_MAX_BYTES or cannot be decoded.
+async def _response_text(
+    resp: aiohttp.ClientResponse, what: str, *, errors: str = "strict", max_bytes: int | None = None
+) -> str:
+    """The body of a successful answer as text; ComexioDataError if it passes the cap or cannot be decoded.
 
-    Reads at most one byte more than the cap, so an answer of any size costs at most the cap in memory, and
-    refuses the answer instead of cutting it: a cut page or plan would read as complete. A compressed answer
+    The cap is _RESPONSE_MAX_BYTES, or max_bytes where a caller knows a lower one. Reads at most one byte more than
+    the cap, so an answer of any size costs at most the cap in memory, and refuses the answer instead of cutting it:
+    a cut page or plan would read as complete. A compressed answer
     (see _unencoded) is refused the same way, before its text could show the login form: a device that ignores
     the identity request fails with ComexioDataError, not ComexioAuthenticationError.
     """
     if encoding := _content_encoding(resp):
         raise ComexioDataError(f"{what}: the answer came {_excerpt(encoding)}-encoded, not unencoded")
+    cap = _RESPONSE_MAX_BYTES if max_bytes is None else max_bytes
     body = bytearray()
-    while (left := _RESPONSE_MAX_BYTES + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
+    while (left := cap + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
         body += chunk
-    if len(body) > _RESPONSE_MAX_BYTES:
+    if len(body) > cap:
         body.clear()  # the frame stays in the traceback of the error with its locals: the last chunk too
         chunk = b""
-        raise ComexioDataError(f"{what}: response is longer than {_RESPONSE_MAX_BYTES} bytes")
+        raise ComexioDataError(f"{what}: response is longer than {cap} bytes")
     encoding = _text_encoding(resp)
     detail = ""
     try:

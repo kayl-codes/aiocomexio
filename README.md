@@ -264,18 +264,18 @@ extension. The camera calls need the admin session (`login()` first):
   `SCREENSHOT` (a name that holds `shot`, a picture taken by hand) or `OTHER`. `taken_at` is the moment
   in the file name (`YY-MM-DD-HH-MM-SS_<kind>.jpg`) as a naive `datetime`: it is the Doorstation's own
   clock and carries no time zone; it is `None` for a name without a valid moment. Only plain file names
-  are kept (ASCII letters, digits, `.`, `_`, `-`, at most 128 characters, ending in `.jpg`): the names
+  are kept (ASCII letters, digits, `.`, `_`, `-`, at most 128 characters in all, `.jpg` included): the names
   come from the device and go into a URL path, so anything else is dropped, counted in one warning
-  (never quoted). An answer that is not a JSON array, or a list in which no entry is a usable name,
-  raises `ComexioDataError` (an error message never quotes the answer); `null` and an empty answer mean
-  no picture. The login form raises `ComexioAuthenticationError`, a bad `ext_id` `TypeError` /
+  (never quoted). An answer that is not a JSON array, one longer than 1 MiB (the read stops there), or a
+  list in which no entry is a usable name, raises `ComexioDataError` (an error message never quotes the
+  answer); `null` and an empty answer mean no picture. The login form raises `ComexioAuthenticationError`, a bad `ext_id` `TypeError` /
   `ValueError` before a request.
 - `get_doorstation_picture(ext_id, name)` returns one stored picture as JPEG bytes, read through the
   IO-Server's file proxy (`/proxy/file/<ext_id>/images/doorstation/<name>`) with the admin session. It
   raises `ComexioConnectionError` when the read takes longer than 10 seconds, `ComexioResponseError`
   for an error status, `ComexioDataError` for a picture over 4 MiB, an answer that is no complete JPEG
-  from its first byte, or one sent compressed (it is asked for unencoded and never decompressed), and
-  `ComexioAuthenticationError` for the login form. A `name` that is not a plain `.jpg` file name raises
+  from its first byte (a scan with no frame header before it is none either), or one sent compressed (it
+  is asked for unencoded and never decompressed), and `ComexioAuthenticationError` for the login form. A `name` that is not a plain `.jpg` file name raises
   `ValueError` before a request. `doorstation_picture_file_path(name)` is the path of the same file on
   the Doorstation itself (`/images/doorstation/<name>`, reportedly served without a login).
 

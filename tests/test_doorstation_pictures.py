@@ -26,6 +26,7 @@ from aiocomexio import (
 )
 from aiocomexio import client as client_module
 from aiocomexio import doorstation_pictures as pictures_module
+from aiocomexio.doorstation import JpegFrameReader, first_jpeg_frame
 from aiocomexio.doorstation_pictures import (
     doorstation_picture_path,
     is_plain_picture_name,
@@ -41,11 +42,25 @@ OLDER_BELL = "26-11-22-07-00-00_bell.jpg"
 SHOT = "26-11-21-12-00-00_shot.jpg"
 FILE_PATH = f"/proxy/file/7/images/doorstation/{BELL}"
 
-# A complete synthetic JPEG: SOI, one scan (SOS header for one component, made-up entropy-coded data), EOI.
+# A complete synthetic JPEG: SOI, the frame header of a 1 x 1 picture with one component (SOF0), one scan (SOS header
+# for one component, made-up entropy-coded data), EOI.
 SOI = b"\xff\xd8"
 EOI = b"\xff\xd9"
+SOF = b"\xff\xc0" + (11).to_bytes(2) + b"\x08\x00\x01\x00\x01\x01\x01\x11\x00"
 SOS = b"\xff\xda" + (8).to_bytes(2) + b"\x01\x01\x00\x00\x3f\x00"
-JPEG = SOI + SOS + b"\x12\x34\x56" + EOI
+HTML_BODY = b"<html>no picture</html>"
+JPEG = SOI + SOF + SOS + b"\x12\x34\x56" + EOI
+NOT_PLAIN_MESSAGE = "name must be a plain .jpg file name (letters, digits, '.', '_', '-')"
+LOGIN_FORM_MESSAGE = "Comexio served the login form, the session is not logged in ({what})"
+
+
+def _not_a_jpeg_message(body: bytes, what: str = "Doorstation 7 picture") -> str:
+    """The message of an answer that is no JPEG from its first byte (served as image/jpeg)."""
+    return (
+        f"{what}: the answer ({'image/jpeg'!r}, {len(body)} bytes, starting {body[:2].hex() or 'empty'}) "
+        "is no complete JPEG from its first byte"
+    )
+
 
 NOT_PLAIN = [
     "",
@@ -64,7 +79,7 @@ NOT_PLAIN = [
     "é.jpg",
     "٣.jpg",  # an Arabic-Indic digit: \d would take it
     "a" * 200 + ".jpg",
-    "a" * 129 + ".jpg",
+    "a" * 125 + ".jpg",  # 129 characters in all, one over
     "x.jpg\n",
     "a?b.jpg",
     "a#b.jpg",
@@ -116,16 +131,19 @@ def test_the_moment_has_no_time_zone() -> None:
 @pytest.mark.parametrize("name", NOT_PLAIN)
 def test_a_name_that_is_not_plain_is_refused_everywhere(name: str) -> None:
     assert not is_plain_picture_name(name)
-    with pytest.raises(ValueError, match="plain .jpg file name"):
+    with pytest.raises(ValueError) as of:
         picture_of(name)
-    with pytest.raises(ValueError, match="plain .jpg file name"):
+    with pytest.raises(ValueError) as file_path:
         doorstation_picture_file_path(name)
-    with pytest.raises(ValueError, match="plain .jpg file name"):
+    with pytest.raises(ValueError) as proxy_path:
         doorstation_picture_path(7, name)
+
+    assert [str(of.value), str(file_path.value), str(proxy_path.value)] == [NOT_PLAIN_MESSAGE] * 3
 
 
 def test_a_name_of_the_longest_plain_length_is_plain() -> None:
-    longest = "a" * 128 + ".jpg"  # a stem of 128 characters; one more is in NOT_PLAIN
+    longest = "a" * 124 + ".jpg"  # 128 characters in all, as the README says; one more is in NOT_PLAIN
+    assert len(longest) == 128
 
     assert is_plain_picture_name(longest)
     assert doorstation_picture_file_path(longest) == f"/images/doorstation/{longest}"
@@ -134,8 +152,10 @@ def test_a_name_of_the_longest_plain_length_is_plain() -> None:
 @pytest.mark.parametrize("name", [None, 5, b"a.jpg"])
 def test_a_name_that_is_no_string_is_a_type_error(name: object) -> None:
     assert not is_plain_picture_name(name)
-    with pytest.raises(TypeError, match="name must be a str"):
+    with pytest.raises(TypeError) as info:
         doorstation_picture_file_path(name)  # type: ignore[arg-type]
+
+    assert str(info.value) == f"name must be a str, not {type(name).__name__}"
 
 
 def test_the_paths_of_a_picture_file() -> None:
@@ -259,7 +279,7 @@ def test_an_integer_too_long_to_read_raises_a_data_error(int_max_str_digits: Non
 
 
 def test_an_answer_longer_than_the_cap_is_refused_before_it_is_parsed() -> None:
-    cap = pictures_module._MAX_LIST_CHARS
+    cap = pictures_module.MAX_LIST_CHARS
     names = ",".join(f'"{index}.jpg"' for index in range(cap // 9))  # more than the cap, a valid list
     text = f"[{names}]"
     assert len(text) > cap
@@ -274,18 +294,21 @@ def test_an_answer_longer_than_the_cap_is_refused_before_it_is_parsed() -> None:
     "text",
     [
         # not JSON at all: the length is refused first
-        pytest.param("x" * (pictures_module._MAX_LIST_CHARS + 1), id="not-json"),
+        pytest.param("x" * (pictures_module.MAX_LIST_CHARS + 1), id="not-json"),
         # one character over, mostly blanks a strip would drop (ids stay short: pytest puts them in an env variable)
-        pytest.param("[]" + " " * (pictures_module._MAX_LIST_CHARS - 1), id="one-over-blanks"),
+        pytest.param("[]" + " " * (pictures_module.MAX_LIST_CHARS - 1), id="one-over-blanks"),
     ],
 )
 def test_the_cap_is_checked_on_the_raw_text_before_anything_else(text: str) -> None:
-    with pytest.raises(ComexioDataError, match="characters long, more than"):
+    with pytest.raises(ComexioDataError) as info:
         parse_picture_list(text)
+
+    cap = pictures_module.MAX_LIST_CHARS
+    assert str(info.value) == f"Doorstation picture list is {cap + 1} characters long, more than {cap}"
 
 
 def test_an_answer_of_exactly_the_cap_is_still_read() -> None:
-    cap = pictures_module._MAX_LIST_CHARS
+    cap = pictures_module.MAX_LIST_CHARS
     text = f'["{BELL}"]'
     padded = text + " " * (cap - len(text))
     assert len(padded) == cap
@@ -330,8 +353,10 @@ async def test_get_doorstation_pictures_of_a_doorstation_without_pictures(
 async def test_get_doorstation_pictures_needs_the_admin_session(client: ComexioClient, comexio: FakeComexio) -> None:
     comexio.serve("POST", LIST_PATH, _list_handler(json.dumps([BELL])))
 
-    with pytest.raises(ComexioAuthenticationError, match="login form"):
+    with pytest.raises(ComexioAuthenticationError) as info:
         await client.get_doorstation_pictures(7)
+
+    assert str(info.value) == LOGIN_FORM_MESSAGE.format(what="Doorstation 7 picture list")
 
     assert len(comexio.received_at("POST", LIST_PATH)) == 1
 
@@ -341,8 +366,10 @@ async def test_get_doorstation_pictures_of_a_changed_format_raises(
 ) -> None:
     comexio.serve("POST", LIST_PATH, _list_handler('{"pictures": []}'))
 
-    with pytest.raises(ComexioDataError, match="not an array"):
+    with pytest.raises(ComexioDataError) as info:
         await logged_in.get_doorstation_pictures(7)
+
+    assert str(info.value) == "Doorstation picture list is a JSON dict, not an array"
 
 
 @pytest.mark.parametrize(("ext_id", "error"), [(0, ValueError), (True, TypeError), ("7", TypeError)])
@@ -418,8 +445,10 @@ async def test_get_doorstation_picture_that_does_not_start_like_a_jpeg_raises(
     # A stream may have a boundary before its frame, a file is a JPEG from its first byte.
     comexio.serve("GET", FILE_PATH, _file_handler(b"junk" + JPEG))
 
-    with pytest.raises(ComexioDataError, match="is no complete JPEG from its first byte"):
+    with pytest.raises(ComexioDataError) as info:
         await logged_in.get_doorstation_picture(7, BELL)
+
+    assert str(info.value) == _not_a_jpeg_message(b"junk" + JPEG)
 
 
 async def test_get_doorstation_picture_needs_the_admin_session(client: ComexioClient, comexio: FakeComexio) -> None:
@@ -437,13 +466,15 @@ async def test_get_doorstation_picture_of_an_expired_session_raises_authenticati
     # A login form with status 200 where the picture should be: told apart from a file that is no JPEG.
     comexio.serve("GET", FILE_PATH, _file_handler(LOGIN_PAGE.encode(), content_type="text/html"))
 
-    with pytest.raises(ComexioAuthenticationError, match="login form"):
+    with pytest.raises(ComexioAuthenticationError) as info:
         await logged_in.get_doorstation_picture(7, BELL)
+
+    assert str(info.value) == LOGIN_FORM_MESSAGE.format(what="Doorstation 7 picture")
 
 
 @pytest.mark.parametrize(
     "body",
-    [b"", b"<html>no picture</html>", SOI + SOS + b"\x12\x34", b"\x00" * 64],
+    [b"", b"<html>no picture</html>", SOI + SOF + SOS + b"\x12\x34", b"\x00" * 64],
     ids=["empty", "html", "cut-off", "no-jpeg-at-all"],
 )
 async def test_get_doorstation_picture_that_is_no_complete_jpeg_raises(
@@ -451,10 +482,10 @@ async def test_get_doorstation_picture_that_is_no_complete_jpeg_raises(
 ) -> None:
     comexio.serve("GET", FILE_PATH, _file_handler(body))
 
-    with pytest.raises(
-        ComexioDataError, match="Doorstation 7 picture: the answer .* is no complete JPEG from its first byte"
-    ):
+    with pytest.raises(ComexioDataError) as info:
         await logged_in.get_doorstation_picture(7, BELL)
+
+    assert str(info.value) == _not_a_jpeg_message(body)
 
 
 @pytest.mark.parametrize(
@@ -470,7 +501,10 @@ async def test_the_message_of_a_non_jpeg_answer_names_its_first_two_bytes(
     with pytest.raises(ComexioDataError) as info:
         await logged_in.get_doorstation_picture(7, BELL)
 
-    assert f"{len(body)} bytes, starting {starting})" in str(info.value)
+    assert str(info.value) == (
+        f"Doorstation 7 picture: the answer ('image/jpeg', {len(body)} bytes, starting {starting}) "
+        "is no complete JPEG from its first byte"
+    )
 
 
 async def test_a_login_form_that_holds_the_jpeg_start_bytes_is_still_a_login_form(
@@ -480,8 +514,10 @@ async def test_a_login_form_that_holds_the_jpeg_start_bytes_is_still_a_login_for
     body = LOGIN_PAGE.encode() + SOI + SOS
     comexio.serve("GET", FILE_PATH, _file_handler(body, content_type="text/html"))
 
-    with pytest.raises(ComexioAuthenticationError, match="login form"):
+    with pytest.raises(ComexioAuthenticationError) as info:
         await logged_in.get_doorstation_picture(7, BELL)
+
+    assert str(info.value) == LOGIN_FORM_MESSAGE.format(what="Doorstation 7 picture")
 
 
 async def test_get_doorstation_picture_with_a_malformed_structure_names_the_picture(
@@ -490,8 +526,10 @@ async def test_get_doorstation_picture_with_a_malformed_structure_names_the_pict
     # An EOI before any scan: an image without picture data (see first_jpeg_frame).
     comexio.serve("GET", FILE_PATH, _file_handler(SOI + EOI))
 
-    with pytest.raises(ComexioDataError, match="^Doorstation 7 picture: "):
+    with pytest.raises(ComexioDataError) as info:
         await logged_in.get_doorstation_picture(7, BELL)
+
+    assert str(info.value) == "Doorstation 7 picture: Camera frame ends at offset 3 before its first scan"
 
 
 @pytest.mark.parametrize("status", [404, 403, 500])
@@ -527,8 +565,10 @@ async def test_a_picture_one_byte_over_the_cap_is_refused(
     monkeypatch.setattr(client_module, "_MAX_PICTURE_BYTES", len(JPEG))
     comexio.serve("GET", FILE_PATH, _file_handler(JPEG + b"x"))
 
-    with pytest.raises(ComexioDataError, match="the picture is larger than"):
+    with pytest.raises(ComexioDataError) as info:
         await logged_in.get_doorstation_picture(7, BELL)
+
+    assert str(info.value) == f"Doorstation 7 picture: the picture is larger than {len(JPEG)} bytes"
 
 
 async def test_read_picture_never_asks_for_more_than_one_byte_over_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -542,8 +582,10 @@ async def test_read_picture_never_asks_for_more_than_one_byte_over_the_cap(monke
 
     resp = SimpleNamespace(headers=CIMultiDict[str](), content=Content(), content_type="image/jpeg")
 
-    with pytest.raises(ComexioDataError, match="larger than 10 bytes"):
+    with pytest.raises(ComexioDataError) as info:
         await client_module._read_picture(cast("Any", resp), "picture")
+
+    assert str(info.value) == "picture: the picture is larger than 10 bytes"
 
     # Every read asks only for what is left up to one byte over the cap: 11, then 11 - 4, then 11 - 8.
     assert requested == [11, 7, 3]
@@ -574,19 +616,26 @@ async def test_read_picture_shortens_a_long_content_type_in_its_message() -> Non
     with pytest.raises(ComexioDataError) as info:
         await client_module._read_picture(cast("Any", resp), "picture")
 
-    assert "..." in str(info.value)
-    assert len(str(info.value)) < 400
+    shown = "'text/" + "x" * 194 + "..."  # the repr cut to 200 characters, then the dots
+    assert str(info.value) == (
+        f"picture: the answer ({shown}, 0 bytes, starting empty) is no complete JPEG from its first byte"
+    )
 
 
-def _buffers_in_traceback(err: BaseException | None) -> list[bytearray]:
-    """Every bytearray held by a local of a frame the exception, its cause or its context passed through."""
-    found: list[bytearray] = []
+def _buffers_in_traceback(err: BaseException | None) -> list[bytes | bytearray]:
+    """Every bytes or bytearray a local of a library frame holds, on the way of the exception, its cause, its context.
+
+    Only frames of aiocomexio count (the test's own frame holds the body it passed in). Immutable bytes count as well
+    as the buffer: a chunk of the response that a frame keeps is picture data kept alive just the same.
+    """
+    found: list[bytes | bytearray] = []
     seen: set[int] = set()
     while err is not None and id(err) not in seen:
         seen.add(id(err))
         frame = err.__traceback__
         while frame is not None:
-            found += [value for value in frame.tb_frame.f_locals.values() if isinstance(value, bytearray)]
+            if str(frame.tb_frame.f_globals.get("__name__", "")).startswith("aiocomexio."):
+                found += [value for value in frame.tb_frame.f_locals.values() if isinstance(value, bytes | bytearray)]
             frame = frame.tb_next
         found += _buffers_in_traceback(err.__cause__) + _buffers_in_traceback(err.__context__)
         err = None
@@ -614,20 +663,23 @@ def _picture_response(content: _PieceContent) -> Any:
 @pytest.mark.parametrize(
     ("body", "cap", "error", "message"),
     [
-        (JPEG, 10, ComexioDataError, "larger than 10 bytes"),  # the cap passed
-        (JPEG[:-1], 4_000_000, ComexioDataError, "no complete JPEG"),  # a cut picture
-        (b"<html>no picture</html>", 4_000_000, ComexioDataError, "no complete JPEG"),
-        (LOGIN_PAGE.encode(), 4_000_000, ComexioAuthenticationError, "login form"),  # not only the data error
+        (JPEG, 10, ComexioDataError, "picture: the picture is larger than 10 bytes"),  # the cap passed
+        (JPEG[:-1], 4_000_000, ComexioDataError, _not_a_jpeg_message(JPEG[:-1], "picture")),  # a cut picture
+        (HTML_BODY, 4_000_000, ComexioDataError, _not_a_jpeg_message(HTML_BODY, "picture")),
+        # not only the data error
+        (LOGIN_PAGE.encode(), 4_000_000, ComexioAuthenticationError, LOGIN_FORM_MESSAGE.format(what="picture")),
     ],
+    ids=["over-the-cap", "cut-off", "html", "login-form"],
 )
 async def test_a_failed_picture_read_leaves_no_picture_bytes_in_its_traceback(
     monkeypatch: pytest.MonkeyPatch, body: bytes, cap: int, error: type[Exception], message: str
 ) -> None:
     monkeypatch.setattr(client_module, "_MAX_PICTURE_BYTES", cap)
 
-    with pytest.raises(error, match=message) as info:
+    with pytest.raises(error) as info:
         await client_module._read_picture(_picture_response(_PieceContent(body)), "picture")
 
+    assert str(info.value) == message
     held = _buffers_in_traceback(info.value)
     assert held  # the frames do hold the buffer (else this proves nothing) ...
     assert not any(held)  # ... and it is empty by now
@@ -720,10 +772,12 @@ async def test_get_doorstation_picture_cut_off_by_the_server_raises_a_connection
 
     comexio.serve("GET", FILE_PATH, handler)
 
-    with pytest.raises(ComexioConnectionError, match="^Doorstation 7 picture") as info:
+    with pytest.raises(ComexioConnectionError) as info:
         await logged_in.get_doorstation_picture(7, BELL)
 
-    assert isinstance(info.value.__cause__, aiohttp.ClientError)
+    cause = info.value.__cause__
+    assert isinstance(cause, aiohttp.ClientError)
+    assert str(info.value) == f"Doorstation 7 picture failed: {client_module._transport_error_text(cause)}"
 
 
 @pytest.mark.parametrize("name", ["../secret.jpg", "a/b.jpg", "x.png", ""])
@@ -732,9 +786,10 @@ async def test_get_doorstation_picture_refuses_a_name_that_is_not_plain_before_a
 ) -> None:
     requests_before = len(comexio.requests)
 
-    with pytest.raises(ValueError, match="plain .jpg file name"):
+    with pytest.raises(ValueError) as info:
         await logged_in.get_doorstation_picture(7, name)
 
+    assert str(info.value) == NOT_PLAIN_MESSAGE
     assert len(comexio.requests) == requests_before
 
 
@@ -748,3 +803,150 @@ async def test_get_doorstation_picture_refuses_a_bad_extension_id_before_any_req
         await logged_in.get_doorstation_picture(ext_id, BELL)  # type: ignore[arg-type]
 
     assert len(comexio.requests) == requests_before
+
+
+# --- the frame header: a scan with no start-of-frame marker before it is no picture a decoder can read ---------------
+
+_SOF_CODES = [0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF]
+_NOT_SOF_CODES = {0xC4: "dht", 0xC8: "jpg", 0xCC: "dac"}
+_APP0 = b"\xff\xe0" + (4).to_bytes(2) + b"JF"
+_SCAN = b"\x12\x34\x56"
+
+
+def _segment(code: int, payload: bytes = b"\x00") -> bytes:
+    return bytes((0xFF, code)) + (len(payload) + 2).to_bytes(2) + payload
+
+
+@pytest.mark.parametrize(
+    "head",
+    [SOI, SOI + _APP0],
+    ids=["scan-right-after-soi", "scan-after-another-segment"],
+)
+async def test_get_doorstation_picture_with_a_scan_before_any_frame_header_raises(
+    logged_in: ComexioClient, comexio: FakeComexio, head: bytes
+) -> None:
+    # Every marker is where the structure wants it, but there is no SOF, no size to decode to.
+    comexio.serve("GET", FILE_PATH, _file_handler(head + SOS + _SCAN + EOI))
+
+    with pytest.raises(ComexioDataError) as info:
+        await logged_in.get_doorstation_picture(7, BELL)
+
+    offset = len(head) + 1  # the offset names the code byte of the marker, one after its 0xFF
+    assert (
+        str(info.value) == f"Doorstation 7 picture: Camera frame has a scan at offset {offset} before its frame header"
+    )
+
+
+def test_a_stream_frame_is_still_read_without_a_frame_header() -> None:
+    frame = SOI + _APP0 + SOS + _SCAN + EOI
+
+    assert first_jpeg_frame(frame) == frame
+    assert JpegFrameReader().frame(bytearray(frame)) == frame
+
+
+def test_a_frame_header_is_required_only_when_asked_for() -> None:
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(SOI + _APP0 + SOS, require_frame_header=True)
+
+    offset = len(SOI + _APP0) + 1  # the offset names the code byte of the marker, one after its 0xFF
+    assert str(info.value) == f"Camera frame has a scan at offset {offset} before its frame header"
+
+
+def test_a_half_received_scan_marker_with_no_frame_header_raises_at_once() -> None:
+    with pytest.raises(ComexioDataError) as info:
+        JpegFrameReader(require_frame_header=True).frame(bytearray(SOI + SOS[:2]))
+
+    assert str(info.value) == f"Camera frame has a scan at offset {len(SOI) + 1} before its frame header"
+
+
+@pytest.mark.parametrize("code", _SOF_CODES, ids=[f"sof-{code:02x}" for code in _SOF_CODES])
+def test_every_start_of_frame_marker_is_a_frame_header(code: int) -> None:
+    frame = SOI + _APP0 + _segment(code, SOF[4:]) + SOS + _SCAN + EOI
+
+    assert first_jpeg_frame(frame, require_frame_header=True) == frame
+
+
+@pytest.mark.parametrize("code", list(_NOT_SOF_CODES), ids=list(_NOT_SOF_CODES.values()))
+def test_a_marker_between_the_sof_codes_that_is_no_frame_header_does_not_count(code: int) -> None:
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(SOI + _segment(code) + SOS, require_frame_header=True)
+
+    offset = len(SOI + _segment(code)) + 1  # the offset names the code byte of the marker, one after its 0xFF
+    assert str(info.value) == f"Camera frame has a scan at offset {offset} before its frame header"
+
+
+@pytest.mark.parametrize(
+    "neighbour",
+    [_segment(0xBF), b"\xff\xd0"],
+    ids=["just-below-the-sof-range", "restart-marker-just-above"],
+)
+def test_the_markers_next_to_the_sof_range_are_no_frame_header_either(neighbour: bytes) -> None:
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(SOI + neighbour + SOS, require_frame_header=True)
+
+    offset = len(SOI + neighbour) + 1  # the offset names the code byte of the marker, one after its 0xFF
+    assert str(info.value) == f"Camera frame has a scan at offset {offset} before its frame header"
+
+
+def test_a_second_scan_needs_no_second_frame_header() -> None:
+    frame = SOI + SOF + SOS + b"\x12\x34" + SOS + b"\x56\x78" + EOI
+
+    assert first_jpeg_frame(frame, require_frame_header=True) == frame
+
+
+@pytest.mark.parametrize("cut", range(1, len(SOF)), ids=[f"cut-after-{cut}-bytes" for cut in range(1, len(SOF))])
+def test_a_frame_header_that_arrives_in_pieces_still_counts(cut: int) -> None:
+    buffer = bytearray(SOI + SOF[:cut])
+    reader = JpegFrameReader(require_frame_header=True)
+    assert reader.frame(buffer) is None  # the SOF segment is not complete, the SOS has not come
+
+    buffer += SOF[cut:] + SOS + _SCAN + EOI
+
+    assert reader.frame(buffer) == JPEG
+
+
+# --- the list is capped while it is read, not after it has been read and decoded ---------------------------------
+
+
+class _EndlessContent:
+    """A body that never ends, handed over in pieces of four bytes."""
+
+    def __init__(self) -> None:
+        self.requested: list[int] = []
+
+    async def read(self, size: int) -> bytes:
+        self.requested.append(size)
+        return b"x" * min(size, 4)
+
+
+async def test_a_text_read_stops_at_the_cap_a_caller_names() -> None:
+    content = _EndlessContent()
+    resp = SimpleNamespace(headers=CIMultiDict[str](), content=content, content_type="text/html", charset="utf-8")
+
+    with pytest.raises(ComexioDataError) as info:
+        await client_module._response_text(cast("Any", resp), "list", max_bytes=10)
+
+    assert str(info.value) == "list: response is longer than 10 bytes"
+    assert content.requested == [11, 7, 3]  # one byte over the cap and not a byte more, whatever the generic cap is
+
+
+async def test_get_doorstation_pictures_refuses_a_list_over_the_cap_while_reading_it(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    cap = pictures_module.MAX_LIST_CHARS
+    assert cap < client_module._RESPONSE_MAX_BYTES  # the generic cap would have let this answer through
+    comexio.serve("POST", LIST_PATH, _list_handler(" " * (cap + 1)))
+
+    with pytest.raises(ComexioDataError) as info:
+        await logged_in.get_doorstation_pictures(7)
+
+    assert str(info.value) == f"Doorstation 7 picture list: response is longer than {cap} bytes"
+
+
+async def test_get_doorstation_pictures_reads_a_list_of_exactly_the_cap(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    text = json.dumps([BELL])
+    comexio.serve("POST", LIST_PATH, _list_handler(text + " " * (pictures_module.MAX_LIST_CHARS - len(text))))
+
+    assert [picture.name for picture in await logged_in.get_doorstation_pictures(7)] == [BELL]

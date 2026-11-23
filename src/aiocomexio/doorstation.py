@@ -35,6 +35,9 @@ _EOI_CODE = 0xD9
 # The EOI marker that ends an image; a reader of a stream needs to look for a complete frame only once it arrived.
 JPEG_EOI = bytes((_MARKER_PREFIX, _EOI_CODE))
 _SOS_CODE = 0xDA
+# The start-of-frame markers SOF0-SOF15 carry the image's size and components; the codes between them that are no
+# frame header are DHT (0xC4), JPG (0xC8) and DAC (0xCC). A scan is read with the header of its frame (T.81, B.2.2).
+_SOF_CODES = frozenset(set(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC})
 # Codes of markers without a length field: TEM and the restart markers RST0-RST7.
 _STANDALONE_CODES = frozenset({0x01, *range(0xD0, 0xD8)})
 # Codes that cannot follow the start of an image as a segment: a stuffed byte belongs into a scan only, and a second
@@ -168,7 +171,7 @@ def _warn_on_shared_cameras(doorstations: Mapping[int, Doorstation]) -> None:
             _LOGGER.warning("Doorstations of extensions %s share the camera %d", sorted(ext_ids), camera_id)
 
 
-def first_jpeg_frame(data: bytes | bytearray) -> bytes | None:
+def first_jpeg_frame(data: bytes | bytearray, *, require_frame_header: bool = False) -> bytes | None:
     """The first complete JPEG image in data (e.g. the start of an MJPEG stream), None if it is not complete yet.
 
     The image runs from its SOI marker to the EOI marker that ends it: the segments before a scan are skipped by
@@ -177,9 +180,11 @@ def first_jpeg_frame(data: bytes | bytearray) -> bytes | None:
     a JPEG needs one, a segment shorter than its length field, a stuffed byte or second SOI between the segments, an
     SOS header whose length does not fit its 1 to 4 scan components, a scan without entropy-coded data (nothing but
     restart markers counts as none), or an EOI before the first scan (an image without picture data) raises
-    ComexioDataError.
+    ComexioDataError. With require_frame_header a scan before any start-of-frame marker (SOF0 to SOF15: the size and
+    components a decoder needs) raises as well; a stream is read without it, a still image that is handed on as a
+    picture with it.
     """
-    return JpegFrameReader().frame(data)
+    return JpegFrameReader(require_frame_header=require_frame_header).frame(data)
 
 
 class JpegFrameReader:
@@ -187,12 +192,14 @@ class JpegFrameReader:
 
     Each call goes on where the previous one stopped, so a stream read chunk by chunk is walked once rather than once
     per chunk. Pass the same buffer to every call and only ever append to it; once a call returned a frame or raised,
-    the reader is done.
+    the reader is done. With require_frame_header a scan that comes before a start-of-frame marker raises.
     """
 
-    __slots__ = ("_pos", "_scan_from", "_scan_pos", "_scanned", "_start")
+    __slots__ = ("_framed", "_pos", "_require_frame_header", "_scan_from", "_scan_pos", "_scanned", "_start")
 
-    def __init__(self) -> None:
+    def __init__(self, *, require_frame_header: bool = False) -> None:
+        self._require_frame_header = require_frame_header
+        self._framed = False  # a start-of-frame marker has been passed
         self._start = -1  # offset of the SOI, -1 until it arrived
         self._pos = 0  # where the walk goes on: the search for the SOI, then the next marker
         self._scan_from: int | None = None  # inside a scan: where its entropy-coded data starts
@@ -247,9 +254,12 @@ class JpegFrameReader:
         code = data[code_at]
         if code in _NO_SEGMENT_CODES:
             raise ComexioDataError(f"Camera frame has the unexpected JPEG marker 0x{code:02X} at offset {code_at}")
+        if code == _SOS_CODE and self._require_frame_header and not self._framed:
+            raise ComexioDataError(f"Camera frame has a scan at offset {code_at} before its frame header")
         end = code_at + 1 if code in _STANDALONE_CODES else _segment_end(data, code_at + 1)
         if end is None:
             return False
+        self._framed = self._framed or code in _SOF_CODES
         if code == _SOS_CODE:
             if code_at + _SOS_COMPONENTS_OFFSET >= len(data):
                 return False  # the component count has not arrived yet
