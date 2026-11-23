@@ -34,7 +34,7 @@ _PLAIN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.jpg", re.ASCII)
 # The name the Doorstation gives a picture: year (two digits), month, day, hour, minute, second, the kind.
 _PICTURE_NAME = re.compile(r"(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)-(\d\d)_([A-Za-z0-9._-]+)\.jpg", re.ASCII)
 _YEAR_BASE = 2000
-# What the kind token of a name says; a token that holds "shot" is a screenshot, as the page of Comexio reads it.
+# What the kind token of a name says; a name that holds "shot" anywhere is a screenshot, as Comexio's page reads it.
 _BELL_TOKEN = "bell"
 _MOTION_TOKEN = "pir"
 _SCREENSHOT_TOKEN = "shot"

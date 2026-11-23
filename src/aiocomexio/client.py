@@ -3930,16 +3930,21 @@ async def _read_picture(resp: aiohttp.ClientResponse, what: str) -> bytes:
         body += chunk
     if len(body) > _MAX_PICTURE_BYTES:
         raise ComexioDataError(f"{what}: the picture is larger than {_MAX_PICTURE_BYTES} bytes")
-    try:
-        frame = first_jpeg_frame(body)
-    except ComexioDataError as err:
-        raise ComexioDataError(f"{what}: {err}") from err
-    if frame is not None and body.startswith(_JPEG_SOI):  # a file is a JPEG from its first byte, unlike a stream
-        return frame
+    # A file is a JPEG from its first byte, unlike a stream that may carry a boundary before its frame. Only such a
+    # body goes to the parser: a foreign body (the login form) that happens to hold the bytes ff d8 must reach the
+    # login-form check below and not end in a malformed-structure error.
+    if body.startswith(_JPEG_SOI):
+        try:
+            frame = first_jpeg_frame(body)
+        except ComexioDataError as err:
+            raise ComexioDataError(f"{what}: {err}") from err
+        if frame is not None:
+            return frame
     if _LOGIN_FORM_SUBMIT_MARKER.encode() in body:
         raise ComexioAuthenticationError(f"Comexio served the login form, the session is not logged in ({what})")
     raise ComexioDataError(
-        f"{what}: the answer ({_excerpt(resp.content_type)}, {len(body)} bytes) is no complete JPEG from its first byte"
+        f"{what}: the answer ({_excerpt(resp.content_type)}, {len(body)} bytes, starting {body[:2].hex() or 'empty'}) "
+        "is no complete JPEG from its first byte"
     )
 
 
