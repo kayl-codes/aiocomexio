@@ -14,6 +14,7 @@ import logging
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from .config import _log_safe, _strict_id
 from .exceptions import ComexioDataError
@@ -70,6 +71,14 @@ _DCT_PRECISIONS = frozenset({8, 12})
 _LOSSLESS_PRECISIONS = range(2, 17)
 _MAX_SAMPLING_FACTOR = 4
 _MAX_QUANTIZATION_TABLE = 3
+# Scan parameters Ss, Se and Ah/Al by process (T.81, B.2.3 and Table B.3, G.1.1.1.1, H.1.2.1): a sequential DCT scan
+# holds the whole block (Ss 0, Se 63) without successive approximation; a progressive one a DC scan (Ss = Se = 0) or
+# the AC band of one component, with Ah 0 or Al + 1 and shifts up to 13; a lossless one a predictor 0 to 7 in Ss, Se 0,
+# Ah 0 and a point transform (the low nibble, 0 to 15, whatever it is).
+_PROGRESSIVE_CODES = frozenset({0xC2, 0xC6, 0xCA, 0xCE})
+_LAST_COEFFICIENT = 63
+_MAX_SUCCESSIVE_SHIFT = 13
+_MAX_PREDICTOR = 7
 # Offsets from the SOF code: precision, height, width, Nf and the first component.
 _SOF_PRECISION_OFFSET = 3
 _SOF_HEIGHT_OFFSET = 4
@@ -216,7 +225,7 @@ class JpegFrameReader:
     """
 
     __slots__ = (
-        "_frame_ids",
+        "_frame",
         "_framed",
         "_pos",
         "_require_frame_header",
@@ -229,7 +238,7 @@ class JpegFrameReader:
     def __init__(self, *, require_frame_header: bool = False) -> None:
         self._require_frame_header = require_frame_header
         self._framed = False  # a start-of-frame marker has been passed
-        self._frame_ids: frozenset[int] | None = None  # component ids of the checked frame header (frame headers only)
+        self._frame: _FrameHeader | None = None  # the checked frame header (only with require_frame_header)
         self._start = -1  # offset of the SOI, -1 until it arrived
         self._pos = 0  # where the walk goes on: the search for the SOI, then the next marker
         self._scan_from: int | None = None  # inside a scan: where its entropy-coded data starts
@@ -292,7 +301,7 @@ class JpegFrameReader:
         if self._require_frame_header and code in _SOF_CODES:
             if end > len(data):
                 return False  # the frame header has not arrived whole yet: the next call checks it
-            self._frame_ids = _check_sof_header(data, code_at, end)
+            self._frame = _check_sof_header(data, code_at, end)
         self._framed = self._framed or code in _SOF_CODES
         if code == _SOS_CODE and not self._entered_scan(data, code_at, end):
             return False
@@ -303,9 +312,9 @@ class JpegFrameReader:
         """Whether the SOS header ending at end has arrived far enough to be checked; the scan then begins at end."""
         if code_at + _SOS_COMPONENTS_OFFSET >= len(data):
             return False  # the component count has not arrived yet
-        if self._frame_ids is not None and end > len(data):
-            return False  # the scan's component selectors have not arrived whole yet: the next call checks them
-        _check_sos_header(data, code_at, end, self._frame_ids)
+        if self._frame is not None and end > len(data):
+            return False  # the scan's header has not arrived whole yet: the next call checks it
+        _check_sos_header(data, code_at, end, self._frame)
         self._scanned = True
         self._scan_from = self._scan_pos = end
         return True
@@ -321,11 +330,18 @@ def _segment_end(data: bytes | bytearray, pos: int) -> int | None:
     return pos + length
 
 
-def _check_sos_header(data: bytes | bytearray, code_at: int, end: int, frame_ids: frozenset[int] | None) -> None:
+class _FrameHeader(NamedTuple):
+    """What a scan is checked against: the marker code (the process) and the component ids of its frame header."""
+
+    code: int
+    ids: frozenset[int]
+
+
+def _check_sos_header(data: bytes | bytearray, code_at: int, end: int, frame: _FrameHeader | None) -> None:
     """Raise ComexioDataError unless the SOS segment from code_at to end fits its 1 to 4 components.
 
-    With the component ids of the frame header (frame_ids) each scan component must name a different one of them
-    (T.81, B.2.3: each selector matches a component of the frame header).
+    With its frame header each scan component must name a different component of it (T.81, B.2.3), and Ss, Se and
+    Ah/Al must be values the process of the frame allows.
     """
     components = data[code_at + _SOS_COMPONENTS_OFFSET]
     length = end - code_at - 1  # the length field, which counts itself but not the code
@@ -334,20 +350,36 @@ def _check_sos_header(data: bytes | bytearray, code_at: int, end: int, frame_ids
         or length != _SOS_FIXED_LENGTH + _SOS_BYTES_PER_COMPONENT * components
     ):
         raise ComexioDataError(f"Camera frame has a malformed SOS header (length {length}) at offset {code_at}")
-    if frame_ids is None:
+    if frame is None:
         return
     first = code_at + _SOS_COMPONENTS_OFFSET + 1
+    after_components = first + _SOS_BYTES_PER_COMPONENT * components
     selectors = [data[first + at] for at in range(0, _SOS_BYTES_PER_COMPONENT * components, _SOS_BYTES_PER_COMPONENT)]
-    if len(set(selectors)) != len(selectors) or not frame_ids.issuperset(selectors):
+    if len(set(selectors)) != len(selectors) or not frame.ids.issuperset(selectors):
         raise ComexioDataError(f"Camera frame has a scan whose components do not fit its frame at offset {code_at}")
+    spectral_start, spectral_end, approximation = data[after_components : after_components + 3]
+    if not _scan_parameters_are_sound(frame.code, components, spectral_start, spectral_end, approximation):
+        raise ComexioDataError(f"Camera frame has a scan with parameters its frame cannot have at offset {code_at}")
 
 
-def _check_sof_header(data: bytes | bytearray, code_at: int, end: int) -> frozenset[int]:
-    """The component ids of the SOF segment from code_at to end; raises ComexioDataError unless it is readable."""
+def _scan_parameters_are_sound(code: int, components: int, ss: int, se: int, approximation: int) -> bool:
+    """Whether Ss, Se and the Ah/Al byte are values the process of the SOF marker allows (see the constants)."""
+    high, low = divmod(approximation, 16)
+    if code in _LOSSLESS_CODES:
+        return ss <= _MAX_PREDICTOR and se == 0 and high == 0
+    if code not in _PROGRESSIVE_CODES:
+        return (ss, se, approximation) == (0, _LAST_COEFFICIENT, 0)
+    in_band = ss <= se <= _LAST_COEFFICIENT and (ss == 0) == (se == 0)  # a DC scan is Ss = Se = 0
+    refines_next_bit = high in {0, low + 1}
+    return in_band and (ss == 0 or components == 1) and refines_next_bit and max(high, low) <= _MAX_SUCCESSIVE_SHIFT
+
+
+def _check_sof_header(data: bytes | bytearray, code_at: int, end: int) -> _FrameHeader:
+    """The code and component ids of the SOF segment from code_at to end; raises ComexioDataError unless readable."""
     length = end - code_at - 1  # the length field, which counts itself but not the code
     if length < _SOF_FIXED_LENGTH or not _frame_header_is_sound(data, code_at, length):
         raise ComexioDataError(f"Camera frame has a malformed frame header (length {length}) at offset {code_at}")
-    return frozenset(_sof_component_ids(data, code_at))
+    return _FrameHeader(data[code_at], frozenset(_sof_component_ids(data, code_at)))
 
 
 def _sof_component_ids(data: bytes | bytearray, code_at: int) -> list[int]:

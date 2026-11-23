@@ -182,11 +182,11 @@ def test_an_empty_answer_is_no_picture(text: str) -> None:
     [
         ("\xa0null\xa0", 0),
         ("null\xa0", 4),
-        (" null", 0),
+        ("\u2003null", 0),
         ("\x0bnull", 0),
         ("\x0cnull", 0),
         ("\xa0", 0),
-        ("null ", 4),
+        ("null\u2028", 4),
     ],
     ids=[
         "nbsp-both-sides",
@@ -860,6 +860,21 @@ _SOF_CODES = [0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 
 _NOT_SOF_CODES = {0xC4: "dht", 0xC8: "jpg", 0xCC: "dac"}
 _APP0 = b"\xff\xe0" + (4).to_bytes(2) + b"JF"
 _SCAN = b"\x12\x34\x56"
+_PROGRESSIVE_CODES = {0xC2, 0xC6, 0xCA, 0xCE}
+_LOSSLESS_CODES = {0xC3, 0xC7, 0xCB, 0xCF}
+
+
+def _scan_for(code: int) -> bytes:
+    """An SOS header of one component with parameters that fit the process of the SOF marker code."""
+    if code in _LOSSLESS_CODES:
+        parameters = b"\x01\x00\x00"  # predictor 1, no point transform
+    elif code in _PROGRESSIVE_CODES:
+        parameters = b"\x00\x00\x00"  # the DC scan
+    else:
+        parameters = b"\x00\x3f\x00"  # the whole block
+    return (
+        b"\xff\xda" + (8).to_bytes(2) + b"\x01\x01\x00" + parameters
+    )  # Ns, component 1, table selectors, then the rest
 
 
 def _segment(code: int, payload: bytes = b"\x00") -> bytes:
@@ -913,7 +928,7 @@ def test_a_half_received_scan_marker_with_no_frame_header_raises_at_once() -> No
 
 @pytest.mark.parametrize("code", _SOF_CODES, ids=[f"sof-{code:02x}" for code in _SOF_CODES])
 def test_every_start_of_frame_marker_is_a_frame_header(code: int) -> None:
-    frame = SOI + _APP0 + _segment(code, SOF[4:]) + SOS + _SCAN + EOI
+    frame = SOI + _APP0 + _segment(code, SOF[4:]) + _scan_for(code) + _SCAN + EOI
 
     assert first_jpeg_frame(frame, require_frame_header=True) == frame
 
@@ -975,7 +990,7 @@ def _frame_header(
 
 
 def _picture_with(frame_header: bytes) -> bytes:
-    return SOI + frame_header + SOS + _SCAN + EOI
+    return SOI + frame_header + _scan_for(frame_header[1]) + _SCAN + EOI
 
 
 def test_the_synthetic_frame_header_is_the_one_the_tests_build() -> None:
@@ -1141,10 +1156,10 @@ def test_the_precision_table_names_every_start_of_frame_marker() -> None:
 _THREE_COMPONENTS = _frame_header(components=(b"\x01\x11\x00", b"\x02\x11\x00", b"\x03\x11\x00"))
 
 
-def _scan_header(*selectors: int) -> bytes:
-    """An SOS segment whose scan names the given components."""
-    names = b"".join(bytes((selector, 0)) for selector in selectors)
-    return _segment(0xDA, bytes((len(selectors),)) + names + b"\x00\x3f\x00")
+def _scan_header(*selectors: int, parameters: bytes = b"\x00\x3f\x00", tables: int = 0) -> bytes:
+    """An SOS segment whose scan names the given components; parameters are Ss, Se and Ah/Al, tables the Td/Ta byte."""
+    names = b"".join(bytes((selector, tables)) for selector in selectors)
+    return _segment(0xDA, bytes((len(selectors),)) + names + parameters)
 
 
 def _scan_mismatch_message(frame_header: bytes) -> str:
@@ -1212,6 +1227,207 @@ def test_a_scan_header_that_arrives_in_pieces_is_taken_once_whole(cut: int) -> N
     buffer += header[cut:] + _SCAN + EOI
 
     assert reader.frame(buffer) == bytes(buffer)
+
+
+# --- the scan parameters Ss, Se and Ah/Al fit the process of the frame (T.81, Table B.3, G.1.1.1.1, H.1.2.1) --------
+
+_SEQUENTIAL_CODES = [0xC0, 0xC1, 0xC5, 0xC9, 0xCD]
+# (Ss, Se, Ah/Al byte) -> accepted. A sequential scan holds the whole block, a progressive one a DC scan or an AC
+# band of one component with successive approximation, a lossless one a predictor 0 to 7 and a point transform.
+_SEQUENTIAL_SCANS = {
+    (0, 63, 0x00): True,
+    (1, 63, 0x00): False,
+    (0, 62, 0x00): False,
+    (0, 64, 0x00): False,
+    (0, 0, 0x00): False,
+    (0, 63, 0x01): False,
+    (0, 63, 0x10): False,
+}
+_PROGRESSIVE_SCANS = {
+    (0, 0, 0x00): True,  # DC, first scan
+    (0, 0, 0x01): True,  # DC with a point transform
+    (0, 0, 0x10): True,  # DC refinement of one bit
+    (0, 0, 0x21): True,  # DC refinement from bit 2 to bit 1
+    (0, 0, 0xDC): True,  # from bit 13 to bit 12: the largest shifts
+    (0, 0, 0x0D): True,  # a first scan with the largest point transform
+    (1, 5, 0xDC): True,
+    (0, 0, 0x11): False,  # a refinement of the bit it already holds
+    (0, 0, 0x12): False,  # a refinement from below the last bit
+    (1, 5, 0x11): False,
+    (1, 63, 0x00): True,  # the AC band of one component
+    (1, 5, 0x21): True,
+    (63, 63, 0x00): True,  # the last coefficient alone
+    (0, 63, 0x00): False,  # a scan from the DC on is the DC scan only
+    (0, 1, 0x00): False,
+    (1, 0, 0x00): False,  # Ss after Se
+    (5, 4, 0x00): False,
+    (1, 64, 0x00): False,
+    (0, 0, 0x20): False,  # a refinement continues from the bit above the last one
+    (0, 0, 0x0E): False,  # a shift of 14
+    (0, 0, 0xED): False,  # from bit 14 to bit 13: right order, shift too large
+    (0, 0, 0x1F): False,  # the low shift 15
+}
+_LOSSLESS_SCANS = {
+    (1, 0, 0x00): True,
+    (0, 0, 0x00): True,  # no prediction (differential frames)
+    (7, 0, 0x00): True,
+    (7, 0, 0x0F): True,  # the largest point transform
+    (8, 0, 0x00): False,
+    (1, 1, 0x00): False,
+    (1, 63, 0x00): False,
+    (1, 0, 0x10): False,
+}
+_PARAMETER_CASES = [
+    (code, params, accepted)
+    for codes, scans in (
+        (_SEQUENTIAL_CODES, _SEQUENTIAL_SCANS),
+        (sorted(_PROGRESSIVE_CODES), _PROGRESSIVE_SCANS),
+        (sorted(_LOSSLESS_CODES), _LOSSLESS_SCANS),
+    )
+    for code in codes
+    for params, accepted in scans.items()
+]
+
+
+_PROGRESSIVE_THREE = _frame_header(code=0xC2, components=(b"\x01\x11\x00", b"\x02\x11\x00", b"\x03\x11\x00"))
+
+
+def _scan_parameters_message(frame_header: bytes) -> str:
+    offset = len(SOI) + len(frame_header) + 1  # the code byte of the SOS marker, one after its 0xFF
+    return f"Camera frame has a scan with parameters its frame cannot have at offset {offset}"
+
+
+@pytest.mark.parametrize(
+    ("code", "params", "accepted"),
+    _PARAMETER_CASES,
+    ids=[f"sof-{code:02x}-ss{ss}-se{se}-a{approx:02x}" for code, (ss, se, approx), _ in _PARAMETER_CASES],
+)
+def test_the_scan_parameters_follow_the_process_of_the_frame(
+    code: int, params: tuple[int, int, int], accepted: bool
+) -> None:
+    frame_header = _frame_header(code=code)
+    picture = SOI + frame_header + _scan_header(1, parameters=bytes(params)) + _SCAN + EOI
+
+    if accepted:
+        assert first_jpeg_frame(picture, require_frame_header=True) == picture
+    else:
+        with pytest.raises(ComexioDataError) as info:
+            first_jpeg_frame(picture, require_frame_header=True)
+        assert str(info.value) == _scan_parameters_message(frame_header)
+
+
+def test_the_precision_and_parameter_tables_name_every_start_of_frame_marker() -> None:
+    assert sorted({*_SEQUENTIAL_CODES, *_PROGRESSIVE_CODES, *_LOSSLESS_CODES}) == sorted(_SOF_CODES)
+
+
+@pytest.mark.parametrize(
+    ("parameters", "accepted"),
+    [(b"\x00\x00\x00", True), (b"\x01\x3f\x00", False), (b"\x01\x05\x00", False)],
+    ids=["dc-scan-of-three-components", "ac-band-of-three-components", "short-ac-band-of-three-components"],
+)
+def test_an_ac_scan_of_a_progressive_frame_holds_one_component(parameters: bytes, accepted: bool) -> None:
+    picture = SOI + _PROGRESSIVE_THREE + _scan_header(1, 2, 3, parameters=parameters) + _SCAN + EOI
+
+    if accepted:
+        assert first_jpeg_frame(picture, require_frame_header=True) == picture
+    else:
+        with pytest.raises(ComexioDataError) as info:
+            first_jpeg_frame(picture, require_frame_header=True)
+        assert str(info.value) == _scan_parameters_message(_PROGRESSIVE_THREE)
+
+
+_VALID_PARAMETERS = {0xC0: b"\x00\x3f\x00", 0xC2: b"\x00\x00\x00", 0xC3: b"\x01\x00\x00"}
+
+
+@pytest.mark.parametrize("tables", [0x00, 0x11, 0x33, 0xFF], ids=["zero", "one-one", "three-three", "all-ones"])
+@pytest.mark.parametrize("code", list(_VALID_PARAMETERS), ids=[f"sof-{code:02x}" for code in _VALID_PARAMETERS])
+def test_the_table_selectors_of_a_scan_are_not_judged(code: int, tables: int) -> None:
+    scan = _scan_header(1, parameters=_VALID_PARAMETERS[code], tables=tables)
+    picture = SOI + _frame_header(code=code) + scan + _SCAN + EOI
+
+    assert first_jpeg_frame(picture, require_frame_header=True) == picture
+
+
+def test_the_table_selectors_of_a_scan_of_three_components_are_not_judged() -> None:
+    picture = SOI + _THREE_COMPONENTS + _scan_header(1, 2, 3, tables=0xFF) + _SCAN + EOI
+
+    assert first_jpeg_frame(picture, require_frame_header=True) == picture
+
+
+def test_the_second_scan_of_a_frame_has_its_parameters_checked_too() -> None:
+    frame_header = _frame_header(code=0xC2)
+    first_scan = _scan_header(1, parameters=b"\x00\x00\x00") + _SCAN
+    accepted = SOI + frame_header + first_scan + _scan_header(1, parameters=b"\x01\x3f\x00") + _SCAN + EOI
+    refused = SOI + frame_header + first_scan + _scan_header(1, parameters=b"\x00\x3f\x00") + _SCAN + EOI
+
+    assert first_jpeg_frame(accepted, require_frame_header=True) == accepted
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(refused, require_frame_header=True)
+
+    assert str(info.value) == _scan_parameters_message(frame_header + first_scan)
+
+
+def test_a_later_frame_header_sets_the_process_the_next_scan_is_checked_against() -> None:
+    sequential = _frame_header()
+    progressive = _frame_header(code=0xC2)
+    first_scan = _scan_header(1) + _SCAN
+    ac_scan = _scan_header(1, parameters=b"\x01\x3f\x00") + _SCAN
+    accepted = SOI + sequential + first_scan + progressive + ac_scan + EOI
+    refused = SOI + progressive + _scan_header(1, parameters=b"\x00\x00\x00") + _SCAN + sequential + ac_scan + EOI
+
+    assert first_jpeg_frame(accepted, require_frame_header=True) == accepted
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(refused, require_frame_header=True)
+
+    prefix = progressive + _scan_header(1, parameters=b"\x00\x00\x00") + _SCAN + sequential
+    assert str(info.value) == _scan_parameters_message(prefix)
+
+
+@pytest.mark.parametrize(
+    "cut",
+    range(1, len(_scan_header(1, parameters=b"\x01\x3f\x00"))),
+    ids=[f"cut-after-{cut}-bytes" for cut in range(1, len(_scan_header(1, parameters=b"\x01\x3f\x00")))],
+)
+def test_a_scan_header_with_bad_parameters_that_arrives_in_pieces_is_refused_once_whole(cut: int) -> None:
+    header = _scan_header(1, parameters=b"\x01\x3f\x00")
+    reader = JpegFrameReader(require_frame_header=True)
+    buffer = bytearray(SOI + _frame_header() + header[:cut])
+    assert reader.frame(buffer) is None  # the segment is not whole yet: not judged yet
+
+    buffer += header[cut:] + _SCAN + EOI
+
+    with pytest.raises(ComexioDataError) as info:
+        reader.frame(buffer)
+
+    assert str(info.value) == _scan_parameters_message(_frame_header())
+
+
+def test_a_scan_that_fails_both_checks_is_reported_as_the_component_mismatch() -> None:
+    picture = SOI + _frame_header() + _scan_header(9, parameters=b"\x01\x00\x00") + _SCAN + EOI
+
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(picture, require_frame_header=True)
+
+    assert str(info.value) == _scan_mismatch_message(_frame_header())
+
+
+def test_a_progressive_picture_of_several_scans_is_accepted() -> None:
+    scans = [
+        _scan_header(1, 2, 3, parameters=b"\x00\x00\x01"),  # DC of all components, one bit short
+        _scan_header(1, parameters=b"\x01\x05\x01"),  # AC bands
+        _scan_header(1, parameters=b"\x06\x3f\x01"),
+        _scan_header(1, parameters=b"\x01\x3f\x10"),  # AC refinement
+        _scan_header(1, 2, 3, parameters=b"\x00\x00\x10"),  # DC refinement
+    ]
+    picture = SOI + _PROGRESSIVE_THREE + b"".join(scan + _SCAN for scan in scans) + EOI
+
+    assert first_jpeg_frame(picture, require_frame_header=True) == picture
+
+
+def test_a_stream_frame_is_read_whatever_scan_parameters_it_holds() -> None:
+    picture = SOI + _frame_header(code=0xC2) + _scan_header(1, parameters=b"\x40\x3f\xff") + _SCAN + EOI
+
+    assert first_jpeg_frame(picture) == picture
 
 
 @pytest.mark.parametrize(
