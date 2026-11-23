@@ -1246,6 +1246,7 @@ class ComexioClient:
             what=f"Doorstation {ext_id} picture list",
             max_bytes=MAX_LIST_CHARS,  # a text is never longer in characters than in bytes
             data={"cameraId": str(ext_id)},
+            headers=self._xhr_headers(_ADMIN_PATH),  # like the board's other POSTs, e.g. the dashboard refresh
         )
         return parse_picture_list(text)
 
@@ -4667,26 +4668,29 @@ async def _response_text(
         raise ComexioDataError(f"{what}: the answer came {_excerpt(encoding)}-encoded, not unencoded")
     cap = _RESPONSE_MAX_BYTES if max_bytes is None else max_bytes
     body = bytearray()
-    while (left := cap + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
-        body += chunk
-    if len(body) > cap:
-        body.clear()  # the frame stays in the traceback of the error with its locals: the last chunk too
-        chunk = b""
-        raise ComexioDataError(f"{what}: response is longer than {cap} bytes")
-    encoding = _text_encoding(resp)
-    detail = ""
+    chunk = b""
     try:
-        return body.decode(encoding, errors=errors)
-    except UnicodeDecodeError as err:
-        detail = f" (byte {err.start}: {err.reason})"
-    except UnicodeError:  # a codec may raise a plain UnicodeError, which has no position
-        pass
-    # Raised outside the handlers, so it has neither cause nor context: the UnicodeDecodeError holds the whole body
-    # (its object attribute), and a page with a password in it would travel on inside the exception. The frame
-    # stays in the traceback with its locals, so the body is emptied too (the last chunk is empty here: the read
-    # ended on an empty one).
-    body.clear()
-    raise ComexioDataError(f"{what}: response is not valid {encoding}{detail}")
+        while (left := cap + 1 - len(body)) > 0 and (chunk := await resp.content.read(left)):
+            body += chunk
+        if len(body) > cap:
+            raise ComexioDataError(f"{what}: response is longer than {cap} bytes")
+        encoding = _text_encoding(resp)
+        detail = ""
+        try:
+            return body.decode(encoding, errors=errors)
+        except UnicodeDecodeError as err:
+            detail = f" (byte {err.start}: {err.reason})"
+        except UnicodeError:  # a codec may raise a plain UnicodeError, which has no position
+            pass
+        # Raised outside the handlers, so it has neither cause nor context: the UnicodeDecodeError holds the whole
+        # body (its object attribute), and a page with a password in it would travel on inside the exception.
+        raise ComexioDataError(f"{what}: response is not valid {encoding}{detail}")
+    finally:
+        # An exception that outlives the call (stored by a caller, its traceback and chained cause) keeps this frame
+        # with its locals: a read that broke off, an answer over the cap or one that cannot be decoded would hold up
+        # to the cap of the answer, and the last chunk of one network read, alive.
+        body.clear()
+        chunk = b""
 
 
 async def _error_page_text(resp: aiohttp.ClientResponse, what: str) -> str:

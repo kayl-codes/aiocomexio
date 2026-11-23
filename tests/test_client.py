@@ -803,20 +803,33 @@ async def test_response_text_failure_leaves_no_body_in_the_frame_locals(
     assert _data_locals_of_response_text_frame(caught.value) == {}
 
 
-async def test_response_text_body_check_sees_the_body_of_a_frame_that_does_not_empty_it(
+def test_response_text_body_check_sees_the_bytes_of_a_frame_that_holds_them() -> None:
+    # The positive control of the test above: the helper finds bytes in a frame of that name that does not empty them.
+    def _response_text() -> None:
+        body = bytearray(b"secret page")
+        raise ComexioDataError(str(len(body)))
+
+    with pytest.raises(ComexioDataError) as caught:
+        _response_text()
+
+    assert _data_locals_of_response_text_frame(caught.value) == {"body": b"secret page"}
+
+
+async def test_response_text_failure_after_the_read_leaves_no_body_in_the_frame_locals(
     logged_in: ComexioClient, comexio: FakeComexio, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The positive control of the test above: an error raised after the body was read leaves it in the frame.
+    # An error raised after the body was read (here by the encoding lookup) empties the frame as well.
     def failing(_resp: object) -> str:
         raise ComexioDataError("no encoding")
 
     monkeypatch.setattr(client_module, "_text_encoding", failing)
     _serve_bytes(comexio, b"secret page")
 
-    with pytest.raises(ComexioDataError, match="no encoding") as caught:
+    with pytest.raises(ComexioDataError) as caught:
         await logged_in._request_text("GET", FUNCTION_MODULE_PATH, what="page")
 
-    assert _data_locals_of_response_text_frame(caught.value) == {"body": b"secret page"}
+    assert str(caught.value) == "no encoding"
+    assert _data_locals_of_response_text_frame(caught.value) == {}
 
 
 @pytest.mark.parametrize("method_name", ["_request_text", "_request_redirect"])

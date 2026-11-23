@@ -8,6 +8,7 @@ import logging
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import aiohttp
 import pytest
@@ -138,7 +139,9 @@ def test_a_name_that_is_not_plain_is_refused_everywhere(name: str) -> None:
     with pytest.raises(ValueError) as proxy_path:
         doorstation_picture_path(7, name)
 
-    assert [str(of.value), str(file_path.value), str(proxy_path.value)] == [NOT_PLAIN_MESSAGE] * 3
+    assert str(of.value) == NOT_PLAIN_MESSAGE
+    assert str(file_path.value) == NOT_PLAIN_MESSAGE
+    assert str(proxy_path.value) == NOT_PLAIN_MESSAGE
 
 
 def test_a_name_of_the_longest_plain_length_is_plain() -> None:
@@ -339,6 +342,18 @@ async def test_get_doorstation_pictures_posts_the_extension_id_and_parses_the_an
     assert [p.name for p in pictures] == [MOTION, BELL]
     (received,) = comexio.received_at("POST", LIST_PATH)
     assert received.form == {"cameraId": "7"}
+
+
+async def test_get_doorstation_pictures_is_sent_like_the_boards_other_ajax_posts(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("POST", LIST_PATH, _list_handler(json.dumps([BELL])))
+
+    await logged_in.get_doorstation_pictures(7)
+
+    (received,) = comexio.received_at("POST", LIST_PATH)
+    assert received.xhr
+    assert urlsplit(received.referer or "").path == client_module._ADMIN_PATH
 
 
 @pytest.mark.parametrize("answer", ["null", "", "[]"])
@@ -675,9 +690,10 @@ async def test_a_failed_picture_read_leaves_no_picture_bytes_in_its_traceback(
     monkeypatch: pytest.MonkeyPatch, body: bytes, cap: int, error: type[Exception], message: str
 ) -> None:
     monkeypatch.setattr(client_module, "_MAX_PICTURE_BYTES", cap)
+    resp = _picture_response(_PieceContent(body))
 
     with pytest.raises(error) as info:
-        await client_module._read_picture(_picture_response(_PieceContent(body)), "picture")
+        await client_module._read_picture(resp, "picture")
 
     assert str(info.value) == message
     held = _buffers_in_traceback(info.value)
@@ -687,9 +703,10 @@ async def test_a_failed_picture_read_leaves_no_picture_bytes_in_its_traceback(
 
 async def test_a_picture_the_parser_refuses_leaves_no_bytes_in_the_chained_frames() -> None:
     body = SOI + b"\x00\x00\x00\x00"  # a JPEG start, then no marker where the structure needs one
+    resp = _picture_response(_PieceContent(body))
 
     with pytest.raises(ComexioDataError) as info:
-        await client_module._read_picture(_picture_response(_PieceContent(body)), "picture")
+        await client_module._read_picture(resp, "picture")
 
     assert info.value.__cause__ is not None  # the parser's own error, chained
     held = _buffers_in_traceback(info.value.__cause__)
@@ -701,10 +718,10 @@ async def test_a_picture_the_parser_refuses_leaves_no_bytes_in_the_chained_frame
 async def test_a_read_that_breaks_off_half_way_leaves_no_picture_bytes_in_its_traceback(
     failure: BaseException,
 ) -> None:
-    content = _PieceContent(JPEG[:5], then=failure)
+    resp = _picture_response(_PieceContent(JPEG[:5], then=failure))
 
     with pytest.raises(type(failure)) as info:
-        await client_module._read_picture(_picture_response(content), "picture")
+        await client_module._read_picture(resp, "picture")
 
     held = _buffers_in_traceback(info.value)
     assert held
@@ -853,8 +870,11 @@ def test_a_frame_header_is_required_only_when_asked_for() -> None:
 
 
 def test_a_half_received_scan_marker_with_no_frame_header_raises_at_once() -> None:
+    reader = JpegFrameReader(require_frame_header=True)
+    buffer = bytearray(SOI + SOS[:2])
+
     with pytest.raises(ComexioDataError) as info:
-        JpegFrameReader(require_frame_header=True).frame(bytearray(SOI + SOS[:2]))
+        reader.frame(buffer)
 
     assert str(info.value) == f"Camera frame has a scan at offset {len(SOI) + 1} before its frame header"
 
@@ -868,10 +888,11 @@ def test_every_start_of_frame_marker_is_a_frame_header(code: int) -> None:
 
 @pytest.mark.parametrize("code", list(_NOT_SOF_CODES), ids=list(_NOT_SOF_CODES.values()))
 def test_a_marker_between_the_sof_codes_that_is_no_frame_header_does_not_count(code: int) -> None:
+    head = SOI + _segment(code)
     with pytest.raises(ComexioDataError) as info:
-        first_jpeg_frame(SOI + _segment(code) + SOS, require_frame_header=True)
+        first_jpeg_frame(head + SOS, require_frame_header=True)
 
-    offset = len(SOI + _segment(code)) + 1  # the offset names the code byte of the marker, one after its 0xFF
+    offset = len(head) + 1  # the offset names the code byte of the marker, one after its 0xFF
     assert str(info.value) == f"Camera frame has a scan at offset {offset} before its frame header"
 
 
@@ -881,10 +902,11 @@ def test_a_marker_between_the_sof_codes_that_is_no_frame_header_does_not_count(c
     ids=["just-below-the-sof-range", "restart-marker-just-above"],
 )
 def test_the_markers_next_to_the_sof_range_are_no_frame_header_either(neighbour: bytes) -> None:
+    head = SOI + neighbour
     with pytest.raises(ComexioDataError) as info:
-        first_jpeg_frame(SOI + neighbour + SOS, require_frame_header=True)
+        first_jpeg_frame(head + SOS, require_frame_header=True)
 
-    offset = len(SOI + neighbour) + 1  # the offset names the code byte of the marker, one after its 0xFF
+    offset = len(head) + 1  # the offset names the code byte of the marker, one after its 0xFF
     assert str(info.value) == f"Camera frame has a scan at offset {offset} before its frame header"
 
 
@@ -903,6 +925,130 @@ def test_a_frame_header_that_arrives_in_pieces_still_counts(cut: int) -> None:
     buffer += SOF[cut:] + SOS + _SCAN + EOI
 
     assert reader.frame(buffer) == JPEG
+
+
+def _frame_header(
+    *, precision: int = 8, height: int = 1, width: int = 1, components: tuple[bytes, ...] = (b"\x01\x11\x00",)
+) -> bytes:
+    """An SOF0 segment with the given values; the component count and the length field follow the components."""
+    payload = (
+        bytes((precision,)) + height.to_bytes(2) + width.to_bytes(2) + bytes((len(components),)) + b"".join(components)
+    )
+    return _segment(0xC0, payload)
+
+
+def _picture_with(frame_header: bytes) -> bytes:
+    return SOI + frame_header + SOS + _SCAN + EOI
+
+
+def test_the_synthetic_frame_header_is_the_one_the_tests_build() -> None:
+    assert _frame_header() == SOF
+
+
+@pytest.mark.parametrize(
+    "frame_header",
+    [
+        _frame_header(precision=12),
+        _frame_header(height=65535, width=65535),
+        _frame_header(components=(b"\x01\x22\x00", b"\x02\x11\x01", b"\x03\x11\x01")),
+        _frame_header(components=(b"\x01\x44\x03",)),
+        _frame_header(precision=1),
+        _frame_header(precision=16),
+        _frame_header(height=256, width=256),
+        _frame_header(components=(b"\x01\x11\x00", b"\x02\x11\x00", b"\x03\x11\x00", b"\x04\x11\x00")),
+        _frame_header(components=tuple(bytes((at, 0x11, 0)) for at in range(1, 256))),
+    ],
+    ids=[
+        "12-bit",
+        "largest-size",
+        "three-components-subsampled",
+        "largest-factors-and-table",
+        "precision-one",
+        "precision-sixteen",
+        "size-with-a-zero-low-byte",
+        "four-components",
+        "most-components-the-count-byte-holds",
+    ],
+)
+def test_a_sound_frame_header_is_accepted(frame_header: bytes) -> None:
+    picture = _picture_with(frame_header)
+
+    assert first_jpeg_frame(picture, require_frame_header=True) == picture
+
+
+_MALFORMED_FRAME_HEADERS = {
+    "no-components": _segment(0xC0, b"\x08\x00\x01\x00\x01\x00"),
+    "component-missing": _segment(0xC0, b"\x08\x00\x01\x00\x01\x02\x01\x11\x00"),
+    "too-short-for-the-fixed-part": _segment(0xC0, b"\x08\x00\x01\x00\x01"),
+    "longer-than-its-components": _segment(0xC0, b"\x08\x00\x01\x00\x01\x01\x01\x11\x00\x00"),
+    "precision-zero": _frame_header(precision=0),
+    "precision-too-large": _frame_header(precision=17),
+    "height-zero": _frame_header(height=0),
+    "width-zero": _frame_header(width=0),
+    "horizontal-factor-zero": _frame_header(components=(b"\x01\x01\x00",)),
+    "vertical-factor-zero": _frame_header(components=(b"\x01\x10\x00",)),
+    "horizontal-factor-too-large": _frame_header(components=(b"\x01\x51\x00",)),
+    "vertical-factor-too-large": _frame_header(components=(b"\x01\x15\x00",)),
+    "quantization-table-too-large": _frame_header(components=(b"\x01\x11\x04",)),
+    "second-component-bad": _frame_header(components=(b"\x01\x11\x00", b"\x02\x00\x00")),
+    "last-component-bad": _frame_header(components=(b"\x01\x11\x00", b"\x02\x11\x00", b"\x03\x11\x04")),
+}
+
+
+@pytest.mark.parametrize("frame_header", list(_MALFORMED_FRAME_HEADERS.values()), ids=list(_MALFORMED_FRAME_HEADERS))
+def test_a_malformed_frame_header_is_refused(frame_header: bytes) -> None:
+    picture = _picture_with(frame_header)
+
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(picture, require_frame_header=True)
+
+    length = len(frame_header) - 2  # the length field, which counts itself but not the marker
+    assert str(info.value) == f"Camera frame has a malformed frame header (length {length}) at offset {len(SOI) + 1}"
+
+
+@pytest.mark.parametrize("code", _SOF_CODES, ids=[f"sof-{code:02x}" for code in _SOF_CODES])
+def test_a_malformed_frame_header_is_refused_for_every_start_of_frame_marker(code: int) -> None:
+    frame_header = _segment(code, _frame_header(height=0)[4:])
+    picture = _picture_with(frame_header)
+
+    with pytest.raises(ComexioDataError) as info:
+        first_jpeg_frame(picture, require_frame_header=True)
+
+    assert str(info.value) == f"Camera frame has a malformed frame header (length 11) at offset {len(SOI) + 1}"
+
+
+def test_a_stream_frame_with_a_malformed_frame_header_is_still_read() -> None:
+    picture = _picture_with(_frame_header(height=0))
+
+    assert first_jpeg_frame(picture) == picture
+
+
+@pytest.mark.parametrize("cut", range(1, len(SOF)), ids=[f"cut-after-{cut}-bytes" for cut in range(1, len(SOF))])
+def test_a_malformed_frame_header_that_arrives_in_pieces_is_refused_once_whole(cut: int) -> None:
+    header = _frame_header(width=0)
+    reader = JpegFrameReader(require_frame_header=True)
+    buffer = bytearray(SOI + header[:cut])
+    assert reader.frame(buffer) is None  # not whole yet, so not judged yet
+
+    buffer += header[cut:] + SOS + _SCAN + EOI
+
+    with pytest.raises(ComexioDataError) as info:
+        reader.frame(buffer)
+
+    assert str(info.value) == f"Camera frame has a malformed frame header (length 11) at offset {len(SOI) + 1}"
+
+
+async def test_get_doorstation_picture_with_a_malformed_frame_header_raises(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("GET", FILE_PATH, _file_handler(_picture_with(_frame_header(height=0))))
+
+    with pytest.raises(ComexioDataError) as info:
+        await logged_in.get_doorstation_picture(7, BELL)
+
+    assert str(info.value) == (
+        f"Doorstation 7 picture: Camera frame has a malformed frame header (length 11) at offset {len(SOI) + 1}"
+    )
 
 
 # --- the list is capped while it is read, not after it has been read and decoded ---------------------------------
@@ -928,6 +1074,40 @@ async def test_a_text_read_stops_at_the_cap_a_caller_names() -> None:
 
     assert str(info.value) == "list: response is longer than 10 bytes"
     assert content.requested == [11, 7, 3]  # one byte over the cap and not a byte more, whatever the generic cap is
+
+
+def _text_response(content: Any) -> Any:
+    return cast(
+        "Any", SimpleNamespace(headers=CIMultiDict[str](), content=content, content_type="text/html", charset="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "error", "message"),
+    [
+        (_PieceContent(b'["26-11', then=asyncio.CancelledError()), asyncio.CancelledError, ""),
+        (_PieceContent(b'["26-11', then=aiohttp.ClientPayloadError("cut")), aiohttp.ClientPayloadError, "cut"),
+        (_EndlessContent(), ComexioDataError, "list: response is longer than 10 bytes"),
+        (
+            _PieceContent(b"\xff\xfe"),
+            ComexioDataError,
+            "list: response is not valid utf-8 (byte 0: invalid start byte)",
+        ),
+    ],
+    ids=["cancelled-half-way", "payload-error-half-way", "over-the-cap", "not-decodable"],
+)
+async def test_a_failed_text_read_leaves_no_answer_bytes_in_its_traceback(
+    content: Any, error: type[BaseException], message: str
+) -> None:
+    resp = _text_response(content)
+
+    with pytest.raises(error) as info:
+        await client_module._response_text(resp, "list", max_bytes=10)
+
+    assert str(info.value) == message
+    held = _buffers_in_traceback(info.value)
+    assert held  # the frame does hold its buffer (else this proves nothing) ...
+    assert not any(held)  # ... and it is empty by now
 
 
 async def test_get_doorstation_pictures_refuses_a_list_over_the_cap_while_reading_it(

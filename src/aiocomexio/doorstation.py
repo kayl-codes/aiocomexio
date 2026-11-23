@@ -56,6 +56,20 @@ _SOS_BYTES_PER_COMPONENT = 2
 _MAX_SCAN_COMPONENTS = 4
 # Offset of Ns from the SOS code: the two bytes of the length field lie between them.
 _SOS_COMPONENTS_OFFSET = 3
+# An SOF header (T.81, B.2.2): length field, sample precision, height, width, Nf, then three bytes per component (id,
+# the horizontal and vertical sampling factors as two nibbles, quantization table); its length is 8 + 3 * Nf. A height
+# of 0 would need a DNL marker, which a still from a camera never has, so it counts as malformed.
+_SOF_FIXED_LENGTH = 8
+_SOF_BYTES_PER_COMPONENT = 3
+_MAX_SAMPLE_PRECISION = 16
+_MAX_SAMPLING_FACTOR = 4
+_MAX_QUANTIZATION_TABLE = 3
+# Offsets from the SOF code: precision, height, width, Nf and the first component.
+_SOF_PRECISION_OFFSET = 3
+_SOF_HEIGHT_OFFSET = 4
+_SOF_WIDTH_OFFSET = 6
+_SOF_COMPONENTS_OFFSET = 8
+_SOF_FIRST_COMPONENT_OFFSET = 9
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -259,6 +273,10 @@ class JpegFrameReader:
         end = code_at + 1 if code in _STANDALONE_CODES else _segment_end(data, code_at + 1)
         if end is None:
             return False
+        if self._require_frame_header and code in _SOF_CODES:
+            if end > len(data):
+                return False  # the frame header has not arrived whole yet: the next call checks it
+            _check_sof_header(data, code_at, end)
         self._framed = self._framed or code in _SOF_CODES
         if code == _SOS_CODE:
             if code_at + _SOS_COMPONENTS_OFFSET >= len(data):
@@ -289,6 +307,42 @@ def _check_sos_header(data: bytes | bytearray, code_at: int, end: int) -> None:
         or length != _SOS_FIXED_LENGTH + _SOS_BYTES_PER_COMPONENT * components
     ):
         raise ComexioDataError(f"Camera frame has a malformed SOS header (length {length}) at offset {code_at}")
+
+
+def _check_sof_header(data: bytes | bytearray, code_at: int, end: int) -> None:
+    """Raise ComexioDataError unless the SOF segment from code_at to end is a frame header a decoder can read."""
+    length = end - code_at - 1  # the length field, which counts itself but not the code
+    if length < _SOF_FIXED_LENGTH or not _frame_header_is_sound(data, code_at, length):
+        raise ComexioDataError(f"Camera frame has a malformed frame header (length {length}) at offset {code_at}")
+
+
+def _frame_header_is_sound(data: bytes | bytearray, code_at: int, length: int) -> bool:
+    """Whether the SOF header at code_at (length bytes after the code, at least the fixed part) is well-formed."""
+    components = data[code_at + _SOF_COMPONENTS_OFFSET]
+    if components == 0:  # the byte holds 255 at most, which the length check below then matches
+        return False
+    if length != _SOF_FIXED_LENGTH + _SOF_BYTES_PER_COMPONENT * components:
+        return False
+    precision = data[code_at + _SOF_PRECISION_OFFSET]
+    height = int.from_bytes(data[code_at + _SOF_HEIGHT_OFFSET : code_at + _SOF_HEIGHT_OFFSET + 2])
+    width = int.from_bytes(data[code_at + _SOF_WIDTH_OFFSET : code_at + _SOF_WIDTH_OFFSET + 2])
+    if not (1 <= precision <= _MAX_SAMPLE_PRECISION and height >= 1 and width >= 1):
+        return False
+    first = code_at + _SOF_FIRST_COMPONENT_OFFSET
+    return all(
+        _component_is_sound(data[first + at : first + at + _SOF_BYTES_PER_COMPONENT])
+        for at in range(0, _SOF_BYTES_PER_COMPONENT * components, _SOF_BYTES_PER_COMPONENT)
+    )
+
+
+def _component_is_sound(component: bytes | bytearray) -> bool:
+    """Whether a component of an SOF header (id, sampling factors, quantization table) holds usable values."""
+    horizontal, vertical = divmod(component[1], 16)
+    return (
+        1 <= horizontal <= _MAX_SAMPLING_FACTOR
+        and 1 <= vertical <= _MAX_SAMPLING_FACTOR
+        and component[2] <= _MAX_QUANTIZATION_TABLE
+    )
 
 
 def _marker_code_at(data: bytes | bytearray, pos: int) -> int | None:
