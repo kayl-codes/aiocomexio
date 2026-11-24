@@ -110,7 +110,9 @@ compare it with `normalize_fingerprint(pin)` when the pin may be spelled otherwi
 `None` for both dates (never read `None` as "does not expire"). That is the case for a certificate
 that does not parse as X.509, and also for one that `cryptography` only warns about when the process
 runs with warnings as errors (`-W error`): the library leaves the warning filters alone.
-`certificate_info(der)` does the same for certificate bytes you already hold.
+`certificate_info(der)` does the same for certificate bytes you already hold. Why the dates are
+missing is logged by `fetch_certificate` as a warning on every call; `certificate_info` logs the cause
+at DEBUG only, so a caller of it that wants to know checks for `None` itself.
 
 ```python
 import asyncio
