@@ -7,10 +7,12 @@ counts the calls, so the nested form is caught as well. Build the arguments befo
 tested call inside it.
 
 A function or lambda defined in the block is not run by defining it, so the calls in its body do not count (its
-decorators, defaults and annotations do); a lambda passed as a callback runs inside the tested call and is part of
-it. A generator expression's calls do count - stricter than needed, but it fails loudly. Not followed: a
-`pytest.raises(...)` call bound to a name or a parametrize argument first and entered as `with expectation:`, and a
-local helper called in the block that itself makes several calls - the review checklist covers those.
+decorators, defaults and annotations do, annotations even where Python defers or never evaluates them); a lambda
+passed as a callback runs inside the tested call and is part of it. A generator expression's calls do count -
+stricter than needed, but it fails loudly. Not followed: a `pytest.raises(...)` call bound to a name or a
+parametrize argument first and entered as `with expectation:`, a local helper called in the block that itself makes
+several calls, and a `raises` alias bound by a walrus or tuple assignment or one that is rebound to something else
+later in the file (the name stays an alias) - the review checklist covers those.
 """
 
 import ast
@@ -26,17 +28,26 @@ _ENTER_EXIT = 2
 
 def _raises_names(tree: ast.Module) -> set[str]:
     """Bare names `pytest.raises` is bound to: `raises`, any `from pytest import raises as <alias>` and any
-    `<alias> = pytest.raises` (or `= <a name already known>`) assignment."""
+    `<alias> = pytest.raises` (annotated or not) or `<alias> = <a name already known>` assignment, in whatever
+    order they appear in the file."""
     names = {"raises"}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "pytest":
             names.update(alias.asname for alias in node.names if alias.name == "raises" and alias.asname)
+    bindings = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and (
-            (isinstance(node.value, ast.Attribute) and node.value.attr == "raises")
-            or (isinstance(node.value, ast.Name) and node.value.id in names)
-        ):
-            names.update(target.id for target in node.targets if isinstance(target, ast.Name))
+        if isinstance(node, ast.Assign):
+            bindings.append((node.value, node.targets))
+        elif isinstance(node, ast.AnnAssign) and node.value:
+            bindings.append((node.value, [node.target]))
+    known = 0
+    while known != len(names):
+        known = len(names)
+        for value, targets in bindings:
+            if (isinstance(value, ast.Attribute) and value.attr == "raises") or (
+                isinstance(value, ast.Name) and value.id in names
+            ):
+                names.update(target.id for target in targets if isinstance(target, ast.Name))
     return names
 
 
@@ -130,6 +141,8 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     annotated = "with pytest.raises(ValueError):\n    def g(x: kind(1)) -> kind(2):\n        pass\n"
     other_context = "with patch('a.b'):\n    check(build(1))\n"
     assigned = "expect = pytest.raises\nwith expect(ValueError):\n    check(build(1))\n"
+    annotated_alias = "expect: object = pytest.raises\nwith expect(ValueError):\n    check(build(1))\n"
+    forward_chain = "alias = source\nsource = pytest.raises\nwith alias(ValueError):\n    check(build(1))\n"
 
     assert _extra_call_blocks(nested) == [(1, "check(build(1))")]
     assert _extra_call_blocks(sequential) == [(1, "x = build(1)")]
@@ -137,6 +150,8 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assert _extra_call_blocks(aliased) == [(2, "check(build(1))")]
     assert _extra_call_blocks(conditional) == [(1, "check(build(1))")]
     assert _extra_call_blocks(assigned) == [(2, "check(build(1))")]
+    assert _extra_call_blocks(annotated_alias) == [(2, "check(build(1))")]
+    assert _extra_call_blocks(forward_chain) == [(3, "check(build(1))")]
     assert _extra_call_blocks(later_item) == [(1, "check(x)")]
     assert _extra_call_blocks(later_prebuilt) == [(1, "check(x)")]
     assert [line for line, _ in _extra_call_blocks(nested_manager)] == [1]
