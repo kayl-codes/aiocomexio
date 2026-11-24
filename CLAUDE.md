@@ -44,7 +44,12 @@ Beta. The move out of the integration, in order:
      commands, and Doorstation detection (`get_doorstations`) with a camera snapshot
      (`get_doorstation_snapshot`, `doorstation_stream_url`), and the settings of one extension
      (`get_extension`, `ExtensionInfo`: name, serial, type id and the IP address from
-     `extension_location` of `/admin/extension/edit/`).
+     `extension_location` of `/admin/extension/edit/`). Comexio OS 11.1.5 serves the camera tile without ids:
+     a Doorstation tab is then found by its "delete pictures" button (`picture_button_ids`) and kept only if its
+     edit form says type 16 with a serial number or a usable IP address (a cameraless dummy has neither); a
+     form read error propagates, the library caches nothing.
+   - Done: `fetch_certificate(host)` → `CertificateInfo` (pinnable fingerprint plus validity period, `None` dates
+     = unknown, never unlimited); `certificate_info(der)` reads certificate bytes already held.
    - Done: the pictures a Doorstation stores (`doorstation_pictures.py`: `get_doorstation_pictures` →
      `DoorstationPicture` newest first, `get_doorstation_picture` through the file proxy, 4 MiB cap, 10 s). A
      file name comes from the device and ends up in a URL path, so only plain `.jpg` names pass
