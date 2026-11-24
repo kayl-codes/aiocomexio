@@ -341,6 +341,10 @@ async def test_fetch_certificate_fingerprint_keeps_one_deadline_for_handshake_an
 
 _UNPARSABLE = b"synthetic certificate"
 _UNPARSABLE_FINGERPRINT = hashlib.sha256(_UNPARSABLE).hexdigest()
+# The two date fields of CertificateInfo, as keyword names for the tests that build one from a dict.
+_BEFORE = "not_valid_before"
+_AFTER = "not_valid_after"
+_DATE_FIELDS = (_BEFORE, _AFTER)
 
 
 def _parser_error(raw: bytes) -> ValueError:
@@ -474,19 +478,26 @@ def test_certificate_info_keeps_the_dates_of_a_certificate_cryptography_only_war
     monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate
 ) -> None:
     real_parser = x509.load_der_x509_certificate
+    filters_while_parsing: list[list[tuple[object, ...]]] = []
 
     def warning_parser(data: bytes) -> x509.Certificate:
+        # Looked at while the parser runs and, below, right after the call, both inside pytest.warns:
+        # it restores its own filters on exit, so a change certificate_info made would be gone by the
+        # time the test could look outside the block.
+        filters_while_parsing.append(list(warnings.filters))
         warnings.warn("negative serial number", CryptographyDeprecationWarning, stacklevel=2)
         return real_parser(data)
 
     monkeypatch.setattr(x509, "load_der_x509_certificate", warning_parser)
-    filters_before = list(warnings.filters)
 
     with pytest.warns(CryptographyDeprecationWarning, match="negative serial number"):
+        filters_before_call = list(warnings.filters)
         info = certificate_info(certificate.der)
+        filters_after_call = list(warnings.filters)
 
     assert info == CertificateInfo(certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after)
-    assert warnings.filters == filters_before
+    assert filters_while_parsing == [filters_before_call]
+    assert filters_after_call == filters_before_call
 
 
 def test_certificate_info_is_immutable_and_slotted(certificate: SelfSignedCertificate) -> None:
@@ -496,11 +507,11 @@ def test_certificate_info_is_immutable_and_slotted(certificate: SelfSignedCertif
     assert not hasattr(info, "__dict__")
 
 
-@pytest.mark.parametrize("known", ["not_valid_before", "not_valid_after"])
+@pytest.mark.parametrize("known", _DATE_FIELDS)
 def test_certificate_info_refuses_only_one_known_date(known: str) -> None:
     dates: dict[str, datetime.datetime | None] = {
-        "not_valid_before": None,
-        "not_valid_after": None,
+        _BEFORE: None,
+        _AFTER: None,
         known: datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
     }
     with pytest.raises(ValueError, match=r"^not_valid_before and not_valid_after are either both known or both None$"):
@@ -515,11 +526,11 @@ def test_certificate_info_refuses_only_one_known_date(known: str) -> None:
     ],
     ids=["naive", "not UTC"],
 )
-@pytest.mark.parametrize("field", ["not_valid_before", "not_valid_after"])
+@pytest.mark.parametrize("field", _DATE_FIELDS)
 def test_certificate_info_refuses_a_date_that_is_not_utc(field: str, date: datetime.datetime) -> None:
     dates = {
-        "not_valid_before": datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
-        "not_valid_after": datetime.datetime(2027, 1, 1, tzinfo=datetime.UTC),
+        _BEFORE: datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+        _AFTER: datetime.datetime(2027, 1, 1, tzinfo=datetime.UTC),
         field: date,
     }
     with pytest.raises(ValueError, match=r"is not a timezone-aware UTC date$"):
