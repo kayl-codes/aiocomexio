@@ -91,9 +91,11 @@ class CertificateInfo:
 
     fingerprint is the SHA-256 of the DER certificate (64 lowercase hex digits), the value ComexioClient
     pins. not_valid_before and not_valid_after are the certificate's dates as certificate_info reads them
-    (timezone-aware, UTC), or both None when the certificate cannot be parsed as X.509. None means
-    unknown, never unlimited: a caller must not read a missing date as a certificate that does not
-    expire. The fingerprint is what the handshake presented either way and stays pinnable.
+    (timezone-aware, UTC), or both None when they cannot be read: the certificate does not parse as
+    X.509, or cryptography warns about it and the process runs with warnings as errors ("-W error";
+    the library leaves the warning filters alone, so even a parseable certificate then has no dates).
+    None means unknown, never unlimited: a caller must not read a missing date as a certificate that
+    does not expire. The fingerprint is what the handshake presented either way and stays pinnable.
     Constructing it with only one of the two dates, a date that is not timezone-aware UTC, or a
     fingerprint in any other spelling than 64 lowercase hex digits raises ValueError, so a stored pin
     is compared after normalize_fingerprint.
@@ -131,8 +133,9 @@ def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError |
 def certificate_info(certificate: bytes) -> CertificateInfo:
     """Fingerprint and validity period of a DER certificate (as ssl's getpeercert(binary_form=True) gives it).
 
-    Bytes that do not parse as an X.509 certificate still get their fingerprint, with both dates None
-    (logged at DEBUG only; fetch_certificate logs a warning).
+    Bytes whose dates cannot be read (no X.509 certificate, or a cryptography warning raised as an
+    error, see CertificateInfo) still get their fingerprint, with both dates None (logged at DEBUG
+    only; fetch_certificate logs a warning).
     """
     info, cause = _read_certificate(certificate)
     if cause is not None:
@@ -179,9 +182,10 @@ async def fetch_certificate(host: str) -> CertificateInfo:
     read the validity period is fine as long as the result is compared with the stored pin and not
     pinned itself: a validity period belongs to the stored pin only when the fingerprints match.
 
-    A certificate that does not parse as X.509 is no error: it comes back with both dates None (see
-    CertificateInfo) and a warning naming the cause is logged, on every call (a caller that fetches
-    periodically sees one per fetch). Handshake and closing share one deadline of
+    A certificate whose dates cannot be read (it does not parse as X.509, or cryptography's warning
+    about it is raised as an error under "-W error") is no error: it comes back with both dates None
+    (see CertificateInfo) and a warning naming the cause is logged, on every call (a caller that
+    fetches periodically sees one per fetch). Handshake and closing share one deadline of
     FINGERPRINT_FETCH_TIMEOUT_SEC. Raises ComexioConnectionError if host cannot be reached over TLS
     by then (no HTTPS on that port included), ComexioDataError if the handshake completed without a
     certificate. A host that does not form a URL raises ValueError.

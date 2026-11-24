@@ -106,9 +106,11 @@ a fresh `fetch_certificate_fingerprint()` with the pin to tell the two apart.
 `fingerprint` and the certificate's validity period (`not_valid_before`, `not_valid_after`, UTC).
 Use it to see when Comexio will replace the pinned certificate: the dates belong to your pin only
 when `info.fingerprint` equals it. `info.fingerprint` is always 64 lowercase hex digits, so
-compare it with `normalize_fingerprint(pin)` when the pin may be spelled otherwise (uppercase, with colons). A certificate that does not parse as X.509 keeps its fingerprint
-and gets `None` for both dates. `certificate_info(der)` does the same for certificate bytes you
-already hold.
+compare it with `normalize_fingerprint(pin)` when the pin may be spelled otherwise (uppercase, with colons). A certificate whose dates cannot be read keeps its fingerprint and gets
+`None` for both dates (never read `None` as "does not expire"). That is the case for a certificate
+that does not parse as X.509, and also for one that `cryptography` only warns about when the process
+runs with warnings as errors (`-W error`): the library leaves the warning filters alone.
+`certificate_info(der)` does the same for certificate bytes you already hold.
 
 ```python
 import asyncio
