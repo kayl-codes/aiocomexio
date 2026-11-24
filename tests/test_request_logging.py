@@ -54,8 +54,9 @@ def _answered_at(client: ComexioClient) -> float | None:
 
 def _stripped_cause(error: BaseException) -> BaseException | None:
     """What _raise_from_stripped raises a ComexioError from: error, stripped in place, or None if stripping failed."""
+    failure = ComexioConnectionError("Page failed")
     with pytest.raises(ComexioConnectionError) as raised:
-        client_module._raise_from_stripped(ComexioConnectionError("Page failed"), error)
+        client_module._raise_from_stripped(failure, error)
     return raised.value.__cause__
 
 

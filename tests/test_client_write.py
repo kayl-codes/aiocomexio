@@ -1992,6 +1992,7 @@ def _parse_seconds(page: str, *, rejected: bool = False) -> float:
         started = time.perf_counter()
         with pytest.raises(ComexioDataError, match="nests more than") if rejected else contextlib.nullcontext():
             parser.feed(page)
+        if not rejected:
             parser.close()
         durations.append(time.perf_counter() - started)
     return min(durations)

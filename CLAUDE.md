@@ -85,6 +85,11 @@ pre-commit run --all-files
   complexipy scores close to but not exactly like SonarCloud, so the one permitted exception is its
   `BASELINE`: functions SonarCloud accepts but complexipy already rated above 15, pinned at that
   score — lower or drop an entry once the function is simpler, never add one for new code.
+- A `pytest.raises` block makes exactly one call (SonarCloud S5778; a context manager entered after it counts
+  too): build the arguments before the `with`.
+  Ruff's PT012 only counts statements; `tests/test_pytest_raises_single_call.py` counts the calls, nested
+  ones (`check(build(x))`) included. It does not follow a helper that makes several calls itself, so do not
+  wrap two calls in a helper to get past it.
 - A red test is a finding, not an obstacle — never delete or loosen an assertion to make it pass.
   Snapshots: regenerate with `pytest --snapshot-update` only for intended output changes and state the
   reviewed diff in the PR.
