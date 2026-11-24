@@ -343,6 +343,13 @@ _UNPARSABLE = b"synthetic certificate"
 _UNPARSABLE_FINGERPRINT = hashlib.sha256(_UNPARSABLE).hexdigest()
 
 
+def _parser_error(raw: bytes) -> ValueError:
+    """The error cryptography's parser itself raises for raw, so a test can tell the logged cause from a stand-in."""
+    with pytest.raises(ValueError) as excinfo:
+        x509.load_der_x509_certificate(raw)
+    return excinfo.value
+
+
 def _assert_utc(info: CertificateInfo) -> None:
     assert info.not_valid_before is not None
     assert info.not_valid_after is not None
@@ -397,10 +404,10 @@ async def test_fetch_certificate_keeps_the_fingerprint_of_an_unparsable_certific
     assert writer.closed
     (record,) = caplog.records
     assert record.levelno == logging.WARNING
-    # The cause follows (cryptography's own parser error, its wording not part of this contract).
-    assert record.getMessage().startswith(
+    # The cause is the error cryptography's parser raises for these bytes (its wording is not part of this contract).
+    assert record.getMessage() == (
         f"{_SYNTHETIC_HOST!r} serves a certificate (SHA-256 {format_fingerprint(_UNPARSABLE_FINGERPRINT)}) "
-        "whose validity period cannot be read: ValueError("
+        f"whose validity period cannot be read: {_parser_error(_UNPARSABLE)!r}"
     )
 
 
@@ -419,7 +426,7 @@ async def test_fetch_certificate_fingerprint_never_parses_the_certificate(
     )
 
     assert await fetch_certificate_fingerprint(_SYNTHETIC_HOST) == certificate.fingerprint
-    assert parsed == []  # not even a parse whose error is swallowed
+    assert not parsed  # not even a parse whose error is swallowed
 
 
 def test_certificate_info_reads_the_dates_of_a_der_certificate(certificate: SelfSignedCertificate) -> None:
@@ -447,7 +454,9 @@ def test_certificate_info_keeps_the_fingerprint_of_bytes_that_are_no_certificate
     assert info == CertificateInfo(fingerprint, None, None)
     (record,) = caplog.records
     assert record.levelno == logging.DEBUG
-    assert record.getMessage().startswith(f"Certificate {format_fingerprint(fingerprint)} has no readable validity")
+    assert record.getMessage() == (
+        f"Certificate {format_fingerprint(fingerprint)} has no readable validity period: {_parser_error(raw)!r}"
+    )
 
 
 def test_certificate_info_treats_a_warning_raised_as_error_like_an_unparsable_certificate(
