@@ -3,7 +3,9 @@
 The IO home page (/admin/in_output/home) renders one tab per extension. The camera-tile elements of a Doorstation tab
 carry data-extid, data-extname and data-camera_id, the ids holding the extension id (reported for Comexio OS 11.0.2 in
 kayl-codes/homeassistant-comexio#180); other controls of the tab, such as the "delete pictures" button, may carry only
-data-camera_id. The IO-Server serves the camera as an MJPEG stream (multipart/x-mixed-replace,
+data-camera_id. Comexio OS 11.1.5 serves the tile without those attributes: the button is then the only element that
+names the ids, and a Doorstation is told from a cameraless one by its extension's serial number (see
+picture_button_ids). The IO-Server serves the camera as an MJPEG stream (multipart/x-mixed-replace,
 one JPEG per part) under /proxy/cam/<camera_id>/; the Doorstation itself serves the same stream under its own address.
 
 Reading the tags of the page is the client's job (a browser-like html.parser, see ComexioClient.get_doorstations);
@@ -28,6 +30,7 @@ CAMERA_ID_ATTRIBUTE = "data-camera_id"
 DOORSTATION_ATTRIBUTES = (EXT_ID_ATTRIBUTE, EXT_NAME_ATTRIBUTE, CAMERA_ID_ATTRIBUTE)
 
 _STREAM_PATH = "/proxy/cam/{camera_id}/"
+_PICTURE_BUTTON_ID = re.compile(r"delete_doorstation_pictures_(\d+)", re.ASCII)
 
 # JPEG markers (ITU-T T.81, B.1.1.3). A marker is 0xFF and a code; 0xFF bytes before the code are fill bytes.
 _MARKER_PREFIX = 0xFF
@@ -120,6 +123,24 @@ def _positive_id(text: str | None) -> int | None:
     return None if canonical is None or canonical == "0" else int(canonical)
 
 
+def picture_button_ids(attributes: Mapping[str, str]) -> tuple[int, int] | None:
+    """(extension id, camera id) a "delete pictures" button names, None if it is none or its ids are unusable.
+
+    Comexio OS 11.1.5 renders the camera tile without any data-* attribute (the picture is loaded by script), so the
+    only element of a Doorstation's tab that names its ids in the served page is this button:
+    id="delete_doorstation_pictures_<extension id>" with data-camera_id="<camera id>" (kayl-codes/homeassistant-comexio
+    #180). The button is there on a Doorstation that has a camera as much as on one that has none, so it only names a
+    candidate: ComexioClient.get_doorstations asks the extension's edit form whether it is a Doorstation with a
+    serial number.
+    """
+    match = _PICTURE_BUTTON_ID.fullmatch(attributes.get("id", ""))
+    if match is None:
+        return None
+    ext_id = _positive_id(match.group(1))
+    camera_id = _positive_id(attributes.get(CAMERA_ID_ATTRIBUTE))
+    return None if ext_id is None or camera_id is None else (ext_id, camera_id)
+
+
 def _doorstation_of(attributes: Mapping[str, str]) -> Doorstation | None:
     """The Doorstation an element's attributes name, None if its ids are not usable."""
     ext_id = _positive_id(attributes.get(EXT_ID_ATTRIBUTE))
@@ -140,8 +161,9 @@ def doorstations_from_attributes(elements: Iterable[Mapping[str, str]]) -> dict[
     pictures" button carries its own data-camera_id without a data-extid, on a Doorstation extension without a
     camera tile (none is configured, or none has ever connected) just as much as on one with a working camera -
     a page with only such buttons describes real, cameraless Doorstations, not a changed page, so it reports no
-    Doorstation rather than raising. An element that does carry data-extid, but whose id (either one) is not a
-    positive integer, is logged and skipped as unusable; if such elements exist and none of them is usable, the
+    Doorstation rather than raising (on a page of Comexio OS 11.1.5, where the tile has no ids, the client reads
+    the buttons itself, see picture_button_ids). An element that does carry data-extid, but whose id (either one) is
+    not a positive integer, is logged and skipped as unusable; if such elements exist and none of them is usable, the
     page itself has changed and that raises ComexioDataError instead of reporting no Doorstation.
     """
     found: dict[int, Doorstation] = {}
