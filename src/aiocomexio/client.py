@@ -59,6 +59,7 @@ from .doorstation import (
     doorstation_stream_path,
     doorstations_from_attributes,
     first_jpeg_frame,
+    picture_button_ids,
 )
 from .doorstation_pictures import MAX_LIST_CHARS, DoorstationPicture, doorstation_picture_path, parse_picture_list
 from .exceptions import (
@@ -1127,10 +1128,41 @@ class ComexioClient:
     async def get_doorstations(self) -> dict[int, Doorstation]:
         """The Doorstations of the IO-Server, keyed by extension id (empty: the page shows none).
 
-        One request for the whole IO home page (see get_onewire_device_count); see parse_doorstations.
+        One request for the whole IO home page (see get_onewire_device_count); see parse_doorstations. A page
+        that names no Doorstation in its camera tiles (Comexio OS 11.1.5 serves them without ids) is read by the
+        "delete pictures" button of each Doorstation tab, which a cameraless Doorstation has too: for each such
+        extension that no tile names, one small request for its edit form (see get_extension) decides, and only a
+        Doorstation with a serial number or an IP address of its own counts (a dummy has neither and is left out; one
+        that is real but has no camera is reported, its stream then fails). An error of
+        that request is raised, a partial result never returned, so a caller keeps the cameras it knows; the same
+        error on every call from one unreadable form hides the other Doorstations too. Nothing is remembered between
+        calls: each call asks once per such extension, so a caller that polls often should keep the verdicts.
         """
         html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what=_IO_HOME_PAGE)
-        return parse_doorstations(html)
+        doorstations, buttons = _parse_io_home(html)
+        for ext_id, camera_id in buttons.items():
+            if ext_id not in doorstations and (doorstation := await self._real_doorstation(ext_id, camera_id)):
+                doorstations[ext_id] = doorstation
+        return doorstations
+
+    async def _real_doorstation(self, ext_id: int, camera_id: int) -> Doorstation | None:
+        """The Doorstation of extension ext_id if its edit form shows a real one, else None.
+
+        Real means type 16 with a serial number or an IP address of its own: a cameraless dummy has neither (no
+        serial, `local` as its location), a real Doorstation has both, one learned offline at least its IP address.
+        """
+        info = await self.get_extension(ext_id)
+        if info.is_doorstation and (info.serial or info.ip):
+            return Doorstation(ext_id=ext_id, camera_id=camera_id, name=info.name)
+        _LOGGER.debug(
+            "Extension %r has a Doorstation's pictures button but no real Doorstation "
+            "(type %r, serial %s, IP address %s)",
+            ext_id,
+            info.type_id,
+            "set" if info.serial else "missing",
+            "set" if info.ip else "missing",
+        )
+        return None
 
     async def get_extension(self, ext_id: int) -> ExtensionInfo:
         """The settings of one extension (name, serial, type, IP address), read from its edit form.
@@ -3618,11 +3650,15 @@ class _DoorstationParser(_FormParser):
     def __init__(self) -> None:
         super().__init__()
         self.elements: dict[tuple[tuple[str, str], ...], None] = {}
+        self.picture_buttons: dict[int, int] = {}  # extension id -> camera id, the first button of an extension
         self.saw_extension_counter = False
 
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if _is_extension_counter(tag, attributes):
             self.saw_extension_counter = True
+        # Before the data-camera_id guard: a pictures button that lost its camera attribute must reach the diagnostic.
+        if (ids := picture_button_ids(attributes)) is not None:
+            self.picture_buttons.setdefault(*ids)
         if CAMERA_ID_ATTRIBUTE in attributes:
             kept = tuple((name, attributes[name]) for name in DOORSTATION_ATTRIBUTES if name in attributes)
             self.elements.setdefault(kept, None)
@@ -3646,15 +3682,22 @@ def parse_doorstations(io_home_html: str) -> dict[int, Doorstation]:
     without Doorstations: that raises ComexioDataError, so a caller never drops its cameras on a silent empty result;
     other Doorstation attributes alone (data-extid, an empty data-camera_id) do not count, a page that kept them but
     lost its camera ids has changed. Limit: a firmware that renames data-camera_id but keeps the counters looks like
-    an installation without Doorstations.
+    an installation without Doorstations. Only the camera tiles count here: Comexio OS 11.1.5 serves them without
+    ids, so on such a page this gives {} and ComexioClient.get_doorstations, which also reads the "delete pictures"
+    buttons and asks the extension forms, is the way to find its Doorstations.
     """
+    return _parse_io_home(io_home_html)[0]
+
+
+def _parse_io_home(io_home_html: str) -> tuple[dict[int, Doorstation], dict[int, int]]:
+    """The Doorstations the tiles name (see parse_doorstations) and the pictures buttons: extension id -> camera id."""
     parser = _DoorstationParser()
     parser.feed(io_home_html)
     parser.close()
     names_a_camera = any(dict(element).get(CAMERA_ID_ATTRIBUTE) for element in parser.elements)
     if not parser.saw_extension_counter and not names_a_camera:
         raise ComexioDataError("IO home page has no extension counters, the Doorstations are unknown")
-    return doorstations_from_attributes(dict(element) for element in parser.elements)
+    return doorstations_from_attributes(dict(element) for element in parser.elements), parser.picture_buttons
 
 
 class _ExtensionFormParser(_FormParser):

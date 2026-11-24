@@ -31,6 +31,7 @@ from aiocomexio.doorstation import (
     doorstation_stream_path,
     doorstations_from_attributes,
     first_jpeg_frame,
+    picture_button_ids,
 )
 from tests.fake_comexio import LOGIN_PAGE, SESSION_COOKIE, SESSION_VALUE, FakeComexio, Handler
 
@@ -1480,3 +1481,302 @@ def test_a_doorstation_without_a_camera_tile_at_all_names_no_doorstation() -> No
     html = _element(data_camera_id="14")
 
     assert parse_doorstations(html) == {}
+
+
+# --- Comexio OS 11.1.5: the tile names no ids, the pictures button and the extension form decide ----------------------
+
+EDIT_PATH = "/admin/extension/edit/"
+
+
+def _pictures_button(ext_id: str, camera_id: str | None = None) -> str:
+    """The "delete pictures" button as 11.1.5 serves it, with the ids of a Doorstation tab."""
+    camera = ext_id if camera_id is None else camera_id
+    return (
+        f'<input id="delete_doorstation_pictures_{ext_id}" data-camera_id="{camera}"'
+        ' onclick="return delete_doorstion_images(this)" value="Bilder l&ouml;schen" type="button">'
+    )
+
+
+def _io_home_11_1_5(*buttons: str) -> str:
+    """An IO home page of Comexio OS 11.1.5: the extension counter, the Doorstation tabs with a bare tile."""
+    tabs = "".join(
+        f'<div data-ext="doorstation" id="tabs-{ext_id}"><img class="door_img"><form id="doorstation_{ext_id}">'
+        f"{button}</form></div>"
+        for ext_id, button in enumerate(buttons, start=7)
+    )
+    return f"<html><body>{BASE_BLOCK}{tabs}</body></html>"
+
+
+def _extension_form(*, serial: str, type_id: str = "16", name: str = "Haustür", location: str = "local") -> str:
+    """The inputs of an extension edit form that the client reads."""
+    return (
+        f'<form><input type="hidden" id="extension_type_id" value="{type_id}">'
+        f'<input id="extension_name" value="{name}"><input id="extension_serial" value="{serial}">'
+        f'<input id="extension_location" value="{location}"></form>'
+    )
+
+
+def _edit_forms(forms: dict[str, str]) -> Handler:
+    """A handler that serves the edit form of the extension the request asks for, admin session only."""
+
+    async def handler(request: web.Request) -> web.Response:
+        text = forms[request.query["id"]] if _logged_in(request) else LOGIN_PAGE
+        return web.Response(text=text, content_type="text/html")
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    ("attributes", "expected"),
+    [
+        ({"id": "delete_doorstation_pictures_7", "data-camera_id": "7"}, (7, 7)),
+        ({"id": "delete_doorstation_pictures_7", "data-camera_id": "9"}, (7, 9)),
+        ({"data-camera_id": "7"}, None),
+        ({"id": "delete_doorstation_pictures_7"}, None),
+        ({"id": "delete_doorstation_pictures_7", "data-camera_id": ""}, None),
+        ({"id": "delete_doorstation_pictures_0", "data-camera_id": "7"}, None),
+        ({"id": "delete_doorstation_pictures_07", "data-camera_id": "7"}, (7, 7)),
+        ({"id": "delete_doorstation_pictures_7", "data-camera_id": "07"}, (7, 7)),
+        ({"id": "delete_doorstation_pictures_٧", "data-camera_id": "7"}, None),
+        ({"id": "delete_doorstation_pictures_", "data-camera_id": "7"}, None),
+        ({"id": "x_delete_doorstation_pictures_7", "data-camera_id": "7"}, None),
+        ({"id": "delete_doorstation_pictures_7_2", "data-camera_id": "7"}, None),
+    ],
+    ids=[
+        "button",
+        "camera-differs",
+        "no-id",
+        "no-camera-attribute",
+        "empty-camera",
+        "extension-zero",
+        "extension-leading-zero-is-the-number",
+        "camera-leading-zero-is-the-number",
+        "extension-non-ascii-digit",
+        "no-extension-id",
+        "prefix-before",
+        "suffix-after",
+    ],
+)
+def test_picture_button_ids(attributes: dict[str, str], expected: tuple[int, int] | None) -> None:
+    assert picture_button_ids(attributes) == expected
+
+
+async def test_a_doorstation_with_a_serial_number_is_found_by_its_pictures_button(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """A Comexio OS 11.1.5 page (#180): no tile carries data-extid, only the button names the ids."""
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="XXXX-XXXX-XXXX")}))
+
+    assert await logged_in.get_doorstations() == {7: Doorstation(ext_id=7, camera_id=7, name="Haustür")}
+    (request,) = comexio.received_at("GET", EDIT_PATH)
+    assert request.query == {"id": "7", "json_return": "true"}
+
+
+async def test_a_doorstation_without_a_serial_number_is_no_camera(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A dummy Doorstation (no serial, `local` as its location) has the same tab and button as a real one."""
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="")}))
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio"):
+        result = await logged_in.get_doorstations()
+
+    assert result == {}
+    assert (
+        "Extension 7 has a Doorstation's pictures button but no real Doorstation "
+        "(type 16, serial missing, IP address missing)"
+    ) in [record.getMessage() for record in caplog.records]
+
+
+@pytest.mark.parametrize("location", ["192.168.0.50", " 192.168.0.50 "], ids=["plain", "padded"])
+async def test_a_doorstation_without_a_serial_number_but_with_an_ip_address_is_found(
+    logged_in: ComexioClient, comexio: FakeComexio, location: str
+) -> None:
+    """One learned offline has no serial, but the IP address entered for it proves a device (review of #90)."""
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="", location=location)}))
+
+    assert await logged_in.get_doorstations() == {7: Doorstation(ext_id=7, camera_id=7, name="Haustür")}
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["local", "", "doorstation.lan", "0.0.0.0", "300.1.1.1", "fe80::1", "255.255.255.255"],
+    ids=["local", "empty", "host-name", "this-network", "octet-over-255", "ipv6", "broadcast"],
+)
+async def test_an_address_no_device_can_have_does_not_make_a_doorstation(
+    logged_in: ComexioClient, comexio: FakeComexio, location: str
+) -> None:
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="", location=location)}))
+
+    assert await logged_in.get_doorstations() == {}
+
+
+async def test_an_ip_address_does_not_make_another_extension_type_a_doorstation(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve(
+        "GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="", type_id="10", location="192.168.0.50")})
+    )
+
+    assert await logged_in.get_doorstations() == {}
+
+
+async def test_an_extension_that_is_no_doorstation_is_not_taken_for_one(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="XXXX-XXXX-XXXX", type_id="10")}))
+
+    assert await logged_in.get_doorstations() == {}
+
+
+async def test_only_the_extensions_with_a_serial_number_are_kept_among_several(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"), _pictures_button("8"))))
+    comexio.serve(
+        "GET",
+        EDIT_PATH,
+        _edit_forms({"7": _extension_form(serial=""), "8": _extension_form(serial="YYYY", name="Garage")}),
+    )
+
+    assert await logged_in.get_doorstations() == {8: Doorstation(ext_id=8, camera_id=8, name="Garage")}
+    assert [request.query["id"] for request in comexio.received_at("GET", EDIT_PATH)] == ["7", "8"]
+
+
+async def test_a_doorstation_a_tile_names_is_not_asked_for_again(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """A page of Comexio OS 11.0.2 (tile with ids and the button) costs no request beyond the page itself."""
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_doorstation_tab("7", "Haustür") + _pictures_button("7")))
+
+    assert await logged_in.get_doorstations() == {7: Doorstation(ext_id=7, camera_id=7, name="Haustür")}
+    assert comexio.received_at("GET", EDIT_PATH) == []
+
+
+async def test_two_buttons_of_one_extension_ask_the_form_once(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7") + _pictures_button("7"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="XXXX")}))
+
+    assert await logged_in.get_doorstations() == {7: Doorstation(ext_id=7, camera_id=7, name="Haustür")}
+    assert len(comexio.received_at("GET", EDIT_PATH)) == 1
+
+
+async def test_a_form_that_cannot_be_read_is_raised_not_taken_for_no_doorstation(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    """A caller that holds known cameras keeps them on an error; an empty result would drop them."""
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": "<form></form>"}))
+
+    with pytest.raises(ComexioDataError, match=r"^Extension 7 edit form names no extension type"):
+        await logged_in.get_doorstations()
+
+
+async def test_the_first_button_of_an_extension_names_its_camera(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    buttons = _pictures_button("7", "7") + _pictures_button("7", "9")
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(buttons)))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="XXXX")}))
+
+    assert await logged_in.get_doorstations() == {7: Doorstation(ext_id=7, camera_id=7, name="Haustür")}
+
+
+async def test_the_camera_of_the_button_is_the_camera_of_the_doorstation(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7", "9"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="XXXX")}))
+
+    assert await logged_in.get_doorstations() == {7: Doorstation(ext_id=7, camera_id=9, name="Haustür")}
+
+
+async def test_a_tile_and_a_button_of_other_extensions_are_both_read_and_only_the_button_is_asked(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    page = _doorstation_tab("7", "Haustür") + _pictures_button("7") + _io_home_11_1_5(_pictures_button("8"))
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(page))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"8": _extension_form(serial="YYYY", name="Garage")}))
+
+    assert list((await logged_in.get_doorstations()).items()) == [
+        (7, Doorstation(ext_id=7, camera_id=7, name="Haustür")),
+        (8, Doorstation(ext_id=8, camera_id=8, name="Garage")),
+    ]
+    assert [request.query["id"] for request in comexio.received_at("GET", EDIT_PATH)] == ["8"]
+
+
+async def test_a_dummy_beside_a_tile_named_doorstation_is_dropped(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    page = _doorstation_tab("7", "Haustür") + _io_home_11_1_5(_pictures_button("8"))
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(page))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"8": _extension_form(serial="")}))
+
+    assert await logged_in.get_doorstations() == {7: Doorstation(ext_id=7, camera_id=7, name="Haustür")}
+
+
+async def test_a_login_form_for_the_second_candidate_is_raised_with_no_partial_result(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    async def handler(request: web.Request) -> web.Response:
+        forms = {"7": _extension_form(serial="XXXX"), "8": LOGIN_PAGE}
+        return web.Response(text=forms[request.query["id"]], content_type="text/html")
+
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"), _pictures_button("8"))))
+    comexio.serve("GET", EDIT_PATH, handler)
+
+    with pytest.raises(ComexioAuthenticationError, match=r"\(Extension 8 edit form\)$"):
+        await logged_in.get_doorstations()
+
+
+@pytest.mark.parametrize(
+    ("name", "serial", "expected"),
+    [("", "XXXX", Doorstation(ext_id=7, camera_id=7, name=None)), ("Haustür", "   ", None)],
+    ids=["no-name-is-none", "blank-serial-is-none"],
+)
+async def test_the_form_of_a_candidate_with_a_blank_field(
+    logged_in: ComexioClient, comexio: FakeComexio, name: str, serial: str, expected: Doorstation | None
+) -> None:
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial=serial, name=name)}))
+
+    assert await logged_in.get_doorstations() == ({} if expected is None else {7: expected})
+
+
+async def test_a_button_with_no_usable_ids_asks_no_form(logged_in: ComexioClient, comexio: FakeComexio) -> None:
+    buttons = _pictures_button("0") + _pictures_button("7", "0") + _pictures_button("7", "")
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(buttons)))
+
+    assert await logged_in.get_doorstations() == {}
+    assert comexio.received_at("GET", EDIT_PATH) == []
+
+
+async def test_a_button_with_no_usable_ids_is_logged_not_dropped_silently(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unusable button must leave a trace, else cameras that vanish from a changed page look like none exist."""
+    without_camera_attribute = '<input id="delete_doorstation_pictures_9" type="button">'
+    buttons = _pictures_button("0") + _pictures_button("7", "0") + _pictures_button("8", "") + without_camera_attribute
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(buttons)))
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.doorstation"):
+        assert await logged_in.get_doorstations() == {}
+
+    lines = [(record.levelno, record.getMessage()) for record in caplog.records]
+    assert [line for line in lines if "pictures button" in line[1]] == [
+        (logging.WARNING, "Skipped a Doorstation pictures button without a usable extension and camera id"),
+        (logging.WARNING, "Skipped a Doorstation pictures button without a usable extension and camera id"),
+        (logging.DEBUG, "Skipped a Doorstation pictures button with an empty camera id"),
+        (logging.WARNING, "Skipped a Doorstation pictures button without a usable extension and camera id"),
+    ]
+
+
+def test_parse_doorstations_of_a_page_with_only_a_pictures_button_finds_none() -> None:
+    """The client asks the extension form; the page parser alone still names no Doorstation and does not raise."""
+    assert parse_doorstations(_io_home_11_1_5(_pictures_button("7"))) == {}
