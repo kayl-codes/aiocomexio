@@ -7,12 +7,14 @@ counts the calls, so the nested form is caught as well. Build the arguments befo
 tested call inside it.
 
 A function or lambda defined in the block is not run by defining it, so the calls in its body do not count (its
-decorators, defaults and annotations do, annotations even where Python defers or never evaluates them); a lambda
-passed as a callback runs inside the tested call and is part of it. A generator expression's calls do count -
-stricter than needed, but it fails loudly. Not followed: a `pytest.raises(...)` call bound to a name or a
-parametrize argument first and entered as `with expectation:`, a local helper called in the block that itself makes
-several calls, and a `raises` alias bound by a walrus or tuple assignment or one that is rebound to something else
-later in the file (the name stays an alias) - the review checklist covers those.
+decorators, defaults and annotations do, annotations even where Python defers or never evaluates them, and so does
+applying a decorator); a lambda passed as a callback runs inside the tested call and is part of it. A call in an
+`as` target (`as box[key()]`) runs inside the block as well. A generator expression's calls do count - stricter than
+needed, but it fails loudly. Not followed: a `pytest.raises(...)` call bound to a name or a parametrize argument
+first and entered as `with expectation:`, a local helper called in the block that itself makes several calls, a
+`raises` alias unpacked from a starred tuple (`a, b = *x, pytest.raises`: the length of `x` is not known statically)
+and one that is rebound to something else later in the file (the name stays an alias) - the review checklist covers
+those.
 """
 
 import ast
@@ -24,30 +26,51 @@ TEST_FILE_PATTERNS = ("*.py",)
 _DEFERRED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 # Entering a context manager calls its __enter__ and leaving it its __exit__.
 _ENTER_EXIT = 2
+_RAISES = "raises"
+
+
+def _paired(target: ast.expr, value: ast.expr) -> list[tuple[ast.expr, ast.expr]]:
+    """(target, value) pairs of one assignment; `a, b = x, y` binds a to x and b to y."""
+    if (
+        isinstance(target, ast.Tuple | ast.List)
+        and isinstance(value, ast.Tuple | ast.List)
+        and len(target.elts) == len(value.elts)
+        and not any(isinstance(elt, ast.Starred) for elt in (*target.elts, *value.elts))
+    ):
+        return [pair for t, v in zip(target.elts, value.elts, strict=True) for pair in _paired(t, v)]
+    return [(target, value)]
+
+
+def _bindings(tree: ast.Module) -> list[tuple[ast.expr, ast.expr]]:
+    """(target, value) of every assignment, annotated assignment and walrus in the module."""
+    pairs: list[tuple[ast.expr, ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                pairs.extend(_paired(target, node.value))
+        elif isinstance(node, ast.AnnAssign | ast.NamedExpr) and node.value:
+            pairs.append((node.target, node.value))
+    return pairs
 
 
 def _raises_names(tree: ast.Module) -> set[str]:
     """Bare names `pytest.raises` is bound to: `raises`, any `from pytest import raises as <alias>` and any
-    `<alias> = pytest.raises` (annotated or not) or `<alias> = <a name already known>` assignment, in whatever
-    order they appear in the file."""
-    names = {"raises"}
+    `<alias> = pytest.raises` (annotated, walrus, or one element of a tuple assignment) or `<alias> = <a name already
+    known>` binding, in whatever order they appear in the file."""
+    names = {_RAISES}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "pytest":
-            names.update(alias.asname for alias in node.names if alias.name == "raises" and alias.asname)
-    bindings = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            bindings.append((node.value, node.targets))
-        elif isinstance(node, ast.AnnAssign) and node.value:
-            bindings.append((node.value, [node.target]))
+            names.update(alias.asname for alias in node.names if alias.name == _RAISES and alias.asname)
+    bindings = _bindings(tree)
     known = 0
     while known != len(names):
         known = len(names)
-        for value, targets in bindings:
-            if (isinstance(value, ast.Attribute) and value.attr == "raises") or (
-                isinstance(value, ast.Name) and value.id in names
+        for target, value in bindings:
+            if isinstance(target, ast.Name) and (
+                (isinstance(value, ast.Attribute) and value.attr == _RAISES)
+                or (isinstance(value, ast.Name) and value.id in names)
             ):
-                names.update(target.id for target in targets if isinstance(target, ast.Name))
+                names.add(target.id)
     return names
 
 
@@ -56,7 +79,7 @@ def _is_raises_call(node: ast.AST, raises_names: set[str]) -> bool:
     if not isinstance(node, ast.Call):
         return False
     func = node.func
-    return (isinstance(func, ast.Attribute) and func.attr == "raises") or (
+    return (isinstance(func, ast.Attribute) and func.attr == _RAISES) or (
         isinstance(func, ast.Name) and func.id in raises_names
     )
 
@@ -78,6 +101,8 @@ def _executed_calls(node: ast.AST) -> int:
             applied = len(node.decorator_list)  # applying a decorator is a call too
         return applied + sum(_executed_calls(expr) for expr in run_now)
     calls = sum(_executed_calls(child) for child in ast.iter_child_nodes(node))
+    if isinstance(node, ast.ClassDef):
+        calls += len(node.decorator_list)  # applying a class decorator is a call too
     if isinstance(node, ast.With | ast.AsyncWith):
         calls += _ENTER_EXIT * len(node.items)
     if isinstance(node, ast.Call):
@@ -113,6 +138,8 @@ def _raises_blocks(source: str) -> list[tuple[int, int, str]]:
         later_items = node.items[raises_at + 1 :]
         # A later item runs its __enter__ and __exit__ inside pytest.raises, even for a manager built before the `with`.
         calls = sum(_ENTER_EXIT + _executed_calls(item.context_expr) for item in later_items)
+        # The `as` targets are assigned after the manager is entered: a call in one (`as box[key()]`) runs inside too.
+        calls += sum(_executed_calls(item.optional_vars) for item in node.items[raises_at:] if item.optional_vars)
         calls += sum(_executed_calls(stmt) for stmt in node.body)
         blocks.append((node.lineno, calls, ast.unparse(node.body[0])))
     return blocks
@@ -143,6 +170,14 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assigned = "expect = pytest.raises\nwith expect(ValueError):\n    check(build(1))\n"
     annotated_alias = "expect: object = pytest.raises\nwith expect(ValueError):\n    check(build(1))\n"
     forward_chain = "alias = source\nsource = pytest.raises\nwith alias(ValueError):\n    check(build(1))\n"
+    walrus = "(expect := pytest.raises)\nwith expect(ValueError):\n    check(build(1))\n"
+    paired = "other, expect = 1, pytest.raises\nwith expect(ValueError):\n    check(build(1))\n"
+    nested_pair = "(expect, other), last = (pytest.raises, 1), 2\nwith expect(ValueError):\n    check(build(1))\n"
+    other_slot = "other, expect = pytest.raises, 1\nwith expect(ValueError):\n    check(build(1))\n"
+    unequal_length = "expect, other = pytest.raises, 1, 2\nwith expect(ValueError):\n    check(build(1))\n"
+    class_decorated = "with pytest.raises(ValueError):\n    @wrap(1)\n    class C:\n        pass\n"
+    target_call = "with pytest.raises(ValueError) as box[key()]:\n    check(x)\n"
+    plain_target = "with pytest.raises(ValueError) as info:\n    check(x)\n"
 
     assert _extra_call_blocks(nested) == [(1, "check(build(1))")]
     assert _extra_call_blocks(sequential) == [(1, "x = build(1)")]
@@ -152,6 +187,11 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assert _extra_call_blocks(assigned) == [(2, "check(build(1))")]
     assert _extra_call_blocks(annotated_alias) == [(2, "check(build(1))")]
     assert _extra_call_blocks(forward_chain) == [(3, "check(build(1))")]
+    assert _extra_call_blocks(walrus) == [(2, "check(build(1))")]
+    assert _extra_call_blocks(paired) == [(2, "check(build(1))")]
+    assert _extra_call_blocks(nested_pair) == [(2, "check(build(1))")]
+    assert [line for line, _ in _extra_call_blocks(class_decorated)] == [1]
+    assert _extra_call_blocks(target_call) == [(1, "check(x)")]
     assert _extra_call_blocks(later_item) == [(1, "check(x)")]
     assert _extra_call_blocks(later_prebuilt) == [(1, "check(x)")]
     assert [line for line, _ in _extra_call_blocks(nested_manager)] == [1]
@@ -164,6 +204,9 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assert not _extra_call_blocks(earlier_item)
     assert not _extra_call_blocks(deferred)
     assert not _extra_call_blocks(other_context)
+    assert not _extra_call_blocks(other_slot)
+    assert not _extra_call_blocks(unequal_length)  # no pairing, and no crash from zip(strict=True)
+    assert not _extra_call_blocks(plain_target)
 
 
 def test_every_pytest_raises_block_makes_one_call() -> None:
