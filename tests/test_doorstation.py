@@ -1507,12 +1507,12 @@ def _io_home_11_1_5(*buttons: str) -> str:
     return f"<html><body>{BASE_BLOCK}{tabs}</body></html>"
 
 
-def _extension_form(*, serial: str, type_id: str = "16", name: str = "Haustür") -> str:
+def _extension_form(*, serial: str, type_id: str = "16", name: str = "Haustür", location: str = "local") -> str:
     """The inputs of an extension edit form that the client reads."""
     return (
         f'<form><input type="hidden" id="extension_type_id" value="{type_id}">'
         f'<input id="extension_name" value="{name}"><input id="extension_serial" value="{serial}">'
-        '<input id="extension_location" value="local"></form>'
+        f'<input id="extension_location" value="{location}"></form>'
     )
 
 
@@ -1576,7 +1576,7 @@ async def test_a_doorstation_with_a_serial_number_is_found_by_its_pictures_butto
 async def test_a_doorstation_without_a_serial_number_is_no_camera(
     logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A Doorstation extension without a serial number (a dummy, one learned offline) has the same tab and button."""
+    """A dummy Doorstation (no serial, `local` as its location) has the same tab and button as a real one."""
     comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
     comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="")}))
 
@@ -1585,9 +1585,45 @@ async def test_a_doorstation_without_a_serial_number_is_no_camera(
 
     assert result == {}
     assert (
-        "Extension 7 has a Doorstation's pictures button but no Doorstation with a serial number "
-        "(type 16, serial missing)"
+        "Extension 7 has a Doorstation's pictures button but no real Doorstation "
+        "(type 16, serial missing, IP address missing)"
     ) in [record.getMessage() for record in caplog.records]
+
+
+@pytest.mark.parametrize("location", ["192.168.0.50", " 192.168.0.50 "], ids=["plain", "padded"])
+async def test_a_doorstation_without_a_serial_number_but_with_an_ip_address_is_found(
+    logged_in: ComexioClient, comexio: FakeComexio, location: str
+) -> None:
+    """One learned offline has no serial, but the IP address entered for it proves a device (review of #90)."""
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="", location=location)}))
+
+    assert await logged_in.get_doorstations() == {7: Doorstation(ext_id=7, camera_id=7, name="Haustür")}
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["local", "", "doorstation.lan", "0.0.0.0", "300.1.1.1", "fe80::1", "255.255.255.255"],
+    ids=["local", "empty", "host-name", "this-network", "octet-over-255", "ipv6", "broadcast"],
+)
+async def test_an_address_no_device_can_have_does_not_make_a_doorstation(
+    logged_in: ComexioClient, comexio: FakeComexio, location: str
+) -> None:
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve("GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="", location=location)}))
+
+    assert await logged_in.get_doorstations() == {}
+
+
+async def test_an_ip_address_does_not_make_another_extension_type_a_doorstation(
+    logged_in: ComexioClient, comexio: FakeComexio
+) -> None:
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(_pictures_button("7"))))
+    comexio.serve(
+        "GET", EDIT_PATH, _edit_forms({"7": _extension_form(serial="", type_id="10", location="192.168.0.50")})
+    )
+
+    assert await logged_in.get_doorstations() == {}
 
 
 async def test_an_extension_that_is_no_doorstation_is_not_taken_for_one(

@@ -237,8 +237,8 @@ buttons `DI1`–`DI3`, `NameLED1`, …) come through `config.parse_config` like 
 extension. The camera calls need the admin session (`login()` first):
 
 - `get_doorstations()` reads the IO home page and returns the Doorstations keyed by extension id.
-  Each `Doorstation` has `ext_id`, `camera_id` and `name` (the extension name, `None` if the page
-  carries none). An empty map means the page lists extensions but no Doorstation; a page with neither
+  Each `Doorstation` has `ext_id`, `camera_id` and `name` (the extension name from the tile's `data-extname`, or, for
+  a Doorstation found by its button, from its edit form; `None` if there is none). An empty map means the page lists extensions but no Doorstation; a page with neither
   the device counters of its extension blocks (the ones `get_onewire_device_count()` reads) nor an
   element with a non-empty `data-camera_id` raises `ComexioDataError`. An element with a `data-camera_id` but
   no `data-extid` at all is skipped by that first pass without an error. Elements that carry a `data-extid` and a
@@ -249,13 +249,14 @@ extension. The camera calls need the admin session (`login()` first):
   picture is loaded by script); the only element that still names both ids is the "delete pictures" button
   (`id="delete_doorstation_pictures_<extension id>"`, `data-camera_id`). Such a button, in an extension no tile
   named, makes that extension a candidate, and the client reads the extension's edit form (`get_extension`): it is a
-  Doorstation when the form says type 16 **and** carries a serial number. A cameraless dummy Doorstation renders the
-  same button but has no serial, so it is left out (logged at DEBUG). A button with the id form
+  Doorstation when the form says type 16 **and** carries a serial number or a usable IP address (`ExtensionInfo.ip`).
+  A cameraless dummy Doorstation renders the same button but has neither (no serial, `local` as its location), so it
+  is left out (logged at DEBUG). A button with the id form
   `delete_doorstation_pictures_<digits>` whose ids are unusable (a missing `data-camera_id` included) names no
   candidate and is logged (WARNING; DEBUG for an empty camera id). An element of another id form is not told from the
   other elements that carry a `data-camera_id` (every camera tile does) and gets no button-specific log, only the
   generic DEBUG line for elements without a `data-extid`. Limits: a real Doorstation that was only learned
-  offline has no serial and looks like a dummy; a real one with a serial but no camera is reported. A read error of
+  offline and has no IP address entered looks like a dummy; a real one without a camera is reported. A read error of
   the form propagates, so a caller keeps the Doorstations it knew instead of getting a partial result; each call
   reads one form per candidate (the library caches nothing).
 - `get_extension(ext_id)` reads the edit form of one extension (`/admin/extension/edit/?id=<ext_id>&json_return=true`,

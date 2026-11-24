@@ -4,7 +4,7 @@ The IO home page (/admin/in_output/home) renders one tab per extension. The came
 carry data-extid, data-extname and data-camera_id, the ids holding the extension id (reported for Comexio OS 11.0.2 in
 kayl-codes/homeassistant-comexio#180); other controls of the tab, such as the "delete pictures" button, may carry only
 data-camera_id. Comexio OS 11.1.5 serves the tile without those attributes: the button is then the only element that
-names the ids, and a Doorstation is told from a cameraless one by its extension's serial number (see
+names the ids, and a Doorstation is told from a cameraless one by its extension's serial number or IP address (see
 picture_button_ids). The IO-Server serves the camera as an MJPEG stream (multipart/x-mixed-replace,
 one JPEG per part) under /proxy/cam/<camera_id>/; the Doorstation itself serves the same stream under its own address.
 
@@ -131,7 +131,7 @@ def picture_button_ids(attributes: Mapping[str, str]) -> tuple[int, int] | None:
     id="delete_doorstation_pictures_<extension id>" with data-camera_id="<camera id>" (kayl-codes/homeassistant-comexio
     #180). The button is there on a Doorstation that has a camera as much as on one that has none, so it only names a
     candidate: ComexioClient.get_doorstations asks the extension's edit form whether it is a Doorstation with a
-    serial number.
+    serial number or an IP address.
     """
     match = _PICTURE_BUTTON_ID.fullmatch(attributes.get("id", ""))
     if match is None:

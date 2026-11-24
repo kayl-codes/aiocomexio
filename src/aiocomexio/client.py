@@ -1132,8 +1132,8 @@ class ComexioClient:
         that names no Doorstation in its camera tiles (Comexio OS 11.1.5 serves them without ids) is read by the
         "delete pictures" button of each Doorstation tab, which a cameraless Doorstation has too: for each such
         extension that no tile names, one small request for its edit form (see get_extension) decides, and only a
-        Doorstation with a serial number counts (a Doorstation extension without one, such as a dummy or one learned
-        offline, is left out; one with a serial number but no camera is reported, its stream then fails). An error of
+        Doorstation with a serial number or an IP address of its own counts (a dummy has neither and is left out; one
+        that is real but has no camera is reported, its stream then fails). An error of
         that request is raised, a partial result never returned, so a caller keeps the cameras it knows; the same
         error on every call from one unreadable form hides the other Doorstations too. Nothing is remembered between
         calls: each call asks once per such extension, so a caller that polls often should keep the verdicts.
@@ -1141,21 +1141,26 @@ class ComexioClient:
         html = await self._request_admin_text("GET", _BUS_WORKLOAD_REFERER_PATH, what=_IO_HOME_PAGE)
         doorstations, buttons = _parse_io_home(html)
         for ext_id, camera_id in buttons.items():
-            if ext_id not in doorstations and (doorstation := await self._doorstation_with_serial(ext_id, camera_id)):
+            if ext_id not in doorstations and (doorstation := await self._real_doorstation(ext_id, camera_id)):
                 doorstations[ext_id] = doorstation
         return doorstations
 
-    async def _doorstation_with_serial(self, ext_id: int, camera_id: int) -> Doorstation | None:
-        """The Doorstation of extension ext_id if its edit form shows one with a serial number, else None."""
+    async def _real_doorstation(self, ext_id: int, camera_id: int) -> Doorstation | None:
+        """The Doorstation of extension ext_id if its edit form shows a real one, else None.
+
+        Real means type 16 with a serial number or an IP address of its own: a cameraless dummy has neither (no
+        serial, `local` as its location), a real Doorstation has both, one learned offline at least its IP address.
+        """
         info = await self.get_extension(ext_id)
-        if info.is_doorstation and info.serial:
+        if info.is_doorstation and (info.serial or info.ip):
             return Doorstation(ext_id=ext_id, camera_id=camera_id, name=info.name)
         _LOGGER.debug(
-            "Extension %r has a Doorstation's pictures button but no Doorstation with a serial number "
-            "(type %r, serial %s)",
+            "Extension %r has a Doorstation's pictures button but no real Doorstation "
+            "(type %r, serial %s, IP address %s)",
             ext_id,
             info.type_id,
             "set" if info.serial else "missing",
+            "set" if info.ip else "missing",
         )
         return None
 
