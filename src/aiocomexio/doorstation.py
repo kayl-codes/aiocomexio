@@ -138,7 +138,18 @@ def picture_button_ids(attributes: Mapping[str, str]) -> tuple[int, int] | None:
         return None
     ext_id = _positive_id(match.group(1))
     camera_id = _positive_id(attributes.get(CAMERA_ID_ATTRIBUTE))
-    return None if ext_id is None or camera_id is None else (ext_id, camera_id)
+    if ext_id is None or camera_id is None:
+        _log_unusable_picture_button(attributes)
+        return None
+    return ext_id, camera_id
+
+
+def _log_unusable_picture_button(attributes: Mapping[str, str]) -> None:
+    """Say that a pictures button names no candidate: an empty camera id is a known state, other ids a changed page."""
+    if attributes.get(CAMERA_ID_ATTRIBUTE):
+        _LOGGER.warning("Skipped a Doorstation pictures button without a usable extension and camera id")
+    else:
+        _LOGGER.debug("Skipped a Doorstation pictures button with an empty camera id")
 
 
 def _doorstation_of(attributes: Mapping[str, str]) -> Doorstation | None:

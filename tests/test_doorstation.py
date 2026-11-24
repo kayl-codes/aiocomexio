@@ -1721,6 +1721,24 @@ async def test_a_button_with_no_usable_ids_asks_no_form(logged_in: ComexioClient
     assert comexio.received_at("GET", EDIT_PATH) == []
 
 
+async def test_a_button_with_no_usable_ids_is_logged_not_dropped_silently(
+    logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unusable button must leave a trace, else cameras that vanish from a changed page look like none exist."""
+    buttons = _pictures_button("0") + _pictures_button("7", "0") + _pictures_button("8", "")
+    comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(buttons)))
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.doorstation"):
+        assert await logged_in.get_doorstations() == {}
+
+    lines = [(record.levelno, record.getMessage()) for record in caplog.records]
+    assert [line for line in lines if "pictures button" in line[1]] == [
+        (logging.WARNING, "Skipped a Doorstation pictures button without a usable extension and camera id"),
+        (logging.WARNING, "Skipped a Doorstation pictures button without a usable extension and camera id"),
+        (logging.DEBUG, "Skipped a Doorstation pictures button with an empty camera id"),
+    ]
+
+
 def test_parse_doorstations_of_a_page_with_only_a_pictures_button_finds_none() -> None:
     """The client asks the extension form; the page parser alone still names no Doorstation and does not raise."""
     assert parse_doorstations(_io_home_11_1_5(_pictures_button("7"))) == {}
