@@ -62,7 +62,7 @@ Beta. The move out of the integration, in order:
 
 ```bash
 pip install -e ".[dev]"   # once
-ruff check .              # lint (ASYNC, B, C4, E, F, FURB, I, PERF, PIE, PLE, PLW, RET, RSE, SIM, UP, W; py313, line-length 120)
+ruff check .              # lint (ASYNC, B, C4, E, F, FURB, I, PERF, PIE, PLE, PLW, RET, RSE, SIM, UP, W, PT012, PT018; py313, line-length 120)
 ruff format --check .     # formatting check; drop --check to auto-format
 mypy                      # strict, blocking in CI
 pytest                    # tests; pytest --cov=aiocomexio for coverage
@@ -85,8 +85,9 @@ pre-commit run --all-files
   complexipy scores close to but not exactly like SonarCloud, so the one permitted exception is its
   `BASELINE`: functions SonarCloud accepts but complexipy already rated above 15, pinned at that
   score — lower or drop an entry once the function is simpler, never add one for new code.
-- A `pytest.raises` block makes exactly one call (SonarCloud S5778; a context manager entered after it counts
-  too): build the arguments before the `with`.
+- A `pytest.raises` block makes at most one call (SonarCloud S5778; a context manager entered after it counts
+  too): build the arguments before the `with`. Blocks without an explicit call stay allowed on purpose
+  (`await request`, `rights[1] = 3`: the call sits in the awaitable or the operator).
   Ruff's PT012 only counts statements; `tests/test_pytest_raises_single_call.py` counts the calls, nested
   ones (`check(build(x))`) included. It does not follow a helper that makes several calls itself, so do not
   wrap two calls in a helper to get past it.
