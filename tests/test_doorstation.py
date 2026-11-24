@@ -909,8 +909,10 @@ def test_an_sos_header_with_one_to_four_components_is_read(components: int) -> N
 
 @pytest.mark.parametrize(("code", "name"), [(0x00, "0x00"), (0xD8, "0xD8")], ids=["stuffed-byte", "second-soi"])
 def test_a_marker_that_cannot_start_a_segment_is_malformed(code: int, name: str) -> None:
+    frame = SOI + APP0 + bytes((0xFF, code)) + b"\x00\x10" + EOI
+
     with pytest.raises(ComexioDataError) as info:
-        first_jpeg_frame(SOI + APP0 + bytes((0xFF, code)) + b"\x00\x10" + EOI)
+        first_jpeg_frame(frame)
 
     assert str(info.value) == f"Camera frame has the unexpected JPEG marker {name} at offset {len(SOI + APP0) + 1}"
 
