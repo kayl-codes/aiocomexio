@@ -1151,8 +1151,8 @@ class ComexioClient:
         if info.is_doorstation and info.serial:
             return Doorstation(ext_id=ext_id, camera_id=camera_id, name=info.name)
         _LOGGER.debug(
-            "Extension %d has a Doorstation's pictures button but no Doorstation with a serial number "
-            "(type %d, serial %s)",
+            "Extension %r has a Doorstation's pictures button but no Doorstation with a serial number "
+            "(type %r, serial %s)",
             ext_id,
             info.type_id,
             "set" if info.serial else "missing",
@@ -3651,11 +3651,12 @@ class _DoorstationParser(_FormParser):
     def handle_form_tag(self, tag: str, attributes: dict[str, str]) -> None:
         if _is_extension_counter(tag, attributes):
             self.saw_extension_counter = True
+        # Before the data-camera_id guard: a pictures button that lost its camera attribute must reach the diagnostic.
+        if (ids := picture_button_ids(attributes)) is not None:
+            self.picture_buttons.setdefault(*ids)
         if CAMERA_ID_ATTRIBUTE in attributes:
             kept = tuple((name, attributes[name]) for name in DOORSTATION_ATTRIBUTES if name in attributes)
             self.elements.setdefault(kept, None)
-            if (ids := picture_button_ids(attributes)) is not None:
-                self.picture_buttons.setdefault(*ids)
 
 
 def _is_extension_counter(tag: str, attributes: dict[str, str]) -> bool:

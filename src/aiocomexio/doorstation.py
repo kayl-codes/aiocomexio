@@ -145,11 +145,11 @@ def picture_button_ids(attributes: Mapping[str, str]) -> tuple[int, int] | None:
 
 
 def _log_unusable_picture_button(attributes: Mapping[str, str]) -> None:
-    """Say that a pictures button names no candidate: an empty camera id is a known state, other ids a changed page."""
-    if attributes.get(CAMERA_ID_ATTRIBUTE):
-        _LOGGER.warning("Skipped a Doorstation pictures button without a usable extension and camera id")
-    else:
+    """Say that a pictures button names no candidate: an empty camera id is a known state, any other failure is not."""
+    if attributes.get(CAMERA_ID_ATTRIBUTE) == "":
         _LOGGER.debug("Skipped a Doorstation pictures button with an empty camera id")
+    else:
+        _LOGGER.warning("Skipped a Doorstation pictures button without a usable extension and camera id")
 
 
 def _doorstation_of(attributes: Mapping[str, str]) -> Doorstation | None:

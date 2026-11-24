@@ -251,9 +251,10 @@ extension. The camera calls need the admin session (`login()` first):
   named, makes that extension a candidate, and the client reads the extension's edit form (`get_extension`): it is a
   Doorstation when the form says type 16 **and** carries a serial number. A cameraless dummy Doorstation renders the
   same button but has no serial, so it is left out (logged at DEBUG). A button with the id form
-  `delete_doorstation_pictures_<digits>` whose ids are unusable names no candidate and is logged (WARNING; DEBUG for an
-  empty camera id). An element of another id form is not told from the other elements that carry a `data-camera_id`
-  (every camera tile does) and is skipped without a log. Limits: a real Doorstation that was only learned
+  `delete_doorstation_pictures_<digits>` whose ids are unusable (a missing `data-camera_id` included) names no
+  candidate and is logged (WARNING; DEBUG for an empty camera id). An element of another id form is not told from the
+  other elements that carry a `data-camera_id` (every camera tile does) and gets no button-specific log, only the
+  generic DEBUG line for elements without a `data-extid`. Limits: a real Doorstation that was only learned
   offline has no serial and looks like a dummy; a real one with a serial but no camera is reported. A read error of
   the form propagates, so a caller keeps the Doorstations it knew instead of getting a partial result; each call
   reads one form per candidate (the library caches nothing).

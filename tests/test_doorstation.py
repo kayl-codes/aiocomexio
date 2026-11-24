@@ -1725,7 +1725,8 @@ async def test_a_button_with_no_usable_ids_is_logged_not_dropped_silently(
     logged_in: ComexioClient, comexio: FakeComexio, caplog: pytest.LogCaptureFixture
 ) -> None:
     """An unusable button must leave a trace, else cameras that vanish from a changed page look like none exist."""
-    buttons = _pictures_button("0") + _pictures_button("7", "0") + _pictures_button("8", "")
+    without_camera_attribute = '<input id="delete_doorstation_pictures_9" type="button">'
+    buttons = _pictures_button("0") + _pictures_button("7", "0") + _pictures_button("8", "") + without_camera_attribute
     comexio.serve("GET", IO_HOME_PATH, _admin_page(_io_home_11_1_5(buttons)))
 
     with caplog.at_level(logging.DEBUG, logger="aiocomexio.doorstation"):
@@ -1736,6 +1737,7 @@ async def test_a_button_with_no_usable_ids_is_logged_not_dropped_silently(
         (logging.WARNING, "Skipped a Doorstation pictures button without a usable extension and camera id"),
         (logging.WARNING, "Skipped a Doorstation pictures button without a usable extension and camera id"),
         (logging.DEBUG, "Skipped a Doorstation pictures button with an empty camera id"),
+        (logging.WARNING, "Skipped a Doorstation pictures button without a usable extension and camera id"),
     ]
 
 
