@@ -15,11 +15,12 @@ metaclass (any base counts, also one that runs no code of the suite). A generato
 stricter than needed, but it fails loudly. A `pytest.raises(...)` call bound to a name first and entered as
 `with expectation:` is followed, module-wide: a name that is rebound to another manager or reused for one in
 another function still counts as the raises manager. Not followed: such a manager handed in as a parametrize
-argument or wrapped in a call (`with wrap(expectation):`), a local helper called in the block that itself makes
+argument, wrapped in a call (`with wrap(expectation):`) or taken from a container and entered by a loop variable
+(`for c in cases: with c:`), a local helper called in the block that itself makes
 several calls, a `raises` alias unpacked from a starred tuple (`a, b = *x, pytest.raises`: the length of `x` is
 not known statically) and one that is rebound to something else later in the file (the name stays an alias), and
-the calls Python makes implicitly (a property or descriptor access, an iterator protocol call): they cannot be seen
-without types - the review checklist covers those.
+the calls Python makes implicitly (a property or descriptor access, a descriptor's `__set_name__` while a class is
+made, an iterator protocol call): they cannot be seen without types - the review checklist covers those.
 """
 
 import ast
@@ -90,7 +91,13 @@ def _is_raises_call(node: ast.AST, raises_names: set[str]) -> bool:
 
 
 def _prebuilt_managers(tree: ast.Module, raises_names: set[str]) -> set[str]:
-    """Names a `pytest.raises(...)` call is bound to (or another such name), entered later as `with <name>:`."""
+    """Names a `pytest.raises(...)` call is bound to (or another such name), entered later as `with <name>:`.
+
+    A raises call anywhere in the bound value counts, as in a with-item: a conditional
+    `m = pytest.raises(E) if x else nullcontext()` is followed, and so is one inside an argument
+    (`m = make(raises(E))`), an over-reach that fails loudly. A name counts module-wide, whatever function it is
+    bound in.
+    """
     bindings = [(target.id, value) for target, value in _bindings(tree) if isinstance(target, ast.Name)]
     managers: set[str] = set()
     known = -1
@@ -99,7 +106,8 @@ def _prebuilt_managers(tree: ast.Module, raises_names: set[str]) -> set[str]:
         managers.update(
             name
             for name, value in bindings
-            if _is_raises_call(value, raises_names) or (isinstance(value, ast.Name) and value.id in managers)
+            if any(_is_raises_call(sub, raises_names) for sub in ast.walk(value))
+            or (isinstance(value, ast.Name) and value.id in managers)
         )
     return managers
 
@@ -215,6 +223,11 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     prebuilt_tuple = "expectation, other = pytest.raises(ValueError), 1\nwith expectation:\n    check(build(1))\n"
     prebuilt_later = "expectation = pytest.raises(ValueError)\nwith expectation, pause():\n    check(x)\n"
     prebuilt_target = "expectation = pytest.raises(ValueError)\nwith expectation as box[key()]:\n    check(x)\n"
+    prebuilt_conditional = (
+        "expectation = pytest.raises(ValueError) if fails else nullcontext()\nwith expectation:\n    check(build(1))\n"
+    )
+    prebuilt_nested_call = "manager = make(pytest.raises(ValueError))\nwith manager:\n    check(build(1))\n"
+    prebuilt_looped = "cases = [pytest.raises(A)]\nfor c in cases:\n    with c:\n        check(build(1))\n"
     prebuilt_wrapped = "expectation = pytest.raises(ValueError)\nwith wrap(expectation):\n    check(build(1))\n"
     target_call = "with pytest.raises(ValueError) as box[key()]:\n    check(x)\n"
     plain_target = "with pytest.raises(ValueError) as info:\n    check(x)\n"
@@ -236,6 +249,8 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assert _extra_call_blocks(prebuilt_alias) == [(3, "check(build(1))")]
     assert [line for line, _ in _extra_call_blocks(class_hook)] == [1]
     assert [line for line, _ in _extra_call_blocks(class_meta)] == [1]
+    assert _extra_call_blocks(prebuilt_conditional) == [(2, "check(build(1))")]
+    assert _extra_call_blocks(prebuilt_nested_call) == [(2, "check(build(1))")]  # over-reach, see _prebuilt_managers
     assert _extra_call_blocks(prebuilt_tuple) == [(2, "check(build(1))")]
     assert _extra_call_blocks(prebuilt_later) == [(2, "check(x)")]
     assert _extra_call_blocks(prebuilt_target) == [(2, "check(x)")]
@@ -261,6 +276,7 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assert not _extra_call_blocks(class_alone)
     assert not _extra_call_blocks(class_in_def)  # a class made only when g runs: its creation is not part of the block
     assert not _extra_call_blocks(prebuilt_wrapped)  # not followed, see the docstring
+    assert not _extra_call_blocks(prebuilt_looped)  # not followed, see the docstring
 
 
 def test_every_pytest_raises_block_makes_one_call() -> None:
