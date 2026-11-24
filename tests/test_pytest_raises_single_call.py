@@ -16,14 +16,19 @@ creating it calls `type`, which can raise by itself (`__slots__ = ("x", "x")`) a
 `__init_subclass__` or the metaclass. A generator expression's calls do count - stricter than needed (its body may
 never run), but it fails loudly. A `pytest.raises(...)` call bound to a name first and entered as
 `with expectation:` is followed, module-wide: a name that is rebound to another manager or reused for one in
-another function still counts as the raises manager. Not followed: such a manager handed in as a parametrize
-argument, wrapped in a call (`with wrap(expectation):`) or taken from a container and entered by a loop variable
-(`for c in cases: with c:`), a local helper called in the block that itself makes several calls, a `raises` alias
-that sits where a star covers (`expect, other = *items, pytest.raises` binds only `other`: how far a star reaches
-is not known statically, so only the elements before the first and after the last star pair up) and one that is
-rebound to something else later in the file (the name stays an alias), and the calls Python makes implicitly (a
-property or descriptor access, a descriptor's `__set_name__` while a class is made, an iterator protocol call):
-they cannot be seen without types - the review checklist covers those.
+another function still counts as the raises manager. A manager entered before `pytest.raises` in the same `with`
+is outside it (it exits after `pytest.raises` has), so its calls do not count. A bare `raises` or any `.raises(...)`
+is read as pytest's: stricter than needed, but a hit fails loudly with file and line. Not followed: such a manager
+handed in as a parametrize argument, wrapped in a call (`with wrap(expectation):`), picked by a conditional
+(`with expectation if enabled else nullcontext():`) or taken from a container and entered by a loop variable
+(`for c in cases: with c:`), an alias handed on by a tuple that a name holds (`pair = (pytest.raises, 1)`, then
+`expect, _ = pair`) or by a parameter default (`def helper(expect=pytest.raises)`), a local helper called in the
+block that itself makes several calls, a `raises` alias that sits where a star covers (`expect, other = *items,
+pytest.raises` binds only `other`: how far a star reaches is not known statically, so only the elements before the
+first and after the last star pair up) and one that is rebound to something else later in the file (the name stays
+an alias), and the calls Python makes implicitly (a property or descriptor access, a descriptor's `__set_name__`
+while a class is made, an iterator protocol call): they cannot be seen without types - the review checklist covers
+those.
 """
 
 import ast
