@@ -9,12 +9,17 @@ tested call inside it.
 A function or lambda defined in the block is not run by defining it, so the calls in its body do not count (its
 decorators, defaults and annotations do, annotations even where Python defers or never evaluates them, and so does
 applying a decorator); a lambda passed as a callback runs inside the tested call and is part of it. A call in an
-`as` target (`as box[key()]`) runs inside the block as well. A generator expression's calls do count - stricter than
-needed, but it fails loudly. Not followed: a `pytest.raises(...)` call bound to a name or a parametrize argument
-first and entered as `with expectation:`, a local helper called in the block that itself makes several calls, a
-`raises` alias unpacked from a starred tuple (`a, b = *x, pytest.raises`: the length of `x` is not known statically)
-and one that is rebound to something else later in the file (the name stays an alias) - the review checklist covers
-those.
+`as` target (`as box[key()]`) runs inside the block as well. A class defined in the block with a base or a keyword
+(`class C(Base):`, `metaclass=Meta`) counts as one call: creating it can run the base's `__init_subclass__` or the
+metaclass (any base counts, also one that runs no code of the suite). A generator expression's calls do count -
+stricter than needed, but it fails loudly. A `pytest.raises(...)` call bound to a name first and entered as
+`with expectation:` is followed, module-wide: a name that is rebound to another manager or reused for one in
+another function still counts as the raises manager. Not followed: such a manager handed in as a parametrize
+argument or wrapped in a call (`with wrap(expectation):`), a local helper called in the block that itself makes
+several calls, a `raises` alias unpacked from a starred tuple (`a, b = *x, pytest.raises`: the length of `x` is
+not known statically) and one that is rebound to something else later in the file (the name stays an alias), and
+the calls Python makes implicitly (a property or descriptor access, an iterator protocol call): they cannot be seen
+without types - the review checklist covers those.
 """
 
 import ast
@@ -84,6 +89,21 @@ def _is_raises_call(node: ast.AST, raises_names: set[str]) -> bool:
     )
 
 
+def _prebuilt_managers(tree: ast.Module, raises_names: set[str]) -> set[str]:
+    """Names a `pytest.raises(...)` call is bound to (or another such name), entered later as `with <name>:`."""
+    bindings = [(target.id, value) for target, value in _bindings(tree) if isinstance(target, ast.Name)]
+    managers: set[str] = set()
+    known = -1
+    while known != len(managers):
+        known = len(managers)
+        managers.update(
+            name
+            for name, value in bindings
+            if _is_raises_call(value, raises_names) or (isinstance(value, ast.Name) and value.id in managers)
+        )
+    return managers
+
+
 def _executed_calls(node: ast.AST) -> int:
     """Count the calls run when `node` runs, skipping the bodies of functions and lambdas it only defines.
 
@@ -103,6 +123,8 @@ def _executed_calls(node: ast.AST) -> int:
     calls = sum(_executed_calls(child) for child in ast.iter_child_nodes(node))
     if isinstance(node, ast.ClassDef):
         calls += len(node.decorator_list)  # applying a class decorator is a call too
+        if node.bases or node.keywords:
+            calls += 1  # creating the class runs a base's __init_subclass__ or the metaclass
     if isinstance(node, ast.With | ast.AsyncWith):
         calls += _ENTER_EXIT * len(node.items)
     if isinstance(node, ast.Call):
@@ -121,6 +143,7 @@ def _raises_blocks(source: str) -> list[tuple[int, int, str]]:
     """
     tree = ast.parse(source)
     raises_names = _raises_names(tree)
+    managers = _prebuilt_managers(tree, raises_names)
     blocks = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.With | ast.AsyncWith):
@@ -129,7 +152,8 @@ def _raises_blocks(source: str) -> list[tuple[int, int, str]]:
             (
                 index
                 for index, item in enumerate(node.items)
-                if any(_is_raises_call(sub, raises_names) for sub in ast.walk(item.context_expr))
+                if (isinstance(item.context_expr, ast.Name) and item.context_expr.id in managers)
+                or any(_is_raises_call(sub, raises_names) for sub in ast.walk(item.context_expr))
             ),
             None,
         )
@@ -176,6 +200,22 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     other_slot = "other, expect = pytest.raises, 1\nwith expect(ValueError):\n    check(build(1))\n"
     unequal_length = "expect, other = pytest.raises, 1, 2\nwith expect(ValueError):\n    check(build(1))\n"
     class_decorated = "with pytest.raises(ValueError):\n    @wrap(1)\n    class C:\n        pass\n"
+    prebuilt = "expectation = pytest.raises(ValueError)\nwith expectation:\n    check(build(1))\n"
+    prebuilt_chain = "first = pytest.raises(ValueError)\nsecond = first\nwith second:\n    check(build(1))\n"
+    prebuilt_alias = "expect = pytest.raises\nmanager = expect(ValueError)\nwith manager:\n    check(build(1))\n"
+    prebuilt_single = "expectation = pytest.raises(ValueError)\nwith expectation:\n    check(x)\n"
+    other_manager = "manager = make(ValueError)\nwith manager:\n    check(build(1))\n"
+    class_hook = "with pytest.raises(ValueError):\n    class C(Base):\n        pass\n    check(C)\n"
+    class_meta = "with pytest.raises(ValueError):\n    class C(metaclass=Meta):\n        pass\n    check(C)\n"
+    class_plain = "with pytest.raises(ValueError):\n    class C:\n        pass\n    check(C)\n"
+    class_alone = "with pytest.raises(ValueError):\n    class C(Base):\n        pass\n"
+    class_in_def = (
+        "with pytest.raises(ValueError):\n    def g():\n        class C(Base):\n            pass\n    check(g)\n"
+    )
+    prebuilt_tuple = "expectation, other = pytest.raises(ValueError), 1\nwith expectation:\n    check(build(1))\n"
+    prebuilt_later = "expectation = pytest.raises(ValueError)\nwith expectation, pause():\n    check(x)\n"
+    prebuilt_target = "expectation = pytest.raises(ValueError)\nwith expectation as box[key()]:\n    check(x)\n"
+    prebuilt_wrapped = "expectation = pytest.raises(ValueError)\nwith wrap(expectation):\n    check(build(1))\n"
     target_call = "with pytest.raises(ValueError) as box[key()]:\n    check(x)\n"
     plain_target = "with pytest.raises(ValueError) as info:\n    check(x)\n"
 
@@ -191,6 +231,14 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assert _extra_call_blocks(paired) == [(2, "check(build(1))")]
     assert _extra_call_blocks(nested_pair) == [(2, "check(build(1))")]
     assert [line for line, _ in _extra_call_blocks(class_decorated)] == [1]
+    assert _extra_call_blocks(prebuilt) == [(2, "check(build(1))")]
+    assert _extra_call_blocks(prebuilt_chain) == [(3, "check(build(1))")]
+    assert _extra_call_blocks(prebuilt_alias) == [(3, "check(build(1))")]
+    assert [line for line, _ in _extra_call_blocks(class_hook)] == [1]
+    assert [line for line, _ in _extra_call_blocks(class_meta)] == [1]
+    assert _extra_call_blocks(prebuilt_tuple) == [(2, "check(build(1))")]
+    assert _extra_call_blocks(prebuilt_later) == [(2, "check(x)")]
+    assert _extra_call_blocks(prebuilt_target) == [(2, "check(x)")]
     assert _extra_call_blocks(target_call) == [(1, "check(x)")]
     assert _extra_call_blocks(later_item) == [(1, "check(x)")]
     assert _extra_call_blocks(later_prebuilt) == [(1, "check(x)")]
@@ -207,6 +255,12 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assert not _extra_call_blocks(other_slot)
     assert not _extra_call_blocks(unequal_length)  # no pairing, and no crash from zip(strict=True)
     assert not _extra_call_blocks(plain_target)
+    assert not _extra_call_blocks(prebuilt_single)
+    assert not _extra_call_blocks(other_manager)
+    assert not _extra_call_blocks(class_plain)
+    assert not _extra_call_blocks(class_alone)
+    assert not _extra_call_blocks(class_in_def)  # a class made only when g runs: its creation is not part of the block
+    assert not _extra_call_blocks(prebuilt_wrapped)  # not followed, see the docstring
 
 
 def test_every_pytest_raises_block_makes_one_call() -> None:
