@@ -613,10 +613,14 @@ def test_certificate_info_keeps_the_dates_and_the_authority_key_identifier_when_
     assert info.issuer is None
     assert info.authority_key_id == _COMEXIO_KEY_ID
     assert (info.not_valid_before, info.not_valid_after) == (parsed.not_valid_before_utc, parsed.not_valid_after_utc)
+    parsed = x509.load_der_x509_certificate(bytes(der))
+    with pytest.raises((TypeError, ValueError)) as excinfo:
+        parsed.issuer.rfc4514_string()
     fingerprint = format_fingerprint(hashlib.sha256(bytes(der)).hexdigest())
-    messages = [record.getMessage() for record in caplog.records if record.name == "aiocomexio.tls"]
-    assert len(messages) == 1
-    assert messages[0].startswith(f"Certificate {fingerprint}: issuer cannot be read: ")
+    records = [record for record in caplog.records if record.name == "aiocomexio.tls"]
+    assert [(record.levelno, record.getMessage()) for record in records] == [
+        (logging.DEBUG, f"Certificate {fingerprint}: issuer cannot be read: {excinfo.value!r}")
+    ]
 
 
 def test_certificate_info_keeps_the_dates_when_an_issuer_attribute_has_the_wrong_type() -> None:
