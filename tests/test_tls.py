@@ -55,14 +55,15 @@ _SYNTHETIC_HOST = "192.168.0.5"
 class SelfSignedCertificate:
     """A self-signed certificate made for the test run, the way Comexio signs its own."""
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, key_identifier: bytes | None = None) -> None:
         key = ec.generate_private_key(ec.SECP256R1())
         name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "comexio.test")])
         # Whole seconds: X.509 keeps no fractions, so these are the dates the certificate carries.
         now = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
         self.not_valid_before = now - datetime.timedelta(days=1)
         self.not_valid_after = now + datetime.timedelta(days=1)
-        certificate = (
+        self.authority_key_id = key_identifier.hex() if key_identifier is not None else None
+        builder = (
             x509.CertificateBuilder()
             .subject_name(name)
             .issuer_name(name)
@@ -70,8 +71,10 @@ class SelfSignedCertificate:
             .serial_number(x509.random_serial_number())
             .not_valid_before(self.not_valid_before)
             .not_valid_after(self.not_valid_after)
-            .sign(key, hashes.SHA256())
         )
+        if key_identifier is not None:
+            builder = builder.add_extension(x509.AuthorityKeyIdentifier(key_identifier, None, None), critical=False)
+        certificate = builder.sign(key, hashes.SHA256())
         self.der = certificate.public_bytes(serialization.Encoding.DER)
         self.fingerprint = hashlib.sha256(certificate.public_bytes(serialization.Encoding.DER)).hexdigest()
         self.issuer = name.rfc4514_string()  # self-signed: the issuer is the subject
@@ -100,6 +103,19 @@ async def tls_comexio(certificate: SelfSignedCertificate) -> AsyncIterator[FakeC
     fake = FakeComexio()
     # HTTPS only, like a Comexio reached through its certificate.
     await fake.server.start_server(ssl=certificate.server_context())
+    yield fake
+    await fake.server.close()
+
+
+@pytest.fixture(scope="session")
+def certificate_with_key_id(tmp_path_factory: pytest.TempPathFactory) -> SelfSignedCertificate:
+    return SelfSignedCertificate(tmp_path_factory.mktemp("tls_key_id"), key_identifier=bytes.fromhex(_COMEXIO_KEY_ID))
+
+
+@pytest.fixture
+async def tls_comexio_with_key_id(certificate_with_key_id: SelfSignedCertificate) -> AsyncIterator[FakeComexio]:
+    fake = FakeComexio()
+    await fake.server.start_server(ssl=certificate_with_key_id.server_context())
     yield fake
     await fake.server.close()
 
@@ -380,6 +396,20 @@ async def test_fetch_certificate_reads_fingerprint_and_validity_without_a_reques
             f"{format_fingerprint(certificate.fingerprint)}, valid until {certificate.not_valid_after.isoformat()}",
         )
     ]
+
+
+async def test_fetch_certificate_keeps_the_authority_key_identifier(
+    tls_comexio_with_key_id: FakeComexio, certificate_with_key_id: SelfSignedCertificate
+) -> None:
+    info = await fetch_certificate(tls_comexio_with_key_id.host)
+
+    assert info == CertificateInfo(
+        certificate_with_key_id.fingerprint,
+        certificate_with_key_id.not_valid_before,
+        certificate_with_key_id.not_valid_after,
+        issuer=certificate_with_key_id.issuer,
+        authority_key_id=_COMEXIO_KEY_ID,
+    )
 
 
 async def test_fetch_certificate_of_a_plain_http_server_is_a_connection_error(comexio: FakeComexio) -> None:
