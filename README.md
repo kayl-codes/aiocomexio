@@ -112,8 +112,9 @@ with colons). A certificate whose dates cannot be read keeps its fingerprint and
 dates (never read `None` as "does not expire"). That is the case for a certificate that does not parse as
 X.509, and also for one that `cryptography` only warns about when the process runs with warnings as errors
 (`-W error`): the library leaves the warning filters alone. `issuer` and `authority_key_id` are `None`
-when they cannot be read, and `authority_key_id` also when the certificate has no key identifier; `None`
-is unknown, not a value two certificates share. Both fields are copied from the certificate itself, so
+when they cannot be read, `authority_key_id` also when the certificate has no key identifier, and both are
+`None` when the certificate does not parse at all (the dates are unknown then too); `None` is unknown, not a
+value two certificates share. Both fields are copied from the certificate itself, so
 equal values show a match, not that the same CA signed both certificates.
 `certificate_info(der)` does the same for certificate bytes you already hold. Why the dates are
 missing is logged by `fetch_certificate` as a warning on every call; `certificate_info` logs the cause

@@ -448,8 +448,15 @@ def test_certificate_info_reads_the_dates_of_a_der_certificate(certificate: Self
 _COMEXIO_KEY_ID = "9f216351622d90f115942e8bbe954ac0899369cc"
 
 
-def _certificate_signed_by(issuer_cn: str, key_id: bytes | None) -> bytes:
-    """A DER certificate whose issuer is issuer_cn and whose Authority Key Identifier is key_id (none when None)."""
+def _certificate_signed_by(
+    issuer_cn: str, key_id: bytes | None, *, extension: x509.AuthorityKeyIdentifier | None = None
+) -> bytes:
+    """A DER certificate whose issuer is issuer_cn and whose Authority Key Identifier is key_id (none when None).
+
+    extension, when given, is the Authority Key Identifier itself and replaces key_id.
+    """
+    if extension is None and key_id is not None:
+        extension = x509.AuthorityKeyIdentifier(key_id, None, None)
     key = ec.generate_private_key(ec.SECP256R1())
     now = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
     builder = (
@@ -461,8 +468,8 @@ def _certificate_signed_by(issuer_cn: str, key_id: bytes | None) -> bytes:
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=1))
     )
-    if key_id is not None:
-        builder = builder.add_extension(x509.AuthorityKeyIdentifier(key_id, None, None), critical=False)
+    if extension is not None:
+        builder = builder.add_extension(extension, critical=False)
     return builder.sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER)
 
 
@@ -482,8 +489,17 @@ def test_certificate_info_without_an_authority_key_identifier_keeps_the_dates() 
     _assert_utc(info)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError("malformed extension"),
+        x509.DuplicateExtension("duplicate extension", x509.AuthorityKeyIdentifier.oid),
+        UserWarning("warned about"),
+    ],
+    ids=["value error", "duplicate extension", "warning"],
+)
 def test_certificate_info_keeps_the_dates_when_the_extensions_cannot_be_read(
-    monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate
+    monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate, error: Exception
 ) -> None:
     parsed = x509.load_der_x509_certificate(certificate.der)
 
@@ -494,7 +510,7 @@ def test_certificate_info_keeps_the_dates_when_the_extensions_cannot_be_read(
 
         @property
         def extensions(self) -> NoReturn:
-            raise ValueError("malformed extension")
+            raise error
 
     monkeypatch.setattr(x509, "load_der_x509_certificate", lambda _data: _MalformedExtensions())
 
@@ -503,6 +519,156 @@ def test_certificate_info_keeps_the_dates_when_the_extensions_cannot_be_read(
     assert info == CertificateInfo(
         certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after, issuer=certificate.issuer
     )
+
+
+@pytest.mark.parametrize(
+    ("error", "in_lookup"),
+    [
+        (x509.UnsupportedGeneralNameType("unsupported general name", 99), False),
+        (ValueError("malformed key identifier"), False),
+        (x509.DuplicateExtension("duplicate extension", x509.AuthorityKeyIdentifier.oid), True),
+    ],
+    ids=["unsupported name from value", "value error from value", "duplicate from lookup"],
+)
+def test_certificate_info_keeps_the_dates_when_the_authority_key_identifier_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate, error: Exception, in_lookup: bool
+) -> None:
+    parsed = x509.load_der_x509_certificate(certificate.der)
+
+    class _Extension:
+        @property
+        def value(self) -> NoReturn:
+            raise error
+
+    class _Extensions:
+        def get_extension_for_class(self, _cls: type) -> _Extension:
+            if in_lookup:
+                raise error
+            return _Extension()
+
+    class _Parsed:
+        not_valid_before_utc = parsed.not_valid_before_utc
+        not_valid_after_utc = parsed.not_valid_after_utc
+        issuer = parsed.issuer
+        extensions = _Extensions()
+
+    monkeypatch.setattr(x509, "load_der_x509_certificate", lambda _data: _Parsed())
+
+    info = certificate_info(certificate.der)
+
+    assert info == CertificateInfo(
+        certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after, issuer=certificate.issuer
+    )
+
+
+def test_certificate_info_keeps_the_dates_when_the_issuer_warning_is_raised_as_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    der = _certificate_signed_by("Comexio LAN CA", bytes.fromhex(_COMEXIO_KEY_ID))
+    parsed = x509.load_der_x509_certificate(der)
+
+    class _WarnedIssuer:
+        not_valid_before_utc = parsed.not_valid_before_utc
+        not_valid_after_utc = parsed.not_valid_after_utc
+        extensions = parsed.extensions
+
+        @property
+        def issuer(self) -> NoReturn:
+            raise UserWarning("issuer warned about")
+
+    monkeypatch.setattr(x509, "load_der_x509_certificate", lambda _data: _WarnedIssuer())
+
+    info = certificate_info(der)
+
+    assert info == CertificateInfo(
+        hashlib.sha256(der).hexdigest(),
+        parsed.not_valid_before_utc,
+        parsed.not_valid_after_utc,
+        authority_key_id=_COMEXIO_KEY_ID,
+    )
+
+
+def test_certificate_info_keeps_the_dates_when_the_authority_key_identifier_has_no_key_identifier() -> None:
+    der = _certificate_signed_by(
+        "Comexio LAN CA", None, extension=x509.AuthorityKeyIdentifier(None, [x509.DNSName("ca")], 1)
+    )
+
+    info = certificate_info(der)
+
+    assert info.issuer == "CN=Comexio LAN CA"
+    assert info.authority_key_id is None
+    _assert_utc(info)
+
+
+def test_certificate_info_keeps_the_dates_and_the_authority_key_identifier_when_the_issuer_cannot_be_decoded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    der = bytearray(_certificate_signed_by("Comexio LAN CA", bytes.fromhex(_COMEXIO_KEY_ID)))
+    der[bytes(der).index(b"LAN CA")] = 0xFF  # not UTF-8 in the issuer's common name
+    parsed = x509.load_der_x509_certificate(bytes(der))
+
+    with caplog.at_level(logging.DEBUG, logger="aiocomexio.tls"):
+        info = certificate_info(bytes(der))
+
+    assert info.issuer is None
+    assert info.authority_key_id == _COMEXIO_KEY_ID
+    assert (info.not_valid_before, info.not_valid_after) == (parsed.not_valid_before_utc, parsed.not_valid_after_utc)
+    assert "issuer cannot be read" in caplog.text
+
+
+def test_certificate_info_keeps_the_dates_when_an_issuer_attribute_has_the_wrong_type() -> None:
+    # The common name re-tagged as BIT STRING under an OID that is no X500_UNIQUE_IDENTIFIER: cryptography parses
+    # the certificate, but rfc4514_string raises TypeError. Same length, so the DER lengths around it stay valid.
+    der = bytearray(_certificate_signed_by("Comexio LAN CA", None))
+    utf8_common_name = b"\x0c\x0eComexio LAN CA"
+    start = bytes(der).index(utf8_common_name)
+    der[start : start + len(utf8_common_name)] = b"\x03\x0e\x00omexio LAN CA"
+
+    info = certificate_info(bytes(der))
+
+    assert info.issuer is None
+    _assert_utc(info)
+
+
+def test_certificate_info_reads_an_empty_issuer_as_unknown() -> None:
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
+    der = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "comexio.test")]))
+        .issuer_name(x509.Name([]))
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .sign(key, hashes.SHA256())
+        .public_bytes(serialization.Encoding.DER)
+    )
+
+    info = certificate_info(der)
+
+    assert info.issuer is None
+    _assert_utc(info)
+
+
+def test_certificate_info_keeps_the_fingerprint_of_a_certificate_with_an_invalid_version() -> None:
+    # The version field is the INTEGER after "[0] EXPLICIT"; 29 is no X.509 version. cryptography raises
+    # InvalidVersion for it, an Exception but not a ValueError.
+    der = bytearray(_certificate_signed_by("Comexio LAN CA", None))
+    version_field = bytes([0xA0, 0x03, 0x02, 0x01, 0x02])
+    start = bytes(der).index(version_field)
+    der[start + 4] = 29
+
+    info = certificate_info(bytes(der))
+
+    assert info == CertificateInfo(hashlib.sha256(der).hexdigest(), None, None)
+
+
+def test_certificate_info_counts_an_empty_authority_key_identifier_as_none() -> None:
+    info = certificate_info(_certificate_signed_by("Comexio LAN CA", b""))
+
+    assert info.authority_key_id is None
+    _assert_utc(info)
 
 
 @pytest.mark.parametrize("key_id", ["9F21", "9f2", "", "zz"], ids=["uppercase", "odd length", "empty", "not hex"])

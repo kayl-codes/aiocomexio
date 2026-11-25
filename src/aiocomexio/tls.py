@@ -99,9 +99,11 @@ class CertificateInfo:
 
     issuer is the issuer name as an RFC 4514 string (for example "CN=Comexio LAN CA"). authority_key_id
     is the key identifier of the CA that signed the certificate, as lowercase hex without separators
-    (the Authority Key Identifier extension). Both are None when they cannot be read, and
-    authority_key_id also when the certificate carries no key identifier. None means unknown, never
-    a value: two certificates whose authority_key_id is None do not share an authority.
+    (the Authority Key Identifier extension). Both are None when they cannot be read, which includes a
+    certificate that does not parse at all (the dates are then unknown too). authority_key_id is also None
+    when the certificate carries no key identifier, or when any other extension is malformed (cryptography
+    parses them all together; the debug log names the cause). None means unknown, not an empty value: two
+    certificates whose authority_key_id is None do not share an authority.
     Both fields are copied from the certificate itself, so anyone can copy them into a certificate of
     their own. Equal values say the fields match, not that the same CA signed both certificates.
 
@@ -130,18 +132,39 @@ class CertificateInfo:
             raise ValueError(f"{self.authority_key_id!r} is not an authority key identifier in lowercase hex digits")
 
 
-def _authority_key_id(parsed: x509.Certificate) -> str | None:
+def _issuer(parsed: x509.Certificate, fingerprint: str) -> str | None:
+    """The issuer of parsed as an RFC 4514 string; None when it cannot be read or is empty."""
+    try:
+        # An empty name (no attributes at all) is no issuer to compare: None, so it never equals another empty one.
+        return parsed.issuer.rfc4514_string() or None
+    # ValueError: an issuer cryptography cannot decode, e.g. invalid UTF-8. TypeError: a BitString attribute under an
+    # OID other than X500_UNIQUE_IDENTIFIER. Warning: one warned about under "-W error".
+    except (TypeError, ValueError, Warning) as err:
+        _LOGGER.debug("Certificate %s: issuer cannot be read: %r", format_fingerprint(fingerprint), err)
+        return None
+
+
+def _authority_key_id(parsed: x509.Certificate, fingerprint: str) -> str | None:
     """The key identifier of the CA that signed parsed, as lowercase hex; None when it has none or cannot be read."""
     try:
         extension = parsed.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
-    # ExtensionNotFound: no such extension. ValueError, Warning: a malformed one, or one warned about under "-W error".
-    except (x509.ExtensionNotFound, ValueError, Warning):
+        key_id = extension.value.key_identifier
+    # Silent on purpose: a certificate without an Authority Key Identifier is the normal case, not a failure.
+    except x509.ExtensionNotFound:
         return None
-    key_id = extension.value.key_identifier
-    return None if key_id is None else key_id.hex()
+    # DuplicateExtension, UnsupportedGeneralNameType: the extension is malformed. ValueError, Warning: the same
+    # when cryptography raises one, or warns about it under "-W error". parsed.extensions parses all extensions
+    # at once, so one malformed extension of any kind lands here too.
+    except (x509.DuplicateExtension, x509.UnsupportedGeneralNameType, ValueError, Warning) as err:
+        _LOGGER.debug(
+            "Certificate %s: authority key identifier cannot be read: %r", format_fingerprint(fingerprint), err
+        )
+        return None
+    # An empty key identifier is no identifier: CertificateInfo refuses it, so it counts as none.
+    return key_id.hex() if key_id else None
 
 
-def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError | Warning | None]:
+def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError | Warning | x509.InvalidVersion | None]:
     """certificate_info and, when the dates cannot be read, why not (None when they can)."""
     fingerprint = hashlib.sha256(certificate).hexdigest()
     # cryptography warns about odd but readable certificates (a negative serial number). The warning
@@ -150,15 +173,16 @@ def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError |
     try:
         parsed = x509.load_der_x509_certificate(certificate)
         not_valid_before, not_valid_after = parsed.not_valid_before_utc, parsed.not_valid_after_utc
-    # ValueError: anything cryptography cannot parse. Warning: a warning raised as an error.
-    except (ValueError, Warning) as err:
+    # ValueError: anything cryptography cannot parse. InvalidVersion: a version field outside the X.509 versions,
+    # an Exception but no ValueError. Warning: a warning raised as an error.
+    except (ValueError, Warning, x509.InvalidVersion) as err:
         return CertificateInfo(fingerprint, None, None), err
     info = CertificateInfo(
         fingerprint,
         not_valid_before,
         not_valid_after,
-        issuer=parsed.issuer.rfc4514_string(),
-        authority_key_id=_authority_key_id(parsed),
+        issuer=_issuer(parsed, fingerprint),
+        authority_key_id=_authority_key_id(parsed, fingerprint),
     )
     return info, None
 
