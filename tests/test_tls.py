@@ -714,6 +714,11 @@ def test_certificate_info_refuses_an_authority_key_identifier_in_another_spellin
         CertificateInfo(FOREIGN_FINGERPRINT, None, None, authority_key_id=key_id)
 
 
+def test_certificate_info_refuses_an_empty_issuer() -> None:
+    with pytest.raises(ValueError, match=r"^issuer is an empty string; None means an unknown issuer$"):
+        CertificateInfo(FOREIGN_FINGERPRINT, None, None, issuer="")
+
+
 @pytest.mark.parametrize(
     "data",
     [lambda _c: _UNPARSABLE, lambda c: c.der[:-5], lambda _c: b""],

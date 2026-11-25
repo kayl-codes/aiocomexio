@@ -108,8 +108,9 @@ class CertificateInfo:
     their own. Equal values say the fields match, not that the same CA signed both certificates.
 
     Constructing it with only one of the two dates, a date that is not timezone-aware UTC, a fingerprint in
-    any other spelling than 64 lowercase hex digits, or an authority_key_id that is not lowercase hex with
-    an even number of digits raises ValueError, so a stored pin is compared after normalize_fingerprint.
+    any other spelling than 64 lowercase hex digits, an empty issuer (None is the unknown issuer), or an
+    authority_key_id that is not lowercase hex with an even number of digits raises ValueError, so a stored
+    pin is compared after normalize_fingerprint.
     """
 
     fingerprint: str
@@ -126,6 +127,9 @@ class CertificateInfo:
                 raise ValueError(f"{date!r} is not a timezone-aware UTC date")
         if normalize_fingerprint(self.fingerprint) != self.fingerprint:
             raise ValueError(f"{self.fingerprint!r} is not a fingerprint in 64 lowercase hex digits")
+        # certificate_info maps an empty issuer to None; a stored "" would compare equal to another empty one.
+        if self.issuer == "":
+            raise ValueError("issuer is an empty string; None means an unknown issuer")
         if self.authority_key_id is not None and (
             _HEX_RE.fullmatch(self.authority_key_id) is None or len(self.authority_key_id) % 2
         ):
