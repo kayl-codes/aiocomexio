@@ -9,7 +9,7 @@ import ssl
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import aiohttp
 import pytest
@@ -74,6 +74,7 @@ class SelfSignedCertificate:
         )
         self.der = certificate.public_bytes(serialization.Encoding.DER)
         self.fingerprint = hashlib.sha256(certificate.public_bytes(serialization.Encoding.DER)).hexdigest()
+        self.issuer = name.rfc4514_string()  # self-signed: the issuer is the subject
         self.cert_path = directory / "cert.pem"
         self.key_path = directory / "key.pem"
         self.cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
@@ -367,7 +368,9 @@ async def test_fetch_certificate_reads_fingerprint_and_validity_without_a_reques
     with caplog.at_level(logging.DEBUG, logger="aiocomexio.tls"):
         info = await fetch_certificate(tls_comexio.host)
 
-    assert info == CertificateInfo(certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after)
+    assert info == CertificateInfo(
+        certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after, issuer=certificate.issuer
+    )
     _assert_utc(info)
     assert tls_comexio.requests == []
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
@@ -436,8 +439,76 @@ async def test_fetch_certificate_fingerprint_never_parses_the_certificate(
 def test_certificate_info_reads_the_dates_of_a_der_certificate(certificate: SelfSignedCertificate) -> None:
     info = certificate_info(certificate.der)
 
-    assert info == CertificateInfo(certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after)
+    assert info == CertificateInfo(
+        certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after, issuer=certificate.issuer
+    )
     _assert_utc(info)
+
+
+_COMEXIO_KEY_ID = "9f216351622d90f115942e8bbe954ac0899369cc"
+
+
+def _certificate_signed_by(issuer_cn: str, key_id: bytes | None) -> bytes:
+    """A DER certificate whose issuer is issuer_cn and whose Authority Key Identifier is key_id (none when None)."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "comexio.test")]))
+        .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_cn)]))
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+    )
+    if key_id is not None:
+        builder = builder.add_extension(x509.AuthorityKeyIdentifier(key_id, None, None), critical=False)
+    return builder.sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER)
+
+
+def test_certificate_info_reads_the_issuer_and_the_authority_key_identifier() -> None:
+    info = certificate_info(_certificate_signed_by("Comexio LAN CA", bytes.fromhex(_COMEXIO_KEY_ID)))
+
+    assert info.issuer == "CN=Comexio LAN CA"
+    assert info.authority_key_id == _COMEXIO_KEY_ID
+    _assert_utc(info)
+
+
+def test_certificate_info_without_an_authority_key_identifier_keeps_the_dates() -> None:
+    info = certificate_info(_certificate_signed_by("Comexio LAN CA", None))
+
+    assert info.issuer == "CN=Comexio LAN CA"
+    assert info.authority_key_id is None
+    _assert_utc(info)
+
+
+def test_certificate_info_keeps_the_dates_when_the_extensions_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate
+) -> None:
+    parsed = x509.load_der_x509_certificate(certificate.der)
+
+    class _MalformedExtensions:
+        not_valid_before_utc = parsed.not_valid_before_utc
+        not_valid_after_utc = parsed.not_valid_after_utc
+        issuer = parsed.issuer
+
+        @property
+        def extensions(self) -> NoReturn:
+            raise ValueError("malformed extension")
+
+    monkeypatch.setattr(x509, "load_der_x509_certificate", lambda _data: _MalformedExtensions())
+
+    info = certificate_info(certificate.der)
+
+    assert info == CertificateInfo(
+        certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after, issuer=certificate.issuer
+    )
+
+
+@pytest.mark.parametrize("key_id", ["9F21", "9f2", "", "zz"], ids=["uppercase", "odd length", "empty", "not hex"])
+def test_certificate_info_refuses_an_authority_key_identifier_in_another_spelling(key_id: str) -> None:
+    with pytest.raises(ValueError, match=r"is not an authority key identifier in lowercase hex digits$"):
+        CertificateInfo(FOREIGN_FINGERPRINT, None, None, authority_key_id=key_id)
 
 
 @pytest.mark.parametrize(
@@ -495,7 +566,9 @@ def test_certificate_info_keeps_the_dates_of_a_certificate_cryptography_only_war
         info = certificate_info(certificate.der)
         filters_after_call = list(warnings.filters)
 
-    assert info == CertificateInfo(certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after)
+    assert info == CertificateInfo(
+        certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after, issuer=certificate.issuer
+    )
     assert filters_while_parsing == [filters_before_call]
     assert filters_after_call == filters_before_call
 
@@ -509,7 +582,7 @@ def test_certificate_info_is_immutable_and_slotted(certificate: SelfSignedCertif
 
 @pytest.mark.parametrize("known", _DATE_FIELDS)
 def test_certificate_info_refuses_only_one_known_date(known: str) -> None:
-    dates: dict[str, datetime.datetime | None] = {
+    dates: dict[str, Any] = {
         _BEFORE: None,
         _AFTER: None,
         known: datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
@@ -528,7 +601,7 @@ def test_certificate_info_refuses_only_one_known_date(known: str) -> None:
 )
 @pytest.mark.parametrize("field", _DATE_FIELDS)
 def test_certificate_info_refuses_a_date_that_is_not_utc(field: str, date: datetime.datetime) -> None:
-    dates = {
+    dates: dict[str, Any] = {
         _BEFORE: datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
         _AFTER: datetime.datetime(2027, 1, 1, tzinfo=datetime.UTC),
         field: date,

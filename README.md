@@ -103,13 +103,18 @@ reports only the last failure, so a mismatch there can arrive as `ComexioConnect
 a fresh `fetch_certificate_fingerprint()` with the pin to tell the two apart.
 
 `fetch_certificate(host)` runs the same handshake and returns a `CertificateInfo` with the
-`fingerprint` and the certificate's validity period (`not_valid_before`, `not_valid_after`, UTC).
-Use it to see when Comexio will replace the pinned certificate: the dates belong to your pin only
-when `info.fingerprint` equals it. `info.fingerprint` is always 64 lowercase hex digits, so
-compare it with `normalize_fingerprint(pin)` when the pin may be spelled otherwise (uppercase, with colons). A certificate whose dates cannot be read keeps its fingerprint and gets
-`None` for both dates (never read `None` as "does not expire"). That is the case for a certificate
-that does not parse as X.509, and also for one that `cryptography` only warns about when the process
-runs with warnings as errors (`-W error`): the library leaves the warning filters alone.
+`fingerprint`, the certificate's validity period (`not_valid_before`, `not_valid_after`, UTC), its
+`issuer` (RFC 4514 string, e.g. `CN=Comexio LAN CA`) and its `authority_key_id` (the Authority Key
+Identifier as lowercase hex). Use it to see when Comexio will replace the pinned certificate: the dates
+belong to your pin only when `info.fingerprint` equals it. `info.fingerprint` is always 64 lowercase hex
+digits, so compare it with `normalize_fingerprint(pin)` when the pin may be spelled otherwise (uppercase,
+with colons). A certificate whose dates cannot be read keeps its fingerprint and gets `None` for both
+dates (never read `None` as "does not expire"). That is the case for a certificate that does not parse as
+X.509, and also for one that `cryptography` only warns about when the process runs with warnings as errors
+(`-W error`): the library leaves the warning filters alone. `issuer` and `authority_key_id` are `None`
+when they cannot be read, and `authority_key_id` also when the certificate has no key identifier; `None`
+is unknown, not a value two certificates share. Both fields are copied from the certificate itself, so
+equal values show a match, not that the same CA signed both certificates.
 `certificate_info(der)` does the same for certificate bytes you already hold. Why the dates are
 missing is logged by `fetch_certificate` as a warning on every call; `certificate_info` logs the cause
 at DEBUG only, so a caller of it that wants to know checks for `None` itself.

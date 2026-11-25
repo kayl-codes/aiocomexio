@@ -87,7 +87,7 @@ def https_address(host: str) -> tuple[str, int]:
 
 @dataclass(frozen=True, slots=True)
 class CertificateInfo:
-    """The certificate a host serves over HTTPS: its pinnable fingerprint and its validity period.
+    """The certificate a host serves over HTTPS: its pinnable fingerprint, its validity period and its issuer.
 
     fingerprint is the SHA-256 of the DER certificate (64 lowercase hex digits), the value ComexioClient
     pins. not_valid_before and not_valid_after are the certificate's dates as certificate_info reads them
@@ -96,14 +96,25 @@ class CertificateInfo:
     the library leaves the warning filters alone, so even a parseable certificate then has no dates).
     None means unknown, never unlimited: a caller must not read a missing date as a certificate that
     does not expire. The fingerprint is what the handshake presented either way and stays pinnable.
-    Constructing it with only one of the two dates, a date that is not timezone-aware UTC, or a
-    fingerprint in any other spelling than 64 lowercase hex digits raises ValueError, so a stored pin
-    is compared after normalize_fingerprint.
+
+    issuer is the issuer name as an RFC 4514 string (for example "CN=Comexio LAN CA"). authority_key_id
+    is the key identifier of the CA that signed the certificate, as lowercase hex without separators
+    (the Authority Key Identifier extension). Both are None when they cannot be read, and
+    authority_key_id also when the certificate carries no key identifier. None means unknown, never
+    a value: two certificates whose authority_key_id is None do not share an authority.
+    Both fields are copied from the certificate itself, so anyone can copy them into a certificate of
+    their own. Equal values say the fields match, not that the same CA signed both certificates.
+
+    Constructing it with only one of the two dates, a date that is not timezone-aware UTC, a fingerprint in
+    any other spelling than 64 lowercase hex digits, or an authority_key_id that is not lowercase hex with
+    an even number of digits raises ValueError, so a stored pin is compared after normalize_fingerprint.
     """
 
     fingerprint: str
     not_valid_before: datetime | None
     not_valid_after: datetime | None
+    issuer: str | None = None
+    authority_key_id: str | None = None
 
     def __post_init__(self) -> None:
         if (self.not_valid_before is None) != (self.not_valid_after is None):
@@ -113,6 +124,21 @@ class CertificateInfo:
                 raise ValueError(f"{date!r} is not a timezone-aware UTC date")
         if normalize_fingerprint(self.fingerprint) != self.fingerprint:
             raise ValueError(f"{self.fingerprint!r} is not a fingerprint in 64 lowercase hex digits")
+        if self.authority_key_id is not None and (
+            _HEX_RE.fullmatch(self.authority_key_id) is None or len(self.authority_key_id) % 2
+        ):
+            raise ValueError(f"{self.authority_key_id!r} is not an authority key identifier in lowercase hex digits")
+
+
+def _authority_key_id(parsed: x509.Certificate) -> str | None:
+    """The key identifier of the CA that signed parsed, as lowercase hex; None when it has none or cannot be read."""
+    try:
+        extension = parsed.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
+    # ExtensionNotFound: no such extension. ValueError, Warning: a malformed one, or one warned about under "-W error".
+    except (x509.ExtensionNotFound, ValueError, Warning):
+        return None
+    key_id = extension.value.key_identifier
+    return None if key_id is None else key_id.hex()
 
 
 def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError | Warning | None]:
@@ -127,7 +153,14 @@ def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError |
     # ValueError: anything cryptography cannot parse. Warning: a warning raised as an error.
     except (ValueError, Warning) as err:
         return CertificateInfo(fingerprint, None, None), err
-    return CertificateInfo(fingerprint, not_valid_before, not_valid_after), None
+    info = CertificateInfo(
+        fingerprint,
+        not_valid_before,
+        not_valid_after,
+        issuer=parsed.issuer.rfc4514_string(),
+        authority_key_id=_authority_key_id(parsed),
+    )
+    return info, None
 
 
 def certificate_info(certificate: bytes) -> CertificateInfo:
