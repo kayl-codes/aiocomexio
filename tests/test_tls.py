@@ -109,7 +109,7 @@ async def tls_comexio(certificate: SelfSignedCertificate) -> AsyncIterator[FakeC
 
 @pytest.fixture(scope="session")
 def certificate_with_key_id(tmp_path_factory: pytest.TempPathFactory) -> SelfSignedCertificate:
-    return SelfSignedCertificate(tmp_path_factory.mktemp("tls_key_id"), key_identifier=bytes.fromhex(_COMEXIO_KEY_ID))
+    return SelfSignedCertificate(tmp_path_factory.mktemp("tls_key_id"), key_identifier=bytes.fromhex(_TEST_KEY_ID))
 
 
 @pytest.fixture
@@ -408,7 +408,7 @@ async def test_fetch_certificate_keeps_the_authority_key_identifier(
         certificate_with_key_id.not_valid_before,
         certificate_with_key_id.not_valid_after,
         issuer=certificate_with_key_id.issuer,
-        authority_key_id=_COMEXIO_KEY_ID,
+        authority_key_id=_TEST_KEY_ID,
     )
 
 
@@ -475,7 +475,15 @@ def test_certificate_info_reads_the_dates_of_a_der_certificate(certificate: Self
     _assert_utc(info)
 
 
-_COMEXIO_KEY_ID = "9f216351622d90f115942e8bbe954ac0899369cc"
+_TEST_KEY_ID = "b1f0c3a7e52d4968a0c17e3f5d9b2a84c6e7f013"
+_ISSUER_CN = "Comexio LAN CA"
+_ISSUER_RFC4514 = "CN=Comexio LAN CA"
+
+
+def _assert_dates_of(info: CertificateInfo, der: bytes) -> None:
+    """The dates are the ones cryptography reads from der, not merely some UTC values."""
+    parsed = x509.load_der_x509_certificate(der)
+    assert (info.not_valid_before, info.not_valid_after) == (parsed.not_valid_before_utc, parsed.not_valid_after_utc)
 
 
 def _certificate_signed_by(
@@ -504,19 +512,21 @@ def _certificate_signed_by(
 
 
 def test_certificate_info_reads_the_issuer_and_the_authority_key_identifier() -> None:
-    info = certificate_info(_certificate_signed_by("Comexio LAN CA", bytes.fromhex(_COMEXIO_KEY_ID)))
+    der = _certificate_signed_by(_ISSUER_CN, bytes.fromhex(_TEST_KEY_ID))
+    info = certificate_info(der)
 
-    assert info.issuer == "CN=Comexio LAN CA"
-    assert info.authority_key_id == _COMEXIO_KEY_ID
-    _assert_utc(info)
+    assert info.issuer == _ISSUER_RFC4514
+    assert info.authority_key_id == _TEST_KEY_ID
+    _assert_dates_of(info, der)
 
 
 def test_certificate_info_without_an_authority_key_identifier_keeps_the_dates() -> None:
-    info = certificate_info(_certificate_signed_by("Comexio LAN CA", None))
+    der = _certificate_signed_by(_ISSUER_CN, None)
+    info = certificate_info(der)
 
-    assert info.issuer == "CN=Comexio LAN CA"
+    assert info.issuer == _ISSUER_RFC4514
     assert info.authority_key_id is None
-    _assert_utc(info)
+    _assert_dates_of(info, der)
 
 
 @pytest.mark.parametrize(
@@ -594,7 +604,7 @@ def test_certificate_info_keeps_the_dates_when_the_authority_key_identifier_cann
 def test_certificate_info_keeps_the_dates_when_the_issuer_warning_is_raised_as_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    der = _certificate_signed_by("Comexio LAN CA", bytes.fromhex(_COMEXIO_KEY_ID))
+    der = _certificate_signed_by(_ISSUER_CN, bytes.fromhex(_TEST_KEY_ID))
     parsed = x509.load_der_x509_certificate(der)
 
     class _WarnedIssuer:
@@ -614,26 +624,24 @@ def test_certificate_info_keeps_the_dates_when_the_issuer_warning_is_raised_as_e
         hashlib.sha256(der).hexdigest(),
         parsed.not_valid_before_utc,
         parsed.not_valid_after_utc,
-        authority_key_id=_COMEXIO_KEY_ID,
+        authority_key_id=_TEST_KEY_ID,
     )
 
 
 def test_certificate_info_keeps_the_dates_when_the_authority_key_identifier_has_no_key_identifier() -> None:
-    der = _certificate_signed_by(
-        "Comexio LAN CA", None, extension=x509.AuthorityKeyIdentifier(None, [x509.DNSName("ca")], 1)
-    )
+    der = _certificate_signed_by(_ISSUER_CN, None, extension=x509.AuthorityKeyIdentifier(None, [x509.DNSName("ca")], 1))
 
     info = certificate_info(der)
 
-    assert info.issuer == "CN=Comexio LAN CA"
+    assert info.issuer == _ISSUER_RFC4514
     assert info.authority_key_id is None
-    _assert_utc(info)
+    _assert_dates_of(info, der)
 
 
 def test_certificate_info_keeps_the_dates_and_the_authority_key_identifier_when_the_issuer_cannot_be_decoded(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    der = bytearray(_certificate_signed_by("Comexio LAN CA", bytes.fromhex(_COMEXIO_KEY_ID)))
+    der = bytearray(_certificate_signed_by(_ISSUER_CN, bytes.fromhex(_TEST_KEY_ID)))
     der[bytes(der).index(b"LAN CA")] = 0xFF  # not UTF-8 in the issuer's common name
     parsed = x509.load_der_x509_certificate(bytes(der))
 
@@ -641,7 +649,8 @@ def test_certificate_info_keeps_the_dates_and_the_authority_key_identifier_when_
         info = certificate_info(bytes(der))
 
     assert info.issuer is None
-    assert info.authority_key_id == _COMEXIO_KEY_ID
+    assert info.fingerprint == hashlib.sha256(bytes(der)).hexdigest()
+    assert info.authority_key_id == _TEST_KEY_ID
     assert (info.not_valid_before, info.not_valid_after) == (parsed.not_valid_before_utc, parsed.not_valid_after_utc)
     parsed = x509.load_der_x509_certificate(bytes(der))
     with pytest.raises((TypeError, ValueError)) as excinfo:
@@ -656,7 +665,7 @@ def test_certificate_info_keeps_the_dates_and_the_authority_key_identifier_when_
 def test_certificate_info_keeps_the_dates_when_an_issuer_attribute_has_the_wrong_type() -> None:
     # The common name re-tagged as BIT STRING under an OID that is no X500_UNIQUE_IDENTIFIER: cryptography parses
     # the certificate, but rfc4514_string raises TypeError. Same length, so the DER lengths around it stay valid.
-    der = bytearray(_certificate_signed_by("Comexio LAN CA", None))
+    der = bytearray(_certificate_signed_by(_ISSUER_CN, None))
     utf8_common_name = b"\x0c\x0eComexio LAN CA"
     start = bytes(der).index(utf8_common_name)
     der[start : start + len(utf8_common_name)] = b"\x03\x0e\x00omexio LAN CA"
@@ -664,7 +673,8 @@ def test_certificate_info_keeps_the_dates_when_an_issuer_attribute_has_the_wrong
     info = certificate_info(bytes(der))
 
     assert info.issuer is None
-    _assert_utc(info)
+    assert info.fingerprint == hashlib.sha256(bytes(der)).hexdigest()
+    _assert_dates_of(info, bytes(der))
 
 
 def test_certificate_info_reads_an_empty_issuer_as_unknown() -> None:
@@ -685,13 +695,13 @@ def test_certificate_info_reads_an_empty_issuer_as_unknown() -> None:
     info = certificate_info(der)
 
     assert info.issuer is None
-    _assert_utc(info)
+    _assert_dates_of(info, der)
 
 
 def test_certificate_info_keeps_the_fingerprint_of_a_certificate_with_an_invalid_version() -> None:
     # The version field is the INTEGER after "[0] EXPLICIT"; 29 is no X.509 version. cryptography raises
     # InvalidVersion for it, an Exception but not a ValueError.
-    der = bytearray(_certificate_signed_by("Comexio LAN CA", None))
+    der = bytearray(_certificate_signed_by(_ISSUER_CN, None))
     version_field = bytes([0xA0, 0x03, 0x02, 0x01, 0x02])
     start = bytes(der).index(version_field)
     der[start + 4] = 29
@@ -702,10 +712,11 @@ def test_certificate_info_keeps_the_fingerprint_of_a_certificate_with_an_invalid
 
 
 def test_certificate_info_counts_an_empty_authority_key_identifier_as_none() -> None:
-    info = certificate_info(_certificate_signed_by("Comexio LAN CA", b""))
+    der = _certificate_signed_by(_ISSUER_CN, b"")
+    info = certificate_info(der)
 
     assert info.authority_key_id is None
-    _assert_utc(info)
+    _assert_dates_of(info, der)
 
 
 @pytest.mark.parametrize("key_id", ["9F21", "9f2", "", "zz"], ids=["uppercase", "odd length", "empty", "not hex"])
