@@ -692,6 +692,19 @@ def test_certificate_info_keeps_the_dates_but_not_the_issuer_of_a_certificate_ov
 
     monkeypatch.setattr(aiocomexio.tls, "_issuer", _spy("issuer", aiocomexio.tls._issuer))
     monkeypatch.setattr(aiocomexio.tls, "_authority_key_id", _spy("authority key id", aiocomexio.tls._authority_key_id))
+    real_load = x509.load_der_x509_certificate
+
+    class _Watched:
+        # Every access to the extensions is counted, whoever makes it: the helpers or the code itself.
+        def __init__(self, cert: x509.Certificate) -> None:
+            self._cert = cert
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "extensions":
+                attempts.append("extensions")
+            return getattr(self._cert, name)
+
+    monkeypatch.setattr(x509, "load_der_x509_certificate", lambda data: _Watched(real_load(data)))
     info = certificate_info(certificate.der)
     assert not attempts
     _assert_dates_of(info, certificate.der)
