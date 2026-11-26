@@ -45,6 +45,9 @@ _SHA256_HEX_LENGTH = 64
 # Separators people copy along with a fingerprint: Comexio shows "33:60:55:...", others use spaces or dashes.
 _FINGERPRINT_SEPARATORS_RE = re.compile(r"[\s:-]")
 _HEX_RE = re.compile(r"[0-9a-f]+", re.ASCII)
+# A certificate from the network is parsed only up to this size: a real one is a few KiB, and parsing every
+# extension of a huge one costs the caller CPU and memory after the handshake.
+_MAX_PARSED_CERTIFICATE_BYTES = 64 * 1024
 
 
 def normalize_fingerprint(value: str) -> str:
@@ -95,6 +98,7 @@ class CertificateInfo:
     (timezone-aware, UTC), or both None when they cannot be read: the certificate does not parse as
     X.509, or cryptography warns about it and the process runs with warnings as errors ("-W error";
     the library leaves the warning filters alone, so even a parseable certificate then has no dates).
+    A certificate over 64 KiB is not parsed at all, so it has no dates, issuer or authority key identifier.
     None means unknown, never unlimited: a caller must not read a missing date as a certificate that
     does not expire. The fingerprint is what the handshake presented either way and stays pinnable.
 
@@ -194,6 +198,10 @@ def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError |
     # cryptography warns about odd but readable certificates (a negative serial number). The warning
     # goes out as it is: changing the warning filters here would change them for every thread of the
     # process. Under "-W error" it is raised instead and the validity counts as unknown, with the cause.
+    if len(certificate) > _MAX_PARSED_CERTIFICATE_BYTES:
+        return CertificateInfo(fingerprint, None, None), ValueError(
+            f"larger than {_MAX_PARSED_CERTIFICATE_BYTES} bytes, not parsed"
+        )
     try:
         parsed = x509.load_der_x509_certificate(certificate)
         not_valid_before, not_valid_after = parsed.not_valid_before_utc, parsed.not_valid_after_utc

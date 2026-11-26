@@ -654,13 +654,25 @@ def test_certificate_info_keeps_the_dates_and_the_authority_key_identifier_when_
     assert info.authority_key_id == _TEST_KEY_ID
     assert (info.not_valid_before, info.not_valid_after) == (parsed.not_valid_before_utc, parsed.not_valid_after_utc)
     parsed = x509.load_der_x509_certificate(bytes(der))
+    # Here cryptography already fails when it reads the issuer, before any rendering: rfc4514_string is covered by
+    # the wrong-type test below, where the issuer reads fine.
     with pytest.raises((TypeError, ValueError)) as excinfo:
-        parsed.issuer.rfc4514_string()
+        _ = parsed.issuer
     fingerprint = format_fingerprint(hashlib.sha256(bytes(der)).hexdigest())
     records = [record for record in caplog.records if record.name == "aiocomexio.tls"]
     assert [(record.levelno, record.getMessage()) for record in records] == [
         (logging.DEBUG, f"Certificate {fingerprint}: issuer cannot be read: {excinfo.value!r}")
     ]
+
+
+def test_certificate_info_does_not_parse_a_certificate_over_the_size_limit(
+    certificate: SelfSignedCertificate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The limit is lowered below this certificate's size; the real one is far above any certificate.
+    monkeypatch.setattr(aiocomexio.tls, "_MAX_PARSED_CERTIFICATE_BYTES", len(certificate.der) - 1)
+    info = certificate_info(certificate.der)
+    assert (info.not_valid_before, info.not_valid_after, info.issuer, info.authority_key_id) == (None, None, None, None)
+    assert info.fingerprint == hashlib.sha256(certificate.der).hexdigest()
 
 
 def test_certificate_info_keeps_the_dates_when_an_issuer_attribute_has_the_wrong_type() -> None:
