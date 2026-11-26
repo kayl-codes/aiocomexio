@@ -731,6 +731,16 @@ def test_certificate_info_refuses_an_empty_issuer() -> None:
         CertificateInfo(FOREIGN_FINGERPRINT, None, None, issuer="")
 
 
+@pytest.mark.parametrize(
+    "issuer",
+    [42, b"CN=Comexio LAN CA", ("CN", "Comexio LAN CA")],
+    ids=["int", "bytes", "tuple"],
+)
+def test_certificate_info_refuses_an_issuer_that_is_not_a_string(issuer: Any) -> None:
+    with pytest.raises(ValueError, match=r"is not an issuer name; None means an unknown issuer$"):
+        CertificateInfo(FOREIGN_FINGERPRINT, None, None, issuer=issuer)
+
+
 def _authority(issuer: str | None, authority_key_id: str | None) -> CertificateInfo:
     return CertificateInfo(FOREIGN_FINGERPRINT, None, None, issuer=issuer, authority_key_id=authority_key_id)
 
