@@ -49,7 +49,11 @@ Beta. The move out of the integration, in order:
      edit form says type 16 with a serial number or a usable IP address (a cameraless dummy has neither); a
      form read error propagates, the library caches nothing.
    - Done: `fetch_certificate(host)` → `CertificateInfo` (pinnable fingerprint plus validity period, `None` dates
-     = unknown, never unlimited); `certificate_info(der)` reads certificate bytes already held.
+     = unknown, never unlimited); `certificate_info(der)` reads certificate bytes already held. `CertificateInfo`
+     also carries the `issuer` (RFC 4514 string) and the `authority_key_id` (lowercase hex) of the certificate;
+     `same_authority(first, second)` compares both literally and is `False` when either is unknown. The two
+     values are copied from the peer's certificate and are a rule, not a trust anchor (no signature check). A
+     certificate over 64 KiB keeps its validity dates, while issuer and authority key identifier stay `None`.
    - Done: the pictures a Doorstation stores (`doorstation_pictures.py`: `get_doorstation_pictures` →
      `DoorstationPicture` newest first, `get_doorstation_picture` through the file proxy, 4 MiB cap, 10 s). A
      file name comes from the device and ends up in a URL path, so only plain `.jpg` names pass
