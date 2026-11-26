@@ -543,6 +543,7 @@ def test_certificate_info_keeps_the_dates_when_the_extensions_cannot_be_read(
     monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate, error: Exception
 ) -> None:
     parsed = x509.load_der_x509_certificate(certificate.der)
+    reads: list[str] = []
 
     class _MalformedExtensions:
         not_valid_before_utc = parsed.not_valid_before_utc
@@ -551,12 +552,14 @@ def test_certificate_info_keeps_the_dates_when_the_extensions_cannot_be_read(
 
         @property
         def extensions(self) -> NoReturn:
+            reads.append("extensions")
             raise error
 
     monkeypatch.setattr(x509, "load_der_x509_certificate", lambda _data: _MalformedExtensions())
 
     info = certificate_info(certificate.der)
 
+    assert reads == ["extensions"]
     assert info == CertificateInfo(
         certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after, issuer=certificate.issuer
     )
@@ -575,14 +578,17 @@ def test_certificate_info_keeps_the_dates_when_the_authority_key_identifier_cann
     monkeypatch: pytest.MonkeyPatch, certificate: SelfSignedCertificate, error: Exception, in_lookup: bool
 ) -> None:
     parsed = x509.load_der_x509_certificate(certificate.der)
+    reads: list[str] = []
 
     class _Extension:
         @property
         def value(self) -> NoReturn:
+            reads.append("value")
             raise error
 
     class _Extensions:
         def get_extension_for_class(self, _cls: type) -> _Extension:
+            reads.append("lookup")
             if in_lookup:
                 raise error
             return _Extension()
@@ -597,6 +603,7 @@ def test_certificate_info_keeps_the_dates_when_the_authority_key_identifier_cann
 
     info = certificate_info(certificate.der)
 
+    assert reads == (["lookup"] if in_lookup else ["lookup", "value"])
     assert info == CertificateInfo(
         certificate.fingerprint, certificate.not_valid_before, certificate.not_valid_after, issuer=certificate.issuer
     )
@@ -607,6 +614,7 @@ def test_certificate_info_keeps_the_dates_when_the_issuer_warning_is_raised_as_e
 ) -> None:
     der = _certificate_signed_by(_ISSUER_CN, bytes.fromhex(_TEST_KEY_ID))
     parsed = x509.load_der_x509_certificate(der)
+    reads: list[str] = []
 
     class _WarnedIssuer:
         not_valid_before_utc = parsed.not_valid_before_utc
@@ -615,12 +623,14 @@ def test_certificate_info_keeps_the_dates_when_the_issuer_warning_is_raised_as_e
 
         @property
         def issuer(self) -> NoReturn:
+            reads.append("issuer")
             raise UserWarning("issuer warned about")
 
     monkeypatch.setattr(x509, "load_der_x509_certificate", lambda _data: _WarnedIssuer())
 
     info = certificate_info(der)
 
+    assert reads == ["issuer"]
     assert info == CertificateInfo(
         hashlib.sha256(der).hexdigest(),
         parsed.not_valid_before_utc,
@@ -670,7 +680,20 @@ def test_certificate_info_keeps_the_dates_but_not_the_issuer_of_a_certificate_ov
 ) -> None:
     # The limit is lowered below this certificate's size; the real one is far above any certificate.
     monkeypatch.setattr(aiocomexio.tls, "_MAX_PARSED_CERTIFICATE_BYTES", len(certificate.der) - 1)
+    # Reading the issuer or the authority key identifier is what parses the extensions: neither may be attempted.
+    attempts: list[str] = []
+
+    def _spy(name: str, real: Callable[..., object]) -> Callable[..., object]:
+        def _call(*args: object) -> object:
+            attempts.append(name)
+            return real(*args)
+
+        return _call
+
+    monkeypatch.setattr(aiocomexio.tls, "_issuer", _spy("issuer", aiocomexio.tls._issuer))
+    monkeypatch.setattr(aiocomexio.tls, "_authority_key_id", _spy("authority key id", aiocomexio.tls._authority_key_id))
     info = certificate_info(certificate.der)
+    assert not attempts
     _assert_dates_of(info, certificate.der)
     assert (info.issuer, info.authority_key_id) == (None, None)
     assert info.fingerprint == hashlib.sha256(certificate.der).hexdigest()
