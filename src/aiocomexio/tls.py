@@ -32,6 +32,7 @@ __all__ = [
     "format_fingerprint",
     "https_address",
     "normalize_fingerprint",
+    "same_authority",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +45,9 @@ _SHA256_HEX_LENGTH = 64
 # Separators people copy along with a fingerprint: Comexio shows "33:60:55:...", others use spaces or dashes.
 _FINGERPRINT_SEPARATORS_RE = re.compile(r"[\s:-]")
 _HEX_RE = re.compile(r"[0-9a-f]+", re.ASCII)
+# A certificate from the network is parsed only up to this size: a real one is a few KiB, and parsing every
+# extension of a huge one costs the caller CPU and memory after the handshake.
+_MAX_PARSED_CERTIFICATE_BYTES = 64 * 1024
 
 
 def normalize_fingerprint(value: str) -> str:
@@ -87,23 +91,40 @@ def https_address(host: str) -> tuple[str, int]:
 
 @dataclass(frozen=True, slots=True)
 class CertificateInfo:
-    """The certificate a host serves over HTTPS: its pinnable fingerprint and its validity period.
+    """The certificate a host serves over HTTPS: its pinnable fingerprint, its validity period and its issuer.
 
     fingerprint is the SHA-256 of the DER certificate (64 lowercase hex digits), the value ComexioClient
     pins. not_valid_before and not_valid_after are the certificate's dates as certificate_info reads them
     (timezone-aware, UTC), or both None when they cannot be read: the certificate does not parse as
     X.509, or cryptography warns about it and the process runs with warnings as errors ("-W error";
     the library leaves the warning filters alone, so even a parseable certificate then has no dates).
+    A certificate over 64 KiB keeps its dates, but its issuer and authority key identifier are None: reading them
+    parses every extension, which is what the size limit bounds.
     None means unknown, never unlimited: a caller must not read a missing date as a certificate that
     does not expire. The fingerprint is what the handshake presented either way and stays pinnable.
-    Constructing it with only one of the two dates, a date that is not timezone-aware UTC, or a
-    fingerprint in any other spelling than 64 lowercase hex digits raises ValueError, so a stored pin
-    is compared after normalize_fingerprint.
+
+    issuer is the issuer name as an RFC 4514 string (for example "CN=Comexio LAN CA"). authority_key_id
+    is the key identifier of the CA that signed the certificate, as lowercase hex without separators
+    (the Authority Key Identifier extension). Both are None when they cannot be read, which includes a
+    certificate that does not parse at all (the dates are then unknown too). authority_key_id is also None
+    when the certificate carries no key identifier, or when any other extension is malformed (cryptography
+    parses them all together; the debug log names the cause). None means unknown, not an empty value: two
+    certificates whose authority_key_id is None do not share an authority.
+    Both fields are copied from the certificate itself, so anyone can copy them into a certificate of
+    their own. Equal values say the fields match, not that the same CA signed both certificates.
+    same_authority compares two certificates on these fields and answers False whenever either one is unknown.
+
+    Constructing it with only one of the two dates, a date that is not timezone-aware UTC, a fingerprint in
+    any other spelling than 64 lowercase hex digits, an issuer that is not a string or is empty (None is the
+    unknown issuer), or an authority_key_id that is not lowercase hex with an even number of digits raises
+    ValueError, so a stored pin is compared after normalize_fingerprint.
     """
 
     fingerprint: str
     not_valid_before: datetime | None
     not_valid_after: datetime | None
+    issuer: str | None = None
+    authority_key_id: str | None = None
 
     def __post_init__(self) -> None:
         if (self.not_valid_before is None) != (self.not_valid_after is None):
@@ -113,21 +134,99 @@ class CertificateInfo:
                 raise ValueError(f"{date!r} is not a timezone-aware UTC date")
         if normalize_fingerprint(self.fingerprint) != self.fingerprint:
             raise ValueError(f"{self.fingerprint!r} is not a fingerprint in 64 lowercase hex digits")
+        # A non-string issuer would compare equal to an equal non-string one in same_authority.
+        if self.issuer is not None and not isinstance(self.issuer, str):
+            raise ValueError(f"{self.issuer!r} is not an issuer name; None means an unknown issuer")
+        # certificate_info maps an empty issuer to None; a stored "" would compare equal to another empty one.
+        if self.issuer == "":
+            raise ValueError("issuer is an empty string; None means an unknown issuer")
+        # Checked before the regex: fullmatch raises TypeError for a value that is not a string.
+        if self.authority_key_id is not None and (
+            not isinstance(self.authority_key_id, str)
+            or _HEX_RE.fullmatch(self.authority_key_id) is None
+            or len(self.authority_key_id) % 2
+        ):
+            raise ValueError(f"{self.authority_key_id!r} is not an authority key identifier in lowercase hex digits")
 
 
-def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError | Warning | None]:
+def same_authority(first: CertificateInfo, second: CertificateInfo) -> bool:
+    """Whether both certificates name the same issuer and authority key identifier, as far as both are known.
+
+    False when either certificate has an unknown issuer or authority key identifier: two unknowns do not
+    make a match. A True answer is only as strong as the copied fields (see CertificateInfo), so it is a
+    rule for a caller to apply, not proof that the same CA signed both.
+    The issuers are compared literally, as RFC 4514 strings: names that X.500 matching would treat as equal but
+    that render differently (for example in case) count as different. That is a false no-match, which leaves the
+    change to the manual path, never a false match.
+    """
+    if first.issuer is None or first.authority_key_id is None:
+        return False
+    return first.issuer == second.issuer and first.authority_key_id == second.authority_key_id
+
+
+def _issuer(parsed: x509.Certificate, fingerprint: str) -> str | None:
+    """The issuer of parsed as an RFC 4514 string; None when it cannot be read or is empty."""
+    try:
+        # An empty name (no attributes at all) is no issuer to compare: None, so it never equals another empty one.
+        return parsed.issuer.rfc4514_string() or None
+    # ValueError: an issuer cryptography cannot decode, e.g. invalid UTF-8. TypeError: a BitString attribute under an
+    # OID other than X500_UNIQUE_IDENTIFIER. Warning: one warned about under "-W error".
+    except (TypeError, ValueError, Warning) as err:
+        _LOGGER.debug("Certificate %s: issuer cannot be read: %r", format_fingerprint(fingerprint), err)
+        return None
+
+
+def _authority_key_id(parsed: x509.Certificate, fingerprint: str) -> str | None:
+    """The key identifier of the CA that signed parsed, as lowercase hex; None when it has none or cannot be read."""
+    try:
+        extension = parsed.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
+        key_id = extension.value.key_identifier
+    # Silent on purpose: a certificate without an Authority Key Identifier is the normal case, not a failure.
+    except x509.ExtensionNotFound:
+        return None
+    # DuplicateExtension, UnsupportedGeneralNameType: the extension is malformed. ValueError, Warning: the same
+    # when cryptography raises one, or warns about it under "-W error". parsed.extensions parses all extensions
+    # at once, so one malformed extension of any kind lands here too.
+    except (x509.DuplicateExtension, x509.UnsupportedGeneralNameType, ValueError, Warning) as err:
+        _LOGGER.debug(
+            "Certificate %s: authority key identifier cannot be read: %r", format_fingerprint(fingerprint), err
+        )
+        return None
+    # An empty key identifier is no identifier: CertificateInfo refuses it, so it counts as none.
+    return key_id.hex() if key_id else None
+
+
+def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError | Warning | x509.InvalidVersion | None]:
     """certificate_info and, when the dates cannot be read, why not (None when they can)."""
     fingerprint = hashlib.sha256(certificate).hexdigest()
     # cryptography warns about odd but readable certificates (a negative serial number). The warning
     # goes out as it is: changing the warning filters here would change them for every thread of the
     # process. Under "-W error" it is raised instead and the validity counts as unknown, with the cause.
+    oversized = len(certificate) > _MAX_PARSED_CERTIFICATE_BYTES
     try:
         parsed = x509.load_der_x509_certificate(certificate)
         not_valid_before, not_valid_after = parsed.not_valid_before_utc, parsed.not_valid_after_utc
-    # ValueError: anything cryptography cannot parse. Warning: a warning raised as an error.
-    except (ValueError, Warning) as err:
+    # ValueError: anything cryptography cannot parse. InvalidVersion: a version field outside the X.509 versions,
+    # an Exception but no ValueError. Warning: a warning raised as an error.
+    except (ValueError, Warning, x509.InvalidVersion) as err:
         return CertificateInfo(fingerprint, None, None), err
-    return CertificateInfo(fingerprint, not_valid_before, not_valid_after), None
+    if oversized:
+        # The dates come from the certificate's fixed fields; the issuer and the key identifier need every extension
+        # parsed, which is the cost the limit is there for.
+        _LOGGER.debug(
+            "Certificate %s: larger than %d bytes, issuer and authority key identifier not read",
+            format_fingerprint(fingerprint),
+            _MAX_PARSED_CERTIFICATE_BYTES,
+        )
+        return CertificateInfo(fingerprint, not_valid_before, not_valid_after), None
+    info = CertificateInfo(
+        fingerprint,
+        not_valid_before,
+        not_valid_after,
+        issuer=_issuer(parsed, fingerprint),
+        authority_key_id=_authority_key_id(parsed, fingerprint),
+    )
+    return info, None
 
 
 def certificate_info(certificate: bytes) -> CertificateInfo:
