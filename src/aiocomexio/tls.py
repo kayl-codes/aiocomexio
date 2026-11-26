@@ -135,8 +135,11 @@ class CertificateInfo:
         # certificate_info maps an empty issuer to None; a stored "" would compare equal to another empty one.
         if self.issuer == "":
             raise ValueError("issuer is an empty string; None means an unknown issuer")
+        # Checked before the regex: fullmatch raises TypeError for a value that is not a string.
         if self.authority_key_id is not None and (
-            _HEX_RE.fullmatch(self.authority_key_id) is None or len(self.authority_key_id) % 2
+            not isinstance(self.authority_key_id, str)
+            or _HEX_RE.fullmatch(self.authority_key_id) is None
+            or len(self.authority_key_id) % 2
         ):
             raise ValueError(f"{self.authority_key_id!r} is not an authority key identifier in lowercase hex digits")
 

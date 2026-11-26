@@ -741,6 +741,16 @@ def test_certificate_info_refuses_an_issuer_that_is_not_a_string(issuer: Any) ->
         CertificateInfo(FOREIGN_FINGERPRINT, None, None, issuer=issuer)
 
 
+@pytest.mark.parametrize(
+    "key_id",
+    [42, b"b1f0c3a7", ("b1f0c3a7",)],
+    ids=["int", "bytes", "tuple"],
+)
+def test_certificate_info_refuses_an_authority_key_identifier_that_is_not_a_string(key_id: Any) -> None:
+    with pytest.raises(ValueError, match=r"is not an authority key identifier in lowercase hex digits$"):
+        CertificateInfo(FOREIGN_FINGERPRINT, None, None, authority_key_id=key_id)
+
+
 def _authority(issuer: str | None, authority_key_id: str | None) -> CertificateInfo:
     return CertificateInfo(FOREIGN_FINGERPRINT, None, None, issuer=issuer, authority_key_id=authority_key_id)
 
