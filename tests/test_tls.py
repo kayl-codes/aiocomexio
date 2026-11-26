@@ -665,14 +665,22 @@ def test_certificate_info_keeps_the_dates_and_the_authority_key_identifier_when_
     ]
 
 
-def test_certificate_info_does_not_parse_a_certificate_over_the_size_limit(
+def test_certificate_info_keeps_the_dates_but_not_the_issuer_of_a_certificate_over_the_size_limit(
     certificate: SelfSignedCertificate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The limit is lowered below this certificate's size; the real one is far above any certificate.
     monkeypatch.setattr(aiocomexio.tls, "_MAX_PARSED_CERTIFICATE_BYTES", len(certificate.der) - 1)
     info = certificate_info(certificate.der)
-    assert (info.not_valid_before, info.not_valid_after, info.issuer, info.authority_key_id) == (None, None, None, None)
+    _assert_dates_of(info, certificate.der)
+    assert (info.issuer, info.authority_key_id) == (None, None)
     assert info.fingerprint == hashlib.sha256(certificate.der).hexdigest()
+
+
+def test_same_authority_compares_the_issuer_text_literally() -> None:
+    # Names that differ only in case are different as RFC 4514 strings: a false no-match, never a false match.
+    first = _authority("CN=Comexio LAN CA", _TEST_KEY_ID)
+    second = _authority("CN=COMEXIO LAN CA", _TEST_KEY_ID)
+    assert same_authority(first, second) is False
 
 
 def test_certificate_info_keeps_the_dates_when_an_issuer_attribute_has_the_wrong_type() -> None:

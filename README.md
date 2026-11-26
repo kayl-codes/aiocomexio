@@ -111,8 +111,8 @@ digits, so compare it with `normalize_fingerprint(pin)` when the pin may be spel
 with colons). A certificate whose dates cannot be read keeps its fingerprint and gets `None` for both
 dates (never read `None` as "does not expire"). That is the case for a certificate that does not parse as
 X.509, and also for one that `cryptography` only warns about when the process runs with warnings as errors
-(`-W error`): the library leaves the warning filters alone. A certificate over 64 KiB is not parsed at all, so
-its dates, issuer and authority key identifier are `None`. `issuer` and `authority_key_id` are `None`
+(`-W error`): the library leaves the warning filters alone. A certificate over 64 KiB keeps its dates, but its
+issuer and authority key identifier are `None`, because reading them parses every extension. `issuer` and `authority_key_id` are `None`
 when they cannot be read, `authority_key_id` also when the certificate has no key identifier, and both are
 `None` when the certificate does not parse at all (the dates are unknown then too); `None` is unknown, not a
 value two certificates share. Both fields are copied from the certificate itself, so

@@ -98,7 +98,8 @@ class CertificateInfo:
     (timezone-aware, UTC), or both None when they cannot be read: the certificate does not parse as
     X.509, or cryptography warns about it and the process runs with warnings as errors ("-W error";
     the library leaves the warning filters alone, so even a parseable certificate then has no dates).
-    A certificate over 64 KiB is not parsed at all, so it has no dates, issuer or authority key identifier.
+    A certificate over 64 KiB keeps its dates, but its issuer and authority key identifier are None: reading them
+    parses every extension, which is what the size limit bounds.
     None means unknown, never unlimited: a caller must not read a missing date as a certificate that
     does not expire. The fingerprint is what the handshake presented either way and stays pinnable.
 
@@ -154,6 +155,9 @@ def same_authority(first: CertificateInfo, second: CertificateInfo) -> bool:
     False when either certificate has an unknown issuer or authority key identifier: two unknowns do not
     make a match. A True answer is only as strong as the copied fields (see CertificateInfo), so it is a
     rule for a caller to apply, not proof that the same CA signed both.
+    The issuers are compared literally, as RFC 4514 strings: names that X.500 matching would treat as equal but
+    that render differently (for example in case) count as different. That is a false no-match, which leaves the
+    change to the manual path, never a false match.
     """
     if first.issuer is None or first.authority_key_id is None:
         return False
@@ -198,10 +202,7 @@ def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError |
     # cryptography warns about odd but readable certificates (a negative serial number). The warning
     # goes out as it is: changing the warning filters here would change them for every thread of the
     # process. Under "-W error" it is raised instead and the validity counts as unknown, with the cause.
-    if len(certificate) > _MAX_PARSED_CERTIFICATE_BYTES:
-        return CertificateInfo(fingerprint, None, None), ValueError(
-            f"larger than {_MAX_PARSED_CERTIFICATE_BYTES} bytes, not parsed"
-        )
+    oversized = len(certificate) > _MAX_PARSED_CERTIFICATE_BYTES
     try:
         parsed = x509.load_der_x509_certificate(certificate)
         not_valid_before, not_valid_after = parsed.not_valid_before_utc, parsed.not_valid_after_utc
@@ -209,6 +210,15 @@ def _read_certificate(certificate: bytes) -> tuple[CertificateInfo, ValueError |
     # an Exception but no ValueError. Warning: a warning raised as an error.
     except (ValueError, Warning, x509.InvalidVersion) as err:
         return CertificateInfo(fingerprint, None, None), err
+    if oversized:
+        # The dates come from the certificate's fixed fields; the issuer and the key identifier need every extension
+        # parsed, which is the cost the limit is there for.
+        _LOGGER.debug(
+            "Certificate %s: larger than %d bytes, issuer and authority key identifier not read",
+            format_fingerprint(fingerprint),
+            _MAX_PARSED_CERTIFICATE_BYTES,
+        )
+        return CertificateInfo(fingerprint, not_valid_before, not_valid_after), None
     info = CertificateInfo(
         fingerprint,
         not_valid_before,
