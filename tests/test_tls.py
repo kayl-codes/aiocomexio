@@ -34,6 +34,7 @@ from aiocomexio import (
     fetch_certificate_fingerprint,
     format_fingerprint,
     normalize_fingerprint,
+    same_authority,
     session_kwargs,
 )
 from aiocomexio.client import _origin, _same_origin_or_https
@@ -728,6 +729,47 @@ def test_certificate_info_refuses_an_authority_key_identifier_in_another_spellin
 def test_certificate_info_refuses_an_empty_issuer() -> None:
     with pytest.raises(ValueError, match=r"^issuer is an empty string; None means an unknown issuer$"):
         CertificateInfo(FOREIGN_FINGERPRINT, None, None, issuer="")
+
+
+def _authority(issuer: str | None, authority_key_id: str | None) -> CertificateInfo:
+    return CertificateInfo(FOREIGN_FINGERPRINT, None, None, issuer=issuer, authority_key_id=authority_key_id)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (_authority(None, None), _authority(None, None)),
+        (_authority(_ISSUER_RFC4514, None), _authority(_ISSUER_RFC4514, None)),
+        (_authority(None, _TEST_KEY_ID), _authority(None, _TEST_KEY_ID)),
+        (_authority(_ISSUER_RFC4514, _TEST_KEY_ID), _authority(None, _TEST_KEY_ID)),
+        (_authority(_ISSUER_RFC4514, _TEST_KEY_ID), _authority(_ISSUER_RFC4514, None)),
+        (_authority(_ISSUER_RFC4514, _TEST_KEY_ID), _authority(None, None)),
+        (_authority(None, _TEST_KEY_ID), _authority(_ISSUER_RFC4514, _TEST_KEY_ID)),
+        (_authority(_ISSUER_RFC4514, _TEST_KEY_ID), _authority("CN=Other CA", _TEST_KEY_ID)),
+        (_authority(_ISSUER_RFC4514, _TEST_KEY_ID), _authority(_ISSUER_RFC4514, "00" * 20)),
+    ],
+    ids=[
+        "both unknown",
+        "authority key identifier unknown on both sides",
+        "issuer unknown on both sides",
+        "second issuer unknown",
+        "second authority key identifier unknown",
+        "second unknown",
+        "first issuer unknown",
+        "other issuer",
+        "other authority key identifier",
+    ],
+)
+def test_same_authority_is_false_unless_both_fields_are_known_and_equal(
+    first: CertificateInfo, second: CertificateInfo
+) -> None:
+    assert same_authority(first, second) is False
+
+
+def test_same_authority_is_true_for_equal_known_fields() -> None:
+    first = _authority(_ISSUER_RFC4514, _TEST_KEY_ID)
+    second = _authority(_ISSUER_RFC4514, _TEST_KEY_ID)
+    assert same_authority(first, second) is True
 
 
 @pytest.mark.parametrize(

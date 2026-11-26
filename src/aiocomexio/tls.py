@@ -32,6 +32,7 @@ __all__ = [
     "format_fingerprint",
     "https_address",
     "normalize_fingerprint",
+    "same_authority",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -106,6 +107,7 @@ class CertificateInfo:
     certificates whose authority_key_id is None do not share an authority.
     Both fields are copied from the certificate itself, so anyone can copy them into a certificate of
     their own. Equal values say the fields match, not that the same CA signed both certificates.
+    same_authority compares two certificates on these fields and answers False whenever either one is unknown.
 
     Constructing it with only one of the two dates, a date that is not timezone-aware UTC, a fingerprint in
     any other spelling than 64 lowercase hex digits, an empty issuer (None is the unknown issuer), or an
@@ -134,6 +136,18 @@ class CertificateInfo:
             _HEX_RE.fullmatch(self.authority_key_id) is None or len(self.authority_key_id) % 2
         ):
             raise ValueError(f"{self.authority_key_id!r} is not an authority key identifier in lowercase hex digits")
+
+
+def same_authority(first: CertificateInfo, second: CertificateInfo) -> bool:
+    """Whether both certificates name the same issuer and authority key identifier, as far as both are known.
+
+    False when either certificate has an unknown issuer or authority key identifier: two unknowns do not
+    make a match. A True answer is only as strong as the copied fields (see CertificateInfo), so it is a
+    rule for a caller to apply, not proof that the same CA signed both.
+    """
+    if first.issuer is None or first.authority_key_id is None:
+        return False
+    return first.issuer == second.issuer and first.authority_key_id == second.authority_key_id
 
 
 def _issuer(parsed: x509.Certificate, fingerprint: str) -> str | None:

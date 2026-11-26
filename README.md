@@ -115,7 +115,9 @@ X.509, and also for one that `cryptography` only warns about when the process ru
 when they cannot be read, `authority_key_id` also when the certificate has no key identifier, and both are
 `None` when the certificate does not parse at all (the dates are unknown then too); `None` is unknown, not a
 value two certificates share. Both fields are copied from the certificate itself, so
-equal values show a match, not that the same CA signed both certificates.
+equal values show a match, not that the same CA signed both certificates. To compare two of them,
+use `same_authority(first, second)`: it returns `True` only when both certificates have a known issuer
+and a known authority key identifier and the two are equal, and `False` whenever either side is unknown.
 `certificate_info(der)` does the same for certificate bytes you already hold. Why the dates are
 missing is logged by `fetch_certificate` as a warning on every call; `certificate_info` logs the cause
 at DEBUG only, so a caller of it that wants to know checks for `None` itself.

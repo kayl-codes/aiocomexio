@@ -58,6 +58,7 @@ from .tls import (
     fetch_certificate_fingerprint,
     format_fingerprint,
     normalize_fingerprint,
+    same_authority,
 )
 
 __version__ = version("aiocomexio")
@@ -114,5 +115,6 @@ __all__ = [
     "is_local_address",
     "normalize_fingerprint",
     "progress_trace_config",
+    "same_authority",
     "session_kwargs",
 ]
